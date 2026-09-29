@@ -1,4 +1,10 @@
 /**
+ * V959 BLOCKSCOUT USAGE COMMAND RESILIENCE FIX:
+ * - preserves all V958 routing, caching, verification, scoring and Telegram behavior;
+ * - fixes /blockscoutusage hanging when the separate V3 fallback-meter Durable Object read stalls;
+ * - adds a bounded 1.5s read timeout and returns the main V611 meter immediately with V3 fallback marked temporarily unavailable;
+ * - read-only diagnostic behavior remains zero provider requests and zero state writes.
+ *
  * V958 BLOCKSCOUT CREDIT-EFFICIENCY PASS:
  * - preserves V957 as the rollback baseline and preserves all verification/scoring/Telegram thresholds;
  * - reuses verified holder intelligence for up to 30 minutes ONLY for non-priority/background analysis, while the existing 20-minute Telegram strong-confirmation freshness ceiling remains unchanged;
@@ -8408,7 +8414,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V958";
+const VERSION = "V959";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -21739,39 +21745,51 @@ function blockscoutProUsageSnapshotV611(state){
   };
 }
 
+const V3_BLOCKSCOUT_FALLBACK_METER_READ_TIMEOUT_MS_V959 = 1500;
+
 async function v3BlockscoutFallbackMeterSnapshotFromDoV615(env){
   const ns=env?.[V3_LIVE_DO_BINDING_V363];
+  const unavailableV959=(status,error=null)=>({
+    version:VERSION,
+    status,
+    available:false,
+    requests:0,
+    creditsUsed:0,
+    dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+    remainingCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+    readTimeoutMs:V3_BLOCKSCOUT_FALLBACK_METER_READ_TIMEOUT_MS_V959,
+    error:error?String(error).slice(0,220):null
+  });
+
   if(!ns || typeof ns.idFromName!=="function" || typeof ns.get!=="function"){
-    return {
-      version:VERSION,
-      status:"V3_FALLBACK_METER_BINDING_UNAVAILABLE_V615",
-      available:false,
-      requests:0,
-      creditsUsed:0,
-      dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
-      remainingCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615
-    };
+    return unavailableV959("V3_FALLBACK_METER_BINDING_UNAVAILABLE_V615");
   }
 
   try{
     const stub=ns.get(ns.idFromName(V3_BLOCKSCOUT_FALLBACK_METER_NAME_V615));
-    const response=await stub.fetch("https://v3-live.internal/blockscout-fallback-meter-v615");
-    const body=await response.json().catch(()=>({}));
-    return {
-      available:response.ok,
-      ...body
-    };
+    const readPromise=(async()=>{
+      const response=await stub.fetch("https://v3-live.internal/blockscout-fallback-meter-v615");
+      const body=await response.json().catch(()=>({}));
+      return {
+        available:response.ok,
+        ...body,
+        readTimeoutMs:V3_BLOCKSCOUT_FALLBACK_METER_READ_TIMEOUT_MS_V959
+      };
+    })();
+
+    const timeoutPromise=new Promise(resolve=>{
+      setTimeout(
+        ()=>resolve(unavailableV959("V3_FALLBACK_METER_READ_TIMEOUT_V959")),
+        V3_BLOCKSCOUT_FALLBACK_METER_READ_TIMEOUT_MS_V959
+      );
+    });
+
+    return await Promise.race([readPromise,timeoutPromise]);
   }catch(error){
-    return {
-      version:VERSION,
-      status:"V3_FALLBACK_METER_READ_FAILED_V615",
-      available:false,
-      requests:0,
-      creditsUsed:0,
-      dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
-      remainingCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
-      error:String(error?.message||error).slice(0,220)
-    };
+    return unavailableV959(
+      "V3_FALLBACK_METER_READ_FAILED_V615",
+      error?.message||error
+    );
   }
 }
 
@@ -21866,8 +21884,8 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
     "",
     `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
     `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
-    `V958 accounting/routing: <b>V841 METERED + VALIDATION CLOUD FIRST FOR V3 + V551 ELIGIBLE LOG RANGES</b>`,
-    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V958 preserves V957/V955 routing, moves eligible <=2,000-block V551 exact-pool log ranges to Validation Cloud before Blockscout fallback, and reuses already-verified holder evidence for background analysis up to 30 minutes while keeping the prior 20-minute Telegram freshness ceiling unchanged. Older usage cannot be backfilled. /blockscoutusage is read-only.</i>"
+    `V959 accounting/routing: <b>V958 CREDIT SAVINGS + NON-BLOCKING V3 FALLBACK-METER READ</b>`,
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V959 preserves every V958 credit-saving and verification rule and adds only a bounded internal read for the separate V3 fallback meter so /blockscoutusage cannot hang indefinitely. If that internal meter is temporarily unavailable, the main Blockscout meter still replies and the fallback section is marked unavailable. Older usage cannot be backfilled. /blockscoutusage is read-only.</i>"
   );
 
   return lines.join("\n");
