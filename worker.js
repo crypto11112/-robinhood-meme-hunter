@@ -10222,7 +10222,8 @@ async function blockscoutExactHistoricalInitializeV448(
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           headers: {
@@ -21789,6 +21790,69 @@ function recordBlockscoutRpcAuditV960(state,method,callsite,credits=BLOCKSCOUT_P
   return root;
 }
 
+
+/* V962 transport-layer audit: diagnostic only. */
+function ensureBlockscoutTransportAuditV962(state){
+  if(!state || typeof state!=="object") return null;
+  const day=utcDayKeyV611();
+  const cur=state.blockscoutTransportAuditV962;
+  if(!cur || cur.utcDay!==day){
+    state.blockscoutTransportAuditV962={utcDay:day,startedAt:Date.now(),requests:0,estimatedCredits:0,byHost:{},byRoute:{},byCallsite:{},byRpcMethod:{},lastRequestAt:null};
+  }
+  return state.blockscoutTransportAuditV962;
+}
+function blockscoutTransportCreditEstimateV962(url){
+  const u=String(url||"").toLowerCase();
+  if(u.includes('/raw-trace')) return 50;
+  if(u.includes('/internal-transactions')) return 40;
+  if(u.includes('/logs') || u.includes('/token-transfers') || u.includes('/transfers')) return 30;
+  if(u.includes('/advanced-filters')) return 50;
+  return 20;
+}
+function blockscoutTransportRouteV962(url){
+  try{
+    const u=new URL(String(url)); const p=u.pathname.toLowerCase(); const q=u.searchParams;
+    if(p.endsWith('/json-rpc')) return 'api/eth-rpc';
+    if(/\/api\/v2\/tokens\/[^/]+\/holders$/.test(p)) return 'api/v2/tokens/:address_hash/holders';
+    if(/\/api\/v2\/tokens\/[^/]+\/counters$/.test(p)) return 'api/v2/tokens/:address_hash/counters';
+    if(String(q.get('action')||'').toLowerCase()==='getlogs') return 'api?action=getLogs&module=logs';
+    if(p.includes('/raw-trace')) return 'api/v2/transactions/:hash/raw-trace';
+    if(p.includes('/internal-transactions')) return p.includes('/transactions/')?'api/v2/transactions/:hash/internal-transactions':'api/v2/addresses/:address_hash/internal-transactions';
+    if(p.includes('/addresses/') && p.endsWith('/logs')) return 'api/v2/addresses/:address_hash/logs';
+    if(p.includes('/addresses/') && p.endsWith('/transactions')) return 'api/v2/addresses/:address_hash/transactions';
+    if(p.includes('/transactions/')) return 'api/v2/transactions/:hash';
+    if(p.includes('/addresses/')) return 'api/v2/addresses/:address_hash';
+    return p||'UNKNOWN_ROUTE';
+  }catch(_){return 'INVALID_URL';}
+}
+function blockscoutRpcMethodFromInitV962(init){
+  try{ if(!init || init.body==null) return null; const body=typeof init.body==='string'?JSON.parse(init.body):init.body; return typeof body?.method==='string'?body.method:null; }catch(_){ return null; }
+}
+async function blockscoutTransportFetchV962(state,url,init,callsite='UNKNOWN_V962'){
+  const raw=String(url?.url||url||''); let host='UNKNOWN'; let isBlockscout=false;
+  try{ const u=new URL(raw); host=u.hostname.toLowerCase(); isBlockscout=host==='api.blockscout.com'||host.endsWith('.blockscout.com'); }catch(_){}
+  if(isBlockscout){
+    const root=ensureBlockscoutTransportAuditV962(state);
+    if(root){
+      const route=blockscoutTransportRouteV962(raw); const rpcMethod=blockscoutRpcMethodFromInitV962(init); const credits=blockscoutTransportCreditEstimateV962(raw);
+      root.requests=safeNumber(root.requests)+1; root.estimatedCredits=safeNumber(root.estimatedCredits)+credits;
+      root.byHost[host]=safeNumber(root.byHost[host])+1; root.byRoute[route]=safeNumber(root.byRoute[route])+1; root.byCallsite[callsite]=safeNumber(root.byCallsite[callsite])+1;
+      if(rpcMethod) root.byRpcMethod[rpcMethod]=safeNumber(root.byRpcMethod[rpcMethod])+1; root.lastRequestAt=Date.now();
+    }
+  }
+  return fetch(url,init);
+}
+function blockscoutTransportAuditSnapshotV962(state){
+  const day=utcDayKeyV611();
+  const raw=state?.blockscoutTransportAuditV962?.utcDay===day?state.blockscoutTransportAuditV962:{utcDay:day,startedAt:null,requests:0,estimatedCredits:0,byHost:{},byRoute:{},byCallsite:{},byRpcMethod:{},lastRequestAt:null};
+  const top=o=>Object.entries(o||{}).sort((a,b)=>safeNumber(b[1])-safeNumber(a[1])).slice(0,12);
+  return {utcDay:raw.utcDay,startedAt:raw.startedAt||null,requests:safeNumber(raw.requests),estimatedCredits:safeNumber(raw.estimatedCredits),byHost:top(raw.byHost),byRoute:top(raw.byRoute),byCallsite:top(raw.byCallsite),byRpcMethod:top(raw.byRpcMethod),lastRequestAt:raw.lastRequestAt||null};
+}
+function blockscoutTransportAuditTelegramV962(state){
+  const r=blockscoutTransportAuditSnapshotV962(state); const fmt=(rows,empty)=>rows.length?rows.map(([k,v])=>`• <code>${escapeHtml(String(k))}</code> — <b>${safeNumber(v)}</b>`).join("\n"):`• ${empty}`;
+  return ['🧪 <b>Blockscout Transport Audit — V962</b>','',`Forward-only transport requests: <b>${r.requests}</b>`,`Estimated transport credits: <b>${r.estimatedCredits}</b>`,'','🌐 <b>By Blockscout route</b>',fmt(r.byRoute,'No V962 Blockscout transport request captured yet.'),'','🧭 <b>By exact call site</b>',fmt(r.byCallsite,'No V962 call site captured yet.'),'','🔌 <b>JSON-RPC methods seen at transport</b>',fmt(r.byRpcMethod,'No JSON-RPC method captured yet.'),'','<i>Diagnostic only. V962 counts before fetch; provider routing, verification, scoring, risk, qualification and Telegram thresholds are unchanged.</i>'].join("\n");
+}
+
 function blockscoutRpcAuditSnapshotV960(state){
   const day=utcDayKeyV611();
   const raw=state?.blockscoutRpcAuditV960?.utcDay===day ? state.blockscoutRpcAuditV960 : {utcDay:day,startedAt:null,requests:0,estimatedCredits:0,byMethod:{},byCallsite:{}};
@@ -31248,7 +31312,8 @@ async function blockscoutWideInitializeForPoolV184(
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           headers: {
@@ -37187,7 +37252,8 @@ async function rpcCall(
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method:
@@ -39039,7 +39105,7 @@ async function runTargetedFlapHistoricalProofV541({env,state,budget,row,root}){
   try{
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;
     recordBlockscoutProUsageV611(state,"V541_FLAP_TARGETED_LOGS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
-    try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}
+    try{response=await blockscoutTransportFetchV962(state,url,{headers:{accept:"application/json"},signal:controller.signal},"HISTORICAL_BLOCKSCOUT_MAIN");}finally{clearTimeout(timer);}
     updateBlockscoutProHttpStatusV611(state,"V541_FLAP_TARGETED_LOGS",response.status);
     row.lastHttpStatus=response.status;
     if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V541_FLAP_TARGETED_HTTP_${response.status}_RETRYABLE`;root.lastStatus=row.status;return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",httpStatus:response.status,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,status:row.status};}
@@ -39313,7 +39379,7 @@ async function runSeededHistoricalProofV529({env,state,budget}){
   if(!url){row.lastError="BLOCKSCOUT_PRO_NOT_CONFIGURED";row.lastHttpStatus=null;row.status="V533_HISTORICAL_BLOCKSCOUT_PRO_NOT_CONFIGURED";root.lastStatus=row.status;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:false,status:row.status};}
   const spare=consumeResidualHistoricalProofRequestV532(budget,"SEEDED_HISTORICAL_ADDRESS_LOGS_V533",1);if(spare?.ok!==true){root.lastStatus=`V533_HISTORICAL_RESIDUAL_DEFERRED:${spare?.reason||"UNKNOWN"}`;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:root.lastStatus};}
   row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey=chosen.key;
-  try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;recordBlockscoutProUsageV611(state,"V533_HISTORICAL_ADDRESS_LOGS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}updateBlockscoutProHttpStatusV611(state,"V533_HISTORICAL_ADDRESS_LOGS",response.status);row.lastHttpStatus=response.status;
+  try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;recordBlockscoutProUsageV611(state,"V533_HISTORICAL_ADDRESS_LOGS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);try{response=await blockscoutTransportFetchV962(state,url,{headers:{accept:"application/json"},signal:controller.signal},"HISTORICAL_BLOCKSCOUT_MAIN");}finally{clearTimeout(timer);}updateBlockscoutProHttpStatusV611(state,"V533_HISTORICAL_ADDRESS_LOGS",response.status);row.lastHttpStatus=response.status;
     if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:row.status};}
     const payload=await response.json(),items=Array.isArray(payload?.items)?payload.items:[];row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.pagesObserved=safeNumber(row.pagesObserved)+1;row.lastSuccessAt=Date.now();row.lastError=null;let exactMint=0;
     for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,topic2:topics[2]||null,topic3:topics[3]||null,rawData:String(log?.data||log?.raw?.data||log?.raw_data||"")||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
@@ -40650,7 +40716,8 @@ async function fetchBlockscoutBacklogTopicV248(
       BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
     );
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`,
         {
           method:
@@ -49252,7 +49319,8 @@ async function blockscoutV4UsdGDirectionalV180(
       "REQUESTING";
 
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           headers: {
@@ -65217,7 +65285,8 @@ async function blockscoutLegacyHolders(
       `${BLOCKSCOUT}/api?module=token&action=getTokenHolders&contractaddress=${token}&page=1&offset=10`;
 
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           headers: {
@@ -66191,7 +66260,8 @@ async function blockscoutProHoldersV143(
     );
 
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           headers: {
@@ -67483,7 +67553,8 @@ async function blockscoutProCountersV247(
     );
 
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           headers: {
@@ -128806,7 +128877,7 @@ async function manualBlockscoutProTokenIndexedV4V841(env,budget,state,watched,ca
         usageEndpointV954,
         BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
       );
-      const response=await fetch(`${BLOCKSCOUT_PRO}/v2/api?${params.toString()}`,{headers:{accept:"application/json"}});
+      const response=await blockscoutTransportFetchV962(state,`${BLOCKSCOUT_PRO}/v2/api?${params.toString()}`,{headers:{accept:"application/json"}},"V841_TOKEN_INDEXED_V4");
       updateBlockscoutProHttpStatusV611(state,usageEndpointV954,response.status);
       base.httpStatuses.push(`${label}:${response.status}`);
       let payload=null;try{payload=await response.json();}catch(_){}
@@ -131828,7 +131899,7 @@ async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
   out.attempted=true; out.requestsUsed++;
   recordBlockscoutProUsageV611(state,"V619_MANUAL_GETCONTRACTCREATION",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
   let r1;
-  try{r1=await fetch(creationUrl,{headers:{accept:"application/json"}});}
+  try{r1=await blockscoutTransportFetchV962(state,creationUrl,{headers:{accept:"application/json"}},"V619_MANUAL_GETCONTRACTCREATION");}
   catch(error){out.status=`GETCONTRACTCREATION_FETCH_ERROR_V619:${errorString(error)}`;return out;}
   updateBlockscoutProHttpStatusV611(state,"V619_MANUAL_GETCONTRACTCREATION",r1.status);
   if(!r1.ok){out.status=`GETCONTRACTCREATION_HTTP_${r1.status}_V619`;return out;}
@@ -131861,7 +131932,7 @@ async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
   out.requestsUsed++;
   recordBlockscoutProUsageV611(state,"V619_MANUAL_CREATION_TX_DETAILS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
   let r2;
-  try{r2=await fetch(txUrl,{headers:{accept:"application/json"}});}
+  try{r2=await blockscoutTransportFetchV962(state,txUrl,{headers:{accept:"application/json"}},"V619_MANUAL_CREATION_TX_DETAILS");}
   catch(error){out.status=`CREATION_TX_FETCH_ERROR_V619:${errorString(error)}`;return out;}
   updateBlockscoutProHttpStatusV611(state,"V619_MANUAL_CREATION_TX_DETAILS",r2.status);
   if(!r2.ok){out.status=`CREATION_TX_HTTP_${r2.status}_V619`;return out;}
@@ -147499,7 +147570,8 @@ async function runUnknownLaunchMechanismFingerprintV483({
       "V483_UNKNOWN_LAUNCH_TX_FINGERPRINT",
       BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
     );
-    const response = await fetch(
+    const response = await blockscoutTransportFetchV962(
+      state,
       url,
       {
         method: "GET",
@@ -147965,7 +148037,8 @@ async function runExactPonsV2LaunchDiagnosticV482({
       BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
     );
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -148324,7 +148397,8 @@ async function runBlockscoutProOriginDiagnosticV481({
       BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
     );
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -149140,7 +149214,8 @@ async function runExactCreationMechanismAttributionV485({
       BLOCKSCOUT_PRO_HEAVY_CREDITS_V611
     );
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -154787,7 +154862,8 @@ async function runRecurringLaunchMechanismV494({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -155868,7 +155944,8 @@ async function runLaunchTriggerTargetIdentityV493({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -156810,7 +156887,8 @@ async function runExactCreationTriggerLinkageV492({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -157938,7 +158016,8 @@ async function runRecurringCreatorAttributionV503({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -159139,7 +159218,8 @@ async function runDeploymentSourceMechanismFingerprintV491({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -160029,7 +160109,8 @@ async function runDeploymentSourceIdentityProbeV490({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -160969,7 +161050,8 @@ async function runBlockscoutInternalCreationAttributionV489({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -161891,7 +161973,8 @@ async function chainstackDebugTraceTransactionV488({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "POST",
@@ -163662,7 +163745,8 @@ async function traceUnknownLiveOriginsV477({
 
   try {
     const response =
-      await fetch(
+      await blockscoutTransportFetchV962(
+        state,
         url,
         {
           method: "GET",
@@ -169192,12 +169276,19 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/blockscouttransport" ||
+    parsed.command === "/transportusage"
+  ) {
+    return {reply:blockscoutTransportAuditTelegramV962(state),state};
+  }
+
+  if (
     parsed.command === "/blockscoutrpc" ||
     parsed.command === "/rpcusage"
   ) {
     const fallbackMeterV960=
       await v3BlockscoutFallbackMeterSnapshotFromDoV615(env);
-    reply=globalThis.blockscoutRpcAuditTelegramV961(state,fallbackMeterV960);
+    reply=globalThis.blockscoutRpcAuditTelegramV961(state,fallbackMeterV960) + "\n\n" + blockscoutTransportAuditTelegramV962(state);
     if(diagnosticV273){
       diagnosticV273.blockscoutRpcAuditV960={
         ...blockscoutRpcAuditSnapshotV960(state),
@@ -178628,7 +178719,8 @@ async function blockscoutV3OneShotTestV613(env,state,tokenInput){
   );
 
   try{
-    const response=await fetch(
+    const response=await blockscoutTransportFetchV962(
+      state,
       endpoint,
       {
         method:"POST",
