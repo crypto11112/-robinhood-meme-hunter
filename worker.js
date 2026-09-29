@@ -8422,7 +8422,7 @@
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
 /* V967: prioritise strict provider-independent V441/V455 on-chain market completion for market-unverified valuation-ready candidates. */
-const VERSION = "V969";
+const VERSION = "V970";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -37324,9 +37324,19 @@ async function rpcCall(
     );
 
   try {
+    /*
+     * V970 scanner regression fix:
+     * rpcCall() is the shared generic RPC transport for Validation Cloud,
+     * Chainstack and other RPC providers. V962 accidentally routed this
+     * generic helper through blockscoutTransportFetchV962(state, ...), but
+     * rpcCall() has no state argument. That caused every scheduled heavy
+     * scan provider attempt to throw ReferenceError: state is not defined
+     * before any RPC request could complete. Restore the proven generic
+     * provider fetch path here. Blockscout-specific authenticated paths
+     * remain separately metered by their dedicated V611/V960/V965 wrappers.
+     */
     const response =
-      await blockscoutTransportFetchV962(
-        state,
+      await fetch(
         url,
         {
           method:
