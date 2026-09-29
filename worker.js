@@ -8421,7 +8421,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V964";
+const VERSION = "V965";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -21850,7 +21850,7 @@ function blockscoutTransportAuditSnapshotV962(state){
 }
 function blockscoutTransportAuditTelegramV962(state){
   const r=blockscoutTransportAuditSnapshotV962(state); const fmt=(rows,empty)=>rows.length?rows.map(([k,v])=>`• <code>${escapeHtml(String(k))}</code> — <b>${safeNumber(v)}</b>`).join("\n"):`• ${empty}`;
-  return ['🧪 <b>Blockscout Transport Audit — V962</b>','',`Forward-only transport requests: <b>${r.requests}</b>`,`Estimated transport credits: <b>${r.estimatedCredits}</b>`,'','🌐 <b>By Blockscout route</b>',fmt(r.byRoute,'No V962 Blockscout transport request captured yet.'),'','🧭 <b>By exact call site</b>',fmt(r.byCallsite,'No V962 call site captured yet.'),'','🔌 <b>JSON-RPC methods seen at transport</b>',fmt(r.byRpcMethod,'No JSON-RPC method captured yet.'),'','<i>Diagnostic only. V962 counts before fetch; provider routing, verification, scoring, risk, qualification and Telegram thresholds are unchanged.</i>'].join("\n");
+  return ['🧪 <b>Blockscout Transport Audit — V965</b>','',`Forward-only transport requests: <b>${r.requests}</b>`,`Estimated transport credits: <b>${r.estimatedCredits}</b>`,'','🌐 <b>By Blockscout route</b>',fmt(r.byRoute,'No V965 Blockscout transport request captured yet.'),'','🧭 <b>By exact call site</b>',fmt(r.byCallsite,'No V965 call site captured yet.'),'','🔌 <b>JSON-RPC methods seen at transport</b>',fmt(r.byRpcMethod,'No JSON-RPC method captured yet.'),'','<i>Diagnostic only. V965 extends transport accounting to legacy authenticated V263/V466/V551 Blockscout paths before fetch; provider routing, verification, scoring, risk, qualification and Telegram thresholds are unchanged.</i>'].join("\n");
 }
 
 function blockscoutRpcAuditSnapshotV960(state){
@@ -83618,16 +83618,26 @@ async function blockscoutExactPoolUsdCompletionV254(
       `V263_REQUESTING_${provider.name}`;
 
     try {
-      const response =
-        await fetch(
-          provider.url,
-          {
-            headers: {
-              accept:
-                "application/json"
-            }
-          }
+      if (provider.name === "BLOCKSCOUT_PRO_UNIVERSAL_V2") {
+        recordBlockscoutProUsageV611(
+          state,
+          "V263_DIRECTIONAL_USD_GETLOGS",
+          BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
         );
+      }
+
+      const response =
+        provider.name === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+          ? await blockscoutTransportFetchV962(
+              state,
+              provider.url,
+              {headers:{accept:"application/json"}},
+              "V263_DIRECTIONAL_USD_GETLOGS"
+            )
+          : await fetch(
+              provider.url,
+              {headers:{accept:"application/json"}}
+            );
 
       base.providerAttemptsV263
         .push({
@@ -88465,10 +88475,17 @@ async function advanceDirectionalWatchV551({
         );
       }
 
-      const responseV958 = await fetch(
-        logsUrlV958,
-        {headers:{accept:"application/json"}}
-      );
+      const responseV958 = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+        ? await blockscoutTransportFetchV962(
+            state,
+            logsUrlV958,
+            {headers:{accept:"application/json"}},
+            "V551_CONTINUOUS_EXACT_POOL_LOGS"
+          )
+        : await fetch(
+            logsUrlV958,
+            {headers:{accept:"application/json"}}
+          );
       responseStatusV958 = responseV958.status;
 
       if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
@@ -89987,7 +90004,21 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       const timestampUrl = `${apiBase}${separator}module=block&action=getblocknobytime` +
         `&timestamp=${cutoffTimestampSec}&closest=before${apiKeySuffix}`;
       try {
-        const response = await fetch(timestampUrl, {headers:{accept:"application/json"}});
+        if (provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2") {
+          recordBlockscoutProUsageV611(
+            state,
+            "V466_TIMESTAMP_LOOKUP",
+            BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+          );
+        }
+        const response = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+          ? await blockscoutTransportFetchV962(
+              state,
+              timestampUrl,
+              {headers:{accept:"application/json"}},
+              "V466_TIMESTAMP_LOOKUP"
+            )
+          : await fetch(timestampUrl, {headers:{accept:"application/json"}});
         if (!response.ok) {
           return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
             cutoffTimestampSec, toBlock, identityBlock, status:`BLOCKSCOUT_TIMESTAMP_LOOKUP_HTTP_${response.status}_V466`};
@@ -90113,7 +90144,21 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffix}`;
 
     try {
-      const response = await fetch(logsUrl, {headers:{accept:"application/json"}});
+      if (provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2") {
+        recordBlockscoutProUsageV611(
+          state,
+          "V466_EXACT_POOL_GETLOGS",
+          BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+        );
+      }
+      const response = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+        ? await blockscoutTransportFetchV962(
+            state,
+            logsUrl,
+            {headers:{accept:"application/json"}},
+            "V466_EXACT_POOL_GETLOGS"
+          )
+        : await fetch(logsUrl, {headers:{accept:"application/json"}});
       if (!response.ok) {
         return finishTraceV865({
           ok:false,fromBlock:rangeFrom,toBlock:rangeTo,rows:[],saturated:false,
