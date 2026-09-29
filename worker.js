@@ -8421,10 +8421,11 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
+/* V975: diagnostic-only exact-pool swap → V179 trace for the same candidate selected by the strict on-chain Market lane. Reuses the existing V888/V895 collector result and last-real-attempt record; adds zero provider requests and changes no routing, proof standard, scoring, risk, request ceiling or Telegram threshold. */
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V974";
+const VERSION = "V975";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -118070,6 +118071,37 @@ for (
     if (eligibilityV968 && Array.isArray(eligibilityV968.reasons)) {
       for (const reason of eligibilityV968.reasons) if (!failureReasonsV968.includes(reason)) failureReasonsV968.push(reason);
     }
+    /* V975: bind the existing production V4/V888 collector telemetry to the SAME
+     * strict-market candidate. This is diagnostic-only: no provider request is made. */
+    const currentCollectorV975 =
+      state?.productionV4EnrichmentV772?.targetedCollectorHandoffDiagnosticV895 ||
+      productionV4EnrichmentV772?.targetedCollectorHandoffDiagnosticV895 ||
+      null;
+    const currentBackfillV975 =
+      state?.productionV4EnrichmentV772?.exactPoolTargetedBackfillV888 ||
+      productionV4EnrichmentV772?.exactPoolTargetedBackfillV888 ||
+      null;
+    const lastRealCollectorV975 = state?.lastRealTargetedCollectorAttemptV896 || null;
+    const selectedTokenV975 = selectedAddressV968;
+    const selectedPoolV975 = poolIdV968;
+    const collectorMatchesV975 = Boolean(
+      selectedTokenV975 && selectedPoolV975 && currentCollectorV975 &&
+      normalize(currentCollectorV975?.tokenAddress) === selectedTokenV975 &&
+      normalize(currentCollectorV975?.poolId) === selectedPoolV975
+    );
+    const lastRealMatchesV975 = Boolean(
+      selectedTokenV975 && selectedPoolV975 && lastRealCollectorV975 &&
+      normalize(lastRealCollectorV975?.tokenAddress) === selectedTokenV975 &&
+      normalize(lastRealCollectorV975?.poolId) === selectedPoolV975
+    );
+    const collectorForMarketV975 = collectorMatchesV975
+      ? currentCollectorV975
+      : (lastRealMatchesV975 ? lastRealCollectorV975 : null);
+    const backfillMatchesV975 = Boolean(
+      selectedPoolV975 && currentBackfillV975 &&
+      normalize(currentBackfillV975?.poolId) === selectedPoolV975
+    );
+
     state.marketCompletionAuditV968 = {
       recordedAt: Date.now(),
       scanVersion: VERSION,
@@ -118127,6 +118159,29 @@ for (
         safeNumber(selectedCandidateV968?.onChainMarketFoundationRefreshV973?.freshExactPoolExactUsdRecordsV974),
       v974AmountReadyExactUsdRecords:
         safeNumber(selectedCandidateV968?.onChainMarketFoundationRefreshV973?.amountReadyExactUsdRecordsV974),
+      v975CollectorTraceSource:
+        collectorMatchesV975 ? "CURRENT_PRODUCTION_V4_V895" :
+        lastRealMatchesV975 ? "LAST_REAL_V896_MATCH" : "NO_MATCHING_COLLECTOR_TRACE",
+      v975CollectorTargetMatch: collectorForMarketV975 != null,
+      v975CollectorRequestEligible: collectorForMarketV975?.requestEligible === true,
+      v975CollectorRequestAttempted: collectorForMarketV975?.requestAttempted === true,
+      v975CollectorRpcProvider: collectorForMarketV975?.rpcProvider || null,
+      v975CollectorRpcOk: collectorForMarketV975?.rpcOk === true,
+      v975CollectorRpcError: collectorForMarketV975?.rpcError || null,
+      v975CollectorRawRpcRows: safeNumber(collectorForMarketV975?.rawRpcRows),
+      v975CollectorExactTopicRows: safeNumber(collectorForMarketV975?.exactTopicRows),
+      v975CollectorDecodedVerifiedRows: safeNumber(collectorForMarketV975?.decodedVerifiedRows),
+      v975CollectorDecodedCandidateMatchedRows: safeNumber(collectorForMarketV975?.decodedCandidateMatchedRows),
+      v975CollectorDecodedExactUsdRows: safeNumber(collectorForMarketV975?.decodedExactUsdRows),
+      v975CollectorV179RowsForTokenPool: safeNumber(collectorForMarketV975?.v179LedgerRowsForTokenPool),
+      v975CollectorClassification: collectorForMarketV975?.classification || null,
+      v975CollectorRegistryPresent: collectorForMarketV975?.registryPresent === true,
+      v975CollectorRegistryTokenMatch: collectorForMarketV975?.registryTokenMatch === true,
+      v975TargetedRowsFedToV179: collectorForMarketV975?.targetedRowsFedToV179CollectorInThisPath === true,
+      v975BackfillStatus: backfillMatchesV975 ? (currentBackfillV975?.status || null) : null,
+      v975BackfillFromBlock: backfillMatchesV975 ? safeNumber(currentBackfillV975?.fromBlock) : 0,
+      v975BackfillToBlock: backfillMatchesV975 ? safeNumber(currentBackfillV975?.toBlock) : 0,
+      v975BackfillReturnedSwapRows: backfillMatchesV975 ? safeNumber(currentBackfillV975?.returnedSwapRows) : 0,
       v455PoolKeyVerified: eligibilityV968?.poolKeyVerified === true,
       v455ExactPoolIdentity: eligibilityV968?.exactPoolIdentity === true,
       lensVerified: eligibilityV968?.lensVerified === true,
@@ -176414,7 +176469,7 @@ function marketCompletionAuditTelegramV968(result) {
   const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
   const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
   return [
-    "🧪 <b>On-Chain Market Completion Audit — V974</b>",
+    "🧪 <b>On-Chain Market Completion Audit — V975</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
@@ -176445,6 +176500,20 @@ function marketCompletionAuditTelegramV968(result) {
     `V973/V974 refresh status: <code>${escapeHtml(String(r?.v973PriceRefreshStatus || "NONE"))}</code>`,
     `V974 exact-pool binding: <b>${yesNo(r?.v974PoolBindingApplied)}</b> · <code>${escapeHtml(short(r?.v974ExactVerifiedPoolId))}</code>`,
     `V974 V179 rows total/exactUSD/exactPool/fresh/amountReady: <b>${safeNumber(r?.v974LedgerRecords)} / ${safeNumber(r?.v974ExactUsdRecords)} / ${safeNumber(r?.v974ExactPoolExactUsdRecords)} / ${safeNumber(r?.v974FreshExactPoolExactUsdRecords)} / ${safeNumber(r?.v974AmountReadyExactUsdRecords)}</b>`,
+    "",
+    "🧬 <b>V975 exact-pool swap → V179 trace</b>",
+    `Trace source / target match: <b>${escapeHtml(String(r?.v975CollectorTraceSource || "NONE"))} / ${yesNo(r?.v975CollectorTargetMatch)}</b>`,
+    `Collector eligible / attempted: <b>${yesNo(r?.v975CollectorRequestEligible)} / ${yesNo(r?.v975CollectorRequestAttempted)}</b>`,
+    `RPC provider / OK: <b>${escapeHtml(String(r?.v975CollectorRpcProvider || "NONE"))} / ${yesNo(r?.v975CollectorRpcOk)}</b>`,
+    `RPC error: <code>${escapeHtml(String(r?.v975CollectorRpcError || "NONE").slice(0,220))}</code>`,
+    `Raw RPC / exact-topic rows: <b>${safeNumber(r?.v975CollectorRawRpcRows)} / ${safeNumber(r?.v975CollectorExactTopicRows)}</b>`,
+    `Decoded verified / candidate-match / exact-USD: <b>${safeNumber(r?.v975CollectorDecodedVerifiedRows)} / ${safeNumber(r?.v975CollectorDecodedCandidateMatchedRows)} / ${safeNumber(r?.v975CollectorDecodedExactUsdRows)}</b>`,
+    `V179 rows for same token+PoolId: <b>${safeNumber(r?.v975CollectorV179RowsForTokenPool)}</b>`,
+    `Registry present / token match: <b>${yesNo(r?.v975CollectorRegistryPresent)} / ${yesNo(r?.v975CollectorRegistryTokenMatch)}</b>`,
+    `Targeted rows fed to V179 path: <b>${yesNo(r?.v975TargetedRowsFedToV179)}</b>`,
+    `Collector classification: <code>${escapeHtml(String(r?.v975CollectorClassification || "NONE"))}</code>`,
+    `V888 backfill status: <code>${escapeHtml(String(r?.v975BackfillStatus || "NONE"))}</code>`,
+    `V888 range / returned swaps: <b>${safeNumber(r?.v975BackfillFromBlock)}→${safeNumber(r?.v975BackfillToBlock)} / ${safeNumber(r?.v975BackfillReturnedSwapRows)}</b>`,
     `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
@@ -176456,7 +176525,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only. Zero provider requests and zero state writes. V974 reports the most recent completed scan's strict market-completion evidence, widened one-call Lens priority telemetry and exact verified PoolId → V179 price-handoff diagnostics; it does not weaken proof standards, scoring, risk or Telegram thresholds.</i>"
+    "<i>Read-only. Zero provider requests and zero state writes. V975 adds a same-token/same-PoolId trace of the existing V888/V895 exact-pool collector into V179, so zero price samples can be classified as no raw swaps, decode/identity rejection, missing exact-USD conversion, or V179 handoff loss. Proof standards, provider routing, scoring, risk and Telegram thresholds are unchanged.</i>"
   ].join("\n");
 }
 
