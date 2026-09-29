@@ -8469,7 +8469,17 @@
  * - adds bounded /launchcoverage telemetry for entry + V666 claim/use proof;
  * - no provider ceiling, scoring, risk rule or Telegram threshold changes.
  */
-const VERSION = "V987";
+/*
+ * V988 SEQUENTIAL HOLDER-CLAIM RE-RANK
+ * - preserves V987 holder-entry rescue and all V983/V986 reliability/reporting fixes;
+ * - after protected V666 claim #1 is actually consumed, re-ranks only the
+ *   remaining unresolved, non-terminal holder/risk candidates before claim #2;
+ * - only the V984 first target or the V988 dynamically selected second target
+ *   receives protected holder-priority status, preventing an incidental queue
+ *   row from consuming claim #2 before the re-rank decision;
+ * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
+ */
+const VERSION = "V988";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -109164,6 +109174,123 @@ for (
 
   scannerFunnelV415.holderRiskPriorityV984 = holderRiskPriorityV984;
 
+  /*
+   * V988: do not pre-commit protected holder claim #2. Once claim #1 has
+   * genuinely been consumed, re-rank the still-unanalysed queue and move the
+   * best unresolved non-terminal holder target into the next queue position.
+   * This is selection only; V683 still caps the scan at two protected claims.
+   */
+  let holderRiskSecondTargetAddressV988 = null;
+  const holderRiskSecondClaimV988 = {
+    enabled: true,
+    firstTarget: holderRiskPriorityAddressV984 || null,
+    firstClaimConsumed: false,
+    rerankTriggered: false,
+    selectedAddress: null,
+    selectedSymbol: null,
+    selectedReason: "WAITING_FOR_FIRST_CLAIM_CONSUMPTION_V988",
+    queueIndexBefore: null,
+    movedToCurrentPosition: false,
+    unresolvedRemaining: 0,
+    terminalSkipped: 0,
+    holderCompleteSkipped: 0,
+    claimsUsedAtSelection: 0,
+    requestCeilingsChanged: false,
+    riskThresholdChanged: false,
+    telegramThresholdChanged: false
+  };
+
+  const maybeRerankSecondHolderClaimV988 = currentIndex => {
+    if (holderRiskSecondTargetAddressV988) return;
+
+    const claimState = holderProClaimStateV683(budget);
+    const lane = budget?.analysis?.priorityHolderProCompletionV666 || null;
+    const firstConsumed = Boolean(
+      safeNumber(claimState?.claimsUsed) === 1 &&
+      lane?.claimed === true &&
+      lane?.used === true
+    );
+
+    holderRiskSecondClaimV988.firstClaimConsumed = firstConsumed;
+    holderRiskSecondClaimV988.claimsUsedAtSelection = safeNumber(claimState?.claimsUsed);
+
+    if (!firstConsumed) return;
+
+    const rows = [];
+    for (let i = currentIndex; i < v135AnalysisQueue.length; i++) {
+      const token = v135AnalysisQueue[i];
+      const tokenAddress = normalize(token?.address);
+      if (!tokenAddress || tokenAddress === holderRiskPriorityAddressV984) continue;
+
+      const terminal = terminalPriorityRejectFromWatched(token);
+      if (terminal?.terminal === true) {
+        holderRiskSecondClaimV988.terminalSkipped++;
+        continue;
+      }
+
+      const holderCache = cachedHolderIntelligence(token, HOLDER_STALE_CACHE_MS);
+      const holderComplete = Boolean(
+        holderCache?.integrity?.verified === true &&
+        holderCache?.integrity?.status === "VERIFIED" &&
+        holderCache?.concentrationVerified === true &&
+        holderCache?.whale?.verified === true
+      );
+      if (holderComplete) {
+        holderRiskSecondClaimV988.holderCompleteSkipped++;
+        continue;
+      }
+
+      const dedicatedHolderRetry = Boolean(holderEvidenceRetryTokenV422) &&
+        tokenAddress === normalize(holderEvidenceRetryTokenV422?.address);
+      const rotatingEvidenceRetry = Boolean(evidenceCompletionRetryTokenV658) &&
+        tokenAddress === normalize(evidenceCompletionRetryTokenV658?.address);
+      const marketCacheVerified = token?.marketCache?.data?.verified === true;
+      const currentLiveVerifiedLaunch = currentLiveVerifiedLaunchTokensV621.has(tokenAddress);
+      const partialHolder = Boolean(cachedPartialHolderStateV149(token));
+
+      rows.push({
+        token, index: i, tokenAddress, dedicatedHolderRetry, rotatingEvidenceRetry,
+        marketCacheVerified, currentLiveVerifiedLaunch, partialHolder,
+        score:
+          (dedicatedHolderRetry ? 1000000 : 0) +
+          (rotatingEvidenceRetry ? 900000 : 0) +
+          (marketCacheVerified ? 50000 : 0) +
+          (currentLiveVerifiedLaunch ? 25000 : 0) +
+          (partialHolder ? 10000 : 0) +
+          safeNumber(analysisPriority(token))
+      });
+    }
+
+    holderRiskSecondClaimV988.unresolvedRemaining = rows.length;
+    rows.sort((a,b) => (b.score-a.score) || (a.index-b.index));
+    const target = rows[0] || null;
+    holderRiskSecondClaimV988.rerankTriggered = true;
+
+    if (!target) {
+      holderRiskSecondClaimV988.selectedReason = "NO_REMAINING_UNRESOLVED_HOLDER_TARGET_V988";
+      return;
+    }
+
+    holderRiskSecondTargetAddressV988 = target.tokenAddress;
+    holderRiskSecondClaimV988.selectedAddress = target.tokenAddress;
+    holderRiskSecondClaimV988.selectedSymbol = target?.token?.metadata?.symbol || target?.token?.symbol || null;
+    holderRiskSecondClaimV988.queueIndexBefore = target.index;
+    holderRiskSecondClaimV988.selectedReason =
+      target.dedicatedHolderRetry ? "V422_DUE_HOLDER_RETRY_SECOND_V988" :
+      target.rotatingEvidenceRetry ? "V658_ROTATING_EVIDENCE_RETRY_SECOND_V988" :
+      target.marketCacheVerified ? "VERIFIED_MARKET_MISSING_HOLDERS_SECOND_V988" :
+      target.currentLiveVerifiedLaunch ? "CURRENT_LIVE_UNRESOLVED_HOLDERS_SECOND_V988" :
+      "BEST_REMAINING_UNRESOLVED_HOLDER_TARGET_V988";
+
+    if (target.index !== currentIndex) {
+      const [selected] = v135AnalysisQueue.splice(target.index, 1);
+      v135AnalysisQueue.splice(currentIndex, 0, selected);
+      holderRiskSecondClaimV988.movedToCurrentPosition = true;
+    }
+  };
+
+  scannerFunnelV415.holderRiskSecondClaimV988 = holderRiskSecondClaimV988;
+
   const v653FreshVerifiedLaunchErc20Reserve =
     configureFreshVerifiedLaunchErc20ReserveV653(
       budget,
@@ -109606,6 +109733,8 @@ for (
     v135Index < v135AnalysisQueue.length;
     v135Index++
   ) {
+    maybeRerankSecondHolderClaimV988(v135Index);
+
     const watched =
       v135AnalysisQueue[
         v135Index
@@ -110444,27 +110573,7 @@ for (
            */
           holderPriorityCompletion:
             address === holderRiskPriorityAddressV984 ||
-            (
-              freshMarketSlotHandoffV159
-                .triggered
-                ? address ===
-                  retryPersistenceAddressV139
-                : (
-                    isPriorityCompletion ||
-                    address === evidenceCompletionRetryAddressV658
-                  )
-            ) ||
-            (
-              (
-                isCurrentLiveVerifiedLaunchV649 ||
-                address === evidenceCompletionRetryAddressV658
-              ) &&
-              budget?.blockscoutHolderOutage?.active !== true &&
-              (
-                holderIndexLagStateV422(watched)?.active !== true ||
-                holderIndexLagStateV422(watched)?.due === true
-              )
-            ),
+            address === holderRiskSecondTargetAddressV988,
 
           liveMomentumActivityV152,
           latestNumberV749: latestNumber
@@ -119036,6 +119145,10 @@ for (
   if (
     launchCoverageFunnelV474?.funnel
   ) {
+    launchCoverageFunnelV474.funnel.holderRiskSecondClaimV988 = {
+      ...holderRiskSecondClaimV988
+    };
+
     const holderProTraceV678 =
       budget?.analysis
         ?.holderProGateTraceV678;
@@ -167409,6 +167522,11 @@ function launchCoverageTelegramMessageV985(state) {
     "<b>V656 evidence completion — current/live returned</b>",
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
+    "<b>V988 sequential holder-claim re-rank</b>",
+    `First target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
+    `First claim consumed / re-rank: ${last?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${last?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
+    `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
+    "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
     `Live addresses observed: ${fmt(c?.liveAddressesObserved)}`,
@@ -167420,7 +167538,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V987 preserves V986 reporting and V984 holder/risk ordering, and lets only the explicitly selected holder-priority candidate enter the existing V666 completion path across the internal analysis sub-cap when real pre-Telegram global headroom remains. Hard/provider ceilings, risk proof rules and Telegram thresholds are unchanged.</i>"
+    "<i>V988 preserves V987 holder-entry rescue and re-ranks the remaining unresolved non-terminal holder candidates only after protected claim #1 is consumed, so claim #2 cannot be opportunistically taken before that decision. Max two claims, hard/provider ceilings, risk proofs and Telegram thresholds are unchanged.</i>"
   ];
   return lines.join("\\n");
 }
