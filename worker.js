@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V989
- * V989 MARKET-FALLBACK DIAGNOSTIC CLARITY:
+ * Robinhood Chain Meme Hunter — V990
+ * V990 MARKET-FALLBACK TRACE DIAGNOSTIC:
  * - preserves V988 sequential holder-claim behaviour unchanged;
  * - fixes /launchcoverage second-target display by falling back to the selected address when the symbol is unavailable;
  * - exposes existing CoinGecko Demo and CoinMarketCap fallback status inside V656 market diagnostics;
@@ -8486,7 +8486,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V989";
+const VERSION = "V990";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167523,8 +167523,23 @@ function launchCoverageTelegramMessageV985(state) {
         : "";
       const demo = row?.market?.alternative?.coinGeckoDemoV660 || null;
       const cmc = row?.market?.alternative?.coinMarketCapV739 || null;
-      const fallbackText = (demo || cmc)
-        ? `; Market fallback — Demo: ${escapeHtml(String(demo?.verified === true ? "VERIFIED" : (demo?.status || "N/A")))}${demo?.requestSent === true ? " (REQUESTED)" : ""} · CMC: ${escapeHtml(String(cmc?.verified === true ? "VERIFIED" : (cmc?.status || "N/A")))}${cmc?.requestSent === true ? " (REQUESTED)" : ""}`
+      const traceRootV990 = state?.coinGeckoDecisionTraceV664 || null;
+      const traceRowV990 = Array.isArray(traceRootV990?.rows)
+        ? traceRootV990.rows.find(item => normalize(item?.address) === a) || null
+        : null;
+      const demoStatusV990 =
+        demo?.verified === true ? "VERIFIED" :
+        (demo?.status || traceRowV990?.demoStatus ||
+          (traceRowV990?.demoCalled === true ? "CALLED_STATUS_UNAVAILABLE" :
+            (traceRowV990?.decision === "SKIP_DEMO" ? (traceRowV990?.skipReason || "SKIPPED") : "N/A")));
+      const demoRequestedV990 = demo?.requestSent === true || traceRowV990?.demoRequestSent === true;
+      const geckoDecisionV990 =
+        traceRowV990?.geckoFallbackStatus ||
+        traceRowV990?.publicFallbackStatus ||
+        traceRowV990?.status || null;
+      const cmcStatusV990 = cmc?.verified === true ? "VERIFIED" : (cmc?.status || "N/A");
+      const fallbackText = (demo || cmc || traceRowV990)
+        ? `; Market fallback — Gecko: ${escapeHtml(String(geckoDecisionV990 || "N/A"))} · Demo: ${escapeHtml(String(demoStatusV990))}${demoRequestedV990 ? " (REQUESTED)" : ""} · CMC: ${escapeHtml(String(cmcStatusV990))}${cmc?.requestSent === true ? " (REQUESTED)" : ""}`
         : "";
       return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}`;
     });
@@ -167552,7 +167567,7 @@ function launchCoverageTelegramMessageV985(state) {
     "<b>V656 evidence completion — current/live returned</b>",
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V989 holder-claim / market-fallback diagnostic</b>",
+    "<b>V990 holder-claim / market-fallback trace diagnostic</b>",
     `First target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${last?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${last?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
     `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || last?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
@@ -167568,7 +167583,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V989 preserves V988 holder-claim behaviour unchanged. It fixes second-target display clarity and exposes the already-existing CoinGecko Demo/CMC fallback outcome when GeckoTerminal is unavailable. Diagnostic-only: no provider request, budget, cooldown, scoring, risk or Telegram threshold changes.</i>"
+    "<i>V990 preserves V988 holder-claim behaviour unchanged. It reads the already-existing per-token CoinGecko decision trace when candidate alternativeMarketData is absent, so GeckoTerminal cooldown/429 fallback decisions are visible without making any extra provider request. Diagnostic-only: no provider request, budget, cooldown, scoring, risk or Telegram threshold changes.</i>"
   ];
   return lines.join("\\n");
 }
