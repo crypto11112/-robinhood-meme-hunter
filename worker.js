@@ -8421,7 +8421,8 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V966";
+/* V967: prioritise strict provider-independent V441/V455 on-chain market completion for market-unverified valuation-ready candidates. */
+const VERSION = "V967";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -11781,6 +11782,7 @@ function decodeReservesLensResultV441(
   };
 }
 
+/* V967 extends ONLY target selection for the already-existing V441 -> V455 strict on-chain market path. */
 async function reservesLensLiquidityDiagnosticV441(
   env,
   state,
@@ -11830,6 +11832,22 @@ async function reservesLensLiquidityDiagnosticV441(
       geckoReady: null,
       coinGeckoDemoReady: null,
       targetingOnly: true,
+      proofRequirementsChanged: false,
+      requestCeilingChanged: false,
+      telegramThresholdChanged: false
+    },
+    v967OnChainMarketCompletion: {
+      enabled: true,
+      selected: false,
+      candidateAddress: null,
+      symbol: null,
+      marketAlreadyVerified: null,
+      strictValuationReady: false,
+      completePoolKey: false,
+      priceVerified: false,
+      quoteUsdReady: false,
+      selectionReason: null,
+      boundedOneLensRequestPerScan: true,
       proofRequirementsChanged: false,
       requestCeilingChanged: false,
       telegramThresholdChanged: false
@@ -11897,6 +11915,26 @@ async function reservesLensLiquidityDiagnosticV441(
             allFreshMarketProvidersUnavailableV721 &&
             verifiedPoolKeyReadyV721;
 
+          /*
+           * V967: provider-independent strict market completion targeting.
+           * The V455 promotion path already has strong proof requirements, but
+           * prior targeting gave its biggest preference only when every fresh
+           * market provider was unavailable. That can leave a MARKET-unverified
+           * candidate behind merely because an external provider is technically
+           * eligible even when it repeatedly returns 429/no-market/5xx.
+           *
+           * V967 therefore gives first priority to a MARKET-unverified candidate
+           * that ALREADY has a complete verified PoolKey plus a verified recent
+           * exact-USD execution price and a verified USD quote basis. It does not
+           * weaken V455: ReservesLens still must verify exact-pool USD liquidity,
+           * hook semantics must be safe, PoolId must match, and positive price +
+           * liquidity are still required before market.verified can change.
+           */
+          const strictOnChainCompletionTargetV967 =
+            marketVerified !== true &&
+            verifiedPoolKeyReadyV721 &&
+            readiness?.valuationReady === true;
+
           return {
             candidate,
             key,
@@ -11905,7 +11943,13 @@ async function reservesLensLiquidityDiagnosticV441(
             coinGeckoDemoEligibilityV721,
             allFreshMarketProvidersUnavailableV721,
             onChainRescueTargetV721,
+            strictOnChainCompletionTargetV967,
             score:
+              (
+                strictOnChainCompletionTargetV967
+                  ? 50000
+                  : 0
+              ) +
               (
                 onChainRescueTargetV721
                   ? 20000
@@ -12025,6 +12069,35 @@ async function reservesLensLiquidityDiagnosticV441(
             ?.eligible ===
           true,
         targetingOnly: true,
+        proofRequirementsChanged: false,
+        requestCeilingChanged: false,
+        telegramThresholdChanged: false
+      };
+
+      base.v967OnChainMarketCompletion = {
+        enabled: true,
+        selected: true,
+        candidateAddress:
+          normalize(row?.candidate?.address) || null,
+        symbol:
+          row?.candidate?.symbol || null,
+        marketAlreadyVerified:
+          row?.candidate?.market?.verified === true,
+        strictValuationReady:
+          row?.strictOnChainCompletionTargetV967 === true,
+        completePoolKey:
+          row?.key?.verified === true,
+        priceVerified:
+          row?.readiness?.priceVerified === true,
+        quoteUsdReady:
+          row?.readiness?.quoteUsdReady === true,
+        selectionReason:
+          row?.strictOnChainCompletionTargetV967 === true
+            ? "MARKET_UNVERIFIED_STRICT_ONCHAIN_VALUATION_READY_V967"
+            : (row?.onChainRescueTargetV721 === true
+                ? "V721_ALL_FRESH_PROVIDER_UNAVAILABLE_RESCUE"
+                : "EXISTING_RESERVESLENS_PRIORITY"),
+        boundedOneLensRequestPerScan: true,
         proofRequirementsChanged: false,
         requestCeilingChanged: false,
         telegramThresholdChanged: false
