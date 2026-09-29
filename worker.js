@@ -8422,7 +8422,7 @@
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
 /* V967: prioritise strict provider-independent V441/V455 on-chain market completion for market-unverified valuation-ready candidates. */
-const VERSION = "V967";
+const VERSION = "V968";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -117638,6 +117638,65 @@ for (
       Date.now();
   }
 
+  /* V968: persist a compact, zero-request audit of the completed V967/V441/V455 market lane
+   * in the SAME existing end-of-scan state write. No provider request or scoring change. */
+  {
+    const lensV968 = reservesLensLiquidityResultV441 || {};
+    const selectedAddressV968 = normalize(lensV968?.candidateAddress) || null;
+    const selectedCandidateV968 = (Array.isArray(candidates) ? candidates : []).find(
+      c => normalize(c?.address) === selectedAddressV968
+    ) || null;
+    const promotionV968 = (Array.isArray(onChainMarketFallbackResultsV455) ? onChainMarketFallbackResultsV455 : []).find(
+      row => normalize(row?.address) === selectedAddressV968
+    ) || null;
+    const eligibilityV968 = promotionV968?.eligibility ||
+      (selectedCandidateV968 ? strictOnChainMarketFallbackEligibilityV455(selectedCandidateV968) : null);
+    const targetingV968 = lensV968?.v967OnChainMarketCompletion || {};
+    const poolIdV968 = normalize(lensV968?.poolId || lensV968?.poolKey?.poolId) || null;
+    const exactPoolIdV968 = /^0x[a-f0-9]{64}$/.test(String(poolIdV968 || ""));
+    const failureReasonsV968 = [];
+    if (targetingV968?.selected !== true) failureReasonsV968.push(lensV968?.status || "NO_V967_TARGET_SELECTED");
+    if (targetingV968?.selected === true && targetingV968?.completePoolKey !== true) failureReasonsV968.push("VERIFIED_COMPLETE_POOLKEY_REQUIRED_V968");
+    if (targetingV968?.selected === true && targetingV968?.priceVerified !== true) failureReasonsV968.push("VERIFIED_EXECUTION_PRICE_REQUIRED_V968");
+    if (targetingV968?.selected === true && targetingV968?.quoteUsdReady !== true) failureReasonsV968.push("VERIFIED_USD_QUOTE_BASIS_REQUIRED_V968");
+    if (lensV968?.attempted !== true && targetingV968?.selected === true) failureReasonsV968.push(lensV968?.status || "RESERVESLENS_NOT_ATTEMPTED_V968");
+    if (eligibilityV968 && Array.isArray(eligibilityV968.reasons)) {
+      for (const reason of eligibilityV968.reasons) if (!failureReasonsV968.includes(reason)) failureReasonsV968.push(reason);
+    }
+    state.marketCompletionAuditV968 = {
+      recordedAt: Date.now(),
+      scanVersion: VERSION,
+      candidateCount: Array.isArray(candidates) ? candidates.length : 0,
+      selected: targetingV968?.selected === true,
+      candidateAddress: selectedAddressV968,
+      symbol: lensV968?.symbol || selectedCandidateV968?.symbol || null,
+      selectionReason: targetingV968?.selectionReason || null,
+      completePoolKey: targetingV968?.completePoolKey === true,
+      exactPoolId: exactPoolIdV968,
+      poolId: poolIdV968,
+      priceVerified: targetingV968?.priceVerified === true,
+      quoteUsdReady: targetingV968?.quoteUsdReady === true,
+      strictValuationReady: targetingV968?.strictValuationReady === true,
+      lensAttempted: lensV968?.attempted === true,
+      lensRequestSent: lensV968?.requestSent === true,
+      lensProvider: lensV968?.provider || null,
+      lensStatus: lensV968?.status || null,
+      lensVerified: eligibilityV968?.lensVerified === true,
+      semanticUsable: eligibilityV968?.semanticUsable === true,
+      exactPoolPriceVerified: eligibilityV968?.priceEvidence?.verified === true,
+      v455Eligible: eligibilityV968?.eligible === true,
+      promoted: promotionV968?.promoted === true,
+      marketVerifiedAfter: selectedCandidateV968?.market?.verified === true,
+      failureReasons: failureReasonsV968.slice(0,12),
+      diagnosticOnly: true,
+      zeroExtraRequests: true,
+      proofRequirementsChanged: false,
+      scoringChanged: false,
+      riskChanged: false,
+      telegramThresholdChanged: false
+    };
+  }
+
   const save =
     await writeState(
       env,
@@ -167619,6 +167678,7 @@ function telegramHelpV271() {
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
+    "<code>/marketaudit</code> — V968 show the latest strict on-chain Market completion prerequisites and exact failure reason",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4poolsearch [0xTOKEN] [p2...]</code> — V796 bounded 100-PoolId/page active reverse search through Uniswap Pool Info, with historical fallback after the final page (diagnostic only)",
     "<code>/v4completeaudit 0x...</code> — V865 isolated exact V4 completion trace: every V466 range, rows, saturation, split and budget decision",
@@ -168495,6 +168555,28 @@ async function telegramCommandReplyV271(
 
 
 
+
+  if (parsed.command === "/marketaudit" || parsed.command === "/marketcompletion") {
+    const stateV968 = await readState(env);
+    const resultV968 = stateV968?.state?.marketCompletionAuditV968 || {
+      recordedAt: null,
+      scanVersion: VERSION,
+      candidateCount: 0,
+      selected: false,
+      failureReasons: ["NO_COMPLETED_V968_SCAN_RECORDED_YET"]
+    };
+    const replyV968 = marketCompletionAuditTelegramV968(resultV968);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV968 = await sendTelegram(env, replyV968, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV968?.success === true;
+      diagnosticV273.telegramStatus = sentV968?.status || null;
+      diagnosticV273.telegramMode = sentV968?.mode || null;
+      diagnosticV273.telegramError = sentV968?.error || null;
+      diagnosticV273.result = sentV968?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV968?.success===true,ignored:false,command:parsed.command,marketCompletionAuditV968:resultV968};
+  }
 
   if (parsed.command === "/v4marketstatus") {
     const stateV773 = await readState(env);
@@ -175812,6 +175894,50 @@ async function goldRushV3SwapDiagnosticV710(
   };
 }
 
+
+
+function marketCompletionAuditTelegramV968(result) {
+  const r = result || {};
+  const short = v => {
+    const x = String(v || "");
+    return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
+  };
+  const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
+  const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
+  return [
+    "🧪 <b>On-Chain Market Completion Audit — V968</b>",
+    "",
+    `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
+    `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
+    `Candidates in scan: <b>${safeNumber(r?.candidateCount)}</b>`,
+    `Selected for V967/V968 lane: <b>${yesNo(r?.selected)}</b>`,
+    `Token: <code>${escapeHtml(short(r?.candidateAddress))}</code> ${escapeHtml(String(r?.symbol || ""))}`,
+    `Selection reason: <code>${escapeHtml(String(r?.selectionReason || "NONE"))}</code>`,
+    "",
+    "🔎 <b>Strict prerequisites</b>",
+    `Complete verified PoolKey: <b>${yesNo(r?.completePoolKey)}</b>`,
+    `Exact PoolId: <b>${yesNo(r?.exactPoolId)}</b>`,
+    `Verified execution price ready: <b>${yesNo(r?.priceVerified)}</b>`,
+    `Verified USD quote basis ready: <b>${yesNo(r?.quoteUsdReady)}</b>`,
+    `Strict valuation-ready before Lens: <b>${yesNo(r?.strictValuationReady)}</b>`,
+    "",
+    "💧 <b>ReservesLens / V455</b>",
+    `Lens attempted / request sent: <b>${yesNo(r?.lensAttempted)} / ${yesNo(r?.lensRequestSent)}</b>`,
+    `Lens provider: <b>${escapeHtml(String(r?.lensProvider || "NONE"))}</b>`,
+    `Lens status: <code>${escapeHtml(String(r?.lensStatus || "NONE"))}</code>`,
+    `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
+    `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
+    `Exact-pool price evidence: <b>${yesNo(r?.exactPoolPriceVerified)}</b>`,
+    `V455 eligible: <b>${yesNo(r?.v455Eligible)}</b>`,
+    `V455 promoted marketReady: <b>${yesNo(r?.promoted)}</b>`,
+    `Final market verified: <b>${yesNo(r?.marketVerifiedAfter)}</b>`,
+    "",
+    "🚧 <b>Exact failure reason(s)</b>",
+    ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
+    "",
+    "<i>Read-only. Zero provider requests and zero state writes. V968 reports the most recent completed scan's existing V967/V441/V455 market-completion evidence; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
+  ].join("\n");
+}
 
 function productionMarketLiquidityStatusTelegramV773(result) {
   const r = result || {};
