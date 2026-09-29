@@ -8422,7 +8422,7 @@
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
 /* V967: prioritise strict provider-independent V441/V455 on-chain market completion for market-unverified valuation-ready candidates. */
-const VERSION = "V970";
+const VERSION = "V971";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -12118,12 +12118,41 @@ async function reservesLensLiquidityDiagnosticV441(
     };
   }
 
+  /* V971: persist the already-verified PoolKey/PoolId onto the candidate BEFORE
+   * the ReservesLens RPC. V455 reads candidate.reservesLensLiquidityDiagnosticV441;
+   * previously an RPC failure meant the returned V441 result knew the PoolKey while
+   * V455 saw no PoolKey at all, creating the false POOLKEY_REQUIRED / ID_MISMATCH pair.
+   * This is evidence handoff only: it does not mark liquidity or market verified. */
+  target.reservesLensLiquidityDiagnosticV441 = {
+    verified: false,
+    status: "V971_POOLKEY_HANDOFF_READY",
+    poolId: poolKey?.poolId || null,
+    poolKey,
+    completePoolKey: poolKey?.verified === true,
+    decoded: null,
+    usdValuation: null,
+    attempted: false,
+    requestSent: false,
+    provider: null,
+    error: null,
+    externalRequestsUsed: 0,
+    diagnosticOnly: true,
+    promotionApplied: false,
+    valuationTargetingV447: selectedReadinessV447,
+    handoffVersion: "V971"
+  };
+
   const calldata =
     encodeReservesLensCallV441(
       poolKey
     );
 
   if (!calldata) {
+    Object.assign(target.reservesLensLiquidityDiagnosticV441, {
+      status: "RESERVES_LENS_CALLDATA_ENCODING_FAILED_V441",
+      error: "CALLDATA_ENCODING_FAILED",
+      handoffVersion: "V971"
+    });
     return {
       ...base,
       candidateAddress:
@@ -12148,6 +12177,11 @@ async function reservesLensLiquidityDiagnosticV441(
       "analysis"
     )
   ) {
+    Object.assign(target.reservesLensLiquidityDiagnosticV441, {
+      status: "ANALYSIS_BUDGET_UNAVAILABLE_V441",
+      error: "ANALYSIS_BUDGET_UNAVAILABLE",
+      handoffVersion: "V971"
+    });
     return {
       ...base,
       candidateAddress:
@@ -12200,6 +12234,15 @@ async function reservesLensLiquidityDiagnosticV441(
     call?.result === null ||
     call?.result === undefined
   ) {
+    Object.assign(target.reservesLensLiquidityDiagnosticV441, {
+      attempted: true,
+      requestSent: used > 0,
+      status: "RESERVES_LENS_RPC_FAILED_V442",
+      provider: call?.provider || null,
+      error: call?.error || null,
+      externalRequestsUsed: used,
+      handoffVersion: "V971"
+    });
     return {
       ...base,
       attempted: true,
@@ -12245,6 +12288,15 @@ async function reservesLensLiquidityDiagnosticV441(
     );
 
   if (!decoded) {
+    Object.assign(target.reservesLensLiquidityDiagnosticV441, {
+      attempted: true,
+      requestSent: true,
+      status: "RESERVES_LENS_RESPONSE_DECODE_FAILED_V441",
+      provider: call?.provider || null,
+      error: "RESPONSE_DECODE_FAILED",
+      externalRequestsUsed: used,
+      handoffVersion: "V971"
+    });
     return {
       ...base,
       attempted: true,
@@ -12344,6 +12396,13 @@ async function reservesLensLiquidityDiagnosticV441(
     verified:
       valuation?.verified ===
       true,
+    completePoolKey: true,
+    attempted: true,
+    requestSent: true,
+    provider: call?.provider || null,
+    error: null,
+    externalRequestsUsed: used,
+    handoffVersion: "V971",
     status:
       valuation?.status ||
       "DECODED_V441",
@@ -12564,6 +12623,34 @@ function classifyHookLiquiditySemanticsV453(
         false,
       diagnosticOnly:
         true
+    };
+  }
+
+  /* V971: a handed-off PoolKey alone is not evidence about hook/accounting
+   * semantics. Require a successfully decoded ReservesLens response before
+   * semantics can become usable. This keeps the strict V455 gate unchanged. */
+  if (
+    !reservesLens?.decoded ||
+    typeof reservesLens.decoded !== "object"
+  ) {
+    return {
+      enabled: true,
+      strictEvidenceGuardV454: true,
+      evidencePresent: true,
+      poolKeyVerified: true,
+      completePoolKey: true,
+      poolId,
+      identified: false,
+      protocol: null,
+      hook: hook || null,
+      classification: "RESERVESLENS_RESPONSE_NOT_VERIFIED_V971",
+      coreLiquiditySemanticallyUsable: false,
+      hookManagedTradingPrincipalIncluded: null,
+      hookAccruedFeesExcluded: null,
+      rationale: "POOLKEY_HANDOFF_PRESENT_BUT_NO_DECODED_RESERVESLENS_RESPONSE",
+      genericHasCustomAccounting: null,
+      promotionAllowed: false,
+      diagnosticOnly: true
     };
   }
 
@@ -117691,6 +117778,11 @@ for (
       lensRequestSent: lensV968?.requestSent === true,
       lensProvider: lensV968?.provider || null,
       lensStatus: lensV968?.status || null,
+      lensError: lensV968?.error || null,
+      lensExternalRequestsUsed: safeNumber(lensV968?.externalRequestsUsed),
+      handoffVersion: selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.handoffVersion || null,
+      v455PoolKeyVerified: eligibilityV968?.poolKeyVerified === true,
+      v455ExactPoolIdentity: eligibilityV968?.exactPoolIdentity === true,
       lensVerified: eligibilityV968?.lensVerified === true,
       semanticUsable: eligibilityV968?.semanticUsable === true,
       exactPoolPriceVerified: eligibilityV968?.priceEvidence?.verified === true,
@@ -175976,7 +176068,7 @@ function marketCompletionAuditTelegramV968(result) {
   const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
   const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
   return [
-    "🧪 <b>On-Chain Market Completion Audit — V968</b>",
+    "🧪 <b>On-Chain Market Completion Audit — V971</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
@@ -175996,6 +176088,10 @@ function marketCompletionAuditTelegramV968(result) {
     `Lens attempted / request sent: <b>${yesNo(r?.lensAttempted)} / ${yesNo(r?.lensRequestSent)}</b>`,
     `Lens provider: <b>${escapeHtml(String(r?.lensProvider || "NONE"))}</b>`,
     `Lens status: <code>${escapeHtml(String(r?.lensStatus || "NONE"))}</code>`,
+    `Lens error: <code>${escapeHtml(String(r?.lensError || "NONE").slice(0,220))}</code>`,
+    `Lens external requests used: <b>${safeNumber(r?.lensExternalRequestsUsed)}</b>`,
+    `V971 PoolKey handoff: <b>${escapeHtml(String(r?.handoffVersion || "NONE"))}</b>`,
+    `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
     `Exact-pool price evidence: <b>${yesNo(r?.exactPoolPriceVerified)}</b>`,
@@ -176006,7 +176102,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only. Zero provider requests and zero state writes. V968 reports the most recent completed scan's existing V967/V441/V455 market-completion evidence; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
+    "<i>Read-only. Zero provider requests and zero state writes. V971 reports the most recent completed scan's V967/V441/V455 market-completion evidence plus the corrected PoolKey handoff and Lens failure detail; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
   ].join("\n");
 }
 
