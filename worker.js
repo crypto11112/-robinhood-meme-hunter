@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V998
+ * V998 RETRY-CONTINUATION ORIGIN FIX:
+ * - builds directly from deployed V997;
+ * - fixes the V997-proven NEPAL case where a candidate injected from the bounded V415 retry queue
+ *   could still have a temporary market/holder blocker but lose retry eligibility solely because
+ *   it was no longer a same-scan member of currentLiveVerifiedLaunchTokensV621;
+ * - V992 market-rescue and V993 holder-rescue eligibility may now continue for either:
+ *     (a) a verified current/live launch in this scan, OR
+ *     (b) the one candidate injected from the existing V415 retry queue in this scan;
+ * - the existing V415 max queue size, max attempts, max age and one-injected-candidate-per-scan
+ *   remain authoritative, so retries remain bounded and cannot become an endless loop;
+ * - no extra immediate provider request, no cooldown bypass, no request-ceiling increase,
+ *   no scoring/risk/holder-standard change and no Telegram-threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V997
  * V997 DEXSCREENER FRESH-RESERVE RETRY COMPLETION:
  * - builds directly from deployed V996 and preserves V995 diagnostics plus V994/V993/V992 retry behaviour;
@@ -8536,7 +8552,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V997";
+const VERSION = "V998";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -107414,6 +107430,18 @@ for (
       state
     );
 
+  /*
+   * V998: remember which candidate(s) entered this scan through the already-bounded
+   * V415 retry injection. A retry-injected candidate must be allowed to remain in
+   * the same bounded recovery chain if its temporary blocker persists.
+   */
+  const retryInjectedAddressesV998 =
+    new Set(
+      retryTokensV415
+        .map(token => normalize(token?.address))
+        .filter(Boolean)
+    );
+
   const selectedBase =
     state.watchedTokens.slice(
       0,
@@ -111339,8 +111367,14 @@ for (
     const verifiedTerminalRiskV992 =
       candidate?.risk?.verified === true &&
       safeNumber(candidate?.risk?.score) > 59;
+
+    const retryEligibleOriginV998 = Boolean(
+      currentLiveVerifiedLaunchTokensV621.has(address) ||
+      retryInjectedAddressesV998.has(address)
+    );
+
     const marketRescueRetryV992 = Boolean(
-      currentLiveVerifiedLaunchTokensV621.has(address) &&
+      retryEligibleOriginV998 &&
       candidate?.market?.verified !== true &&
       !verifiedTerminalRiskV992 &&
       marketTemporarilyUnavailableV992
@@ -111354,6 +111388,9 @@ for (
       cmcTemporarilyUnavailableV996,
       dexTemporarilyUnavailableV997,
       terminalRisk: verifiedTerminalRiskV992,
+      retryEligibleOriginV998,
+      currentLiveOriginV998: currentLiveVerifiedLaunchTokensV621.has(address),
+      retryInjectedOriginV998: retryInjectedAddressesV998.has(address),
       requestCeilingsChanged: false,
       cooldownBypassed: false
     };
@@ -111396,7 +111433,7 @@ for (
     );
     const holderEvidenceCompleteV993 = holderEvidenceVerifiedForAlertV422(candidate);
     const holderRescueRetryV993 = Boolean(
-      currentLiveVerifiedLaunchTokensV621.has(address) &&
+      retryEligibleOriginV998 &&
       candidate?.market?.verified === true &&
       !holderEvidenceCompleteV993 &&
       !verifiedTerminalRiskV992 &&
@@ -111411,6 +111448,9 @@ for (
       marketVerified: candidate?.market?.verified === true,
       holderEvidenceComplete: holderEvidenceCompleteV993,
       terminalRisk: verifiedTerminalRiskV992,
+      retryEligibleOriginV998,
+      currentLiveOriginV998: currentLiveVerifiedLaunchTokensV621.has(address),
+      retryInjectedOriginV998: retryInjectedAddressesV998.has(address),
       requestCeilingsChanged: false,
       retryQueueReused: true
     };
@@ -168001,7 +168041,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V997 holder/market retry diagnostic</b>",
+    "<b>V998 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168024,7 +168064,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V997 preserves V996/V995 diagnostics and also treats DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY as temporary retryable scheduling evidence for a non-terminal current/live candidate. Genuine no-market results remain non-retryable by themselves. Existing bounded V415 queue only; no cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
+    "<i>V998 preserves V997 provider classifications and fixes retry continuation: the existing bounded V992/V993 recovery lanes may continue for a same-scan current/live launch or the one candidate injected from V415. Existing max attempts/age/queue size remain authoritative. No cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
