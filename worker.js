@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V1003
+ * DEXSCREENER COOLDOWN RETRY COMPLETION:
+ * - builds directly from deployed V1002;
+ * - preserves V1002 injected-retry outcome tracing and all V1001/V1000 recovery behaviour;
+ * - fixes the V1002-proven AI case where Market=DEXSCREENER_COOLDOWN was temporary but
+ *   was not classified as retryable by the existing bounded V992 market-rescue lane;
+ * - a non-terminal verified current/live or bounded V415-injected candidate may now re-enter
+ *   the existing V415 retry queue when the final market status is DEXSCREENER_COOLDOWN;
+ * - DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY remains retryable as before;
+ * - genuine negative/no-market findings remain non-retryable by themselves;
+ * - no immediate extra provider request, no cooldown bypass, no request-ceiling increase,
+ *   no scoring/risk/holder-standard change and no Telegram-threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1002
  * RETRY OUTCOME TRACE — DIAGNOSTIC ONLY:
  * - builds directly from deployed V1001;
@@ -8616,7 +8631,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1002";
+const VERSION = "V1003";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111439,8 +111454,12 @@ for (
     );
 
     const dexTemporarilyUnavailableV997 =
-      String(candidate?.market?.status || "") ===
-        "DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY";
+      [
+        "DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY",
+        "DEXSCREENER_COOLDOWN"
+      ].includes(
+        String(candidate?.market?.status || "")
+      );
 
     const marketTemporarilyUnavailableV992 =
       [
@@ -168220,7 +168239,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1002 holder/market retry diagnostic</b>",
+    "<b>V1003 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168232,7 +168251,7 @@ function launchCoverageTelegramMessageV985(state) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1002 injected-retry outcome</b>",
+    "<b>V1003 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
@@ -168250,7 +168269,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1002 preserves V1001 recovery behaviour unchanged and records the latest bounded V415-injected candidate's post-analysis outcome using the existing state write. Diagnostic only: zero extra provider requests/passes/write cycles and no retry-policy/scoring/risk/request-ceiling/Telegram-threshold change.</i>"
+    "<i>V1003 preserves V1002 retry-outcome tracing and extends only the existing bounded market-retry classifier so DEXSCREENER_COOLDOWN is treated as temporary retryable evidence for a non-terminal eligible candidate. No cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
