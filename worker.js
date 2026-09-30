@@ -1,4 +1,12 @@
 /**
+ * Robinhood Chain Meme Hunter — V995
+ * V995 RETRY-QUEUE SNAPSHOT DIAGNOSTIC:
+ * - preserves all V994/V993 scanner, retry, provider, scoring, risk and Telegram behaviour unchanged;
+ * - snapshots each returned candidate's V992 market-rescue and V993 holder-rescue eligible/queued decision into launch coverage;
+ * - snapshots the bounded V415 retry queue at the exact candidate-bearing scan so later queue injection/consumption cannot make /launchcoverage look like enqueue never happened;
+ * - /launchcoverage shows scan-time retry decisions separately from the current live queue;
+ * - diagnostic/state only: zero provider requests, zero extra scan passes, no request-ceiling or qualification changes.
+ *
  * Robinhood Chain Meme Hunter — V994
  * V994 LAST CANDIDATE-BEARING LAUNCH-COVERAGE SNAPSHOT:
  * - preserves all V993 holder/market retry behaviour unchanged;
@@ -8502,7 +8510,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V994";
+const VERSION = "V995";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167555,6 +167563,14 @@ function buildLaunchCoverageFunnelV474({
           market: d.market || null,
           holders: d.holders || null,
           risk: d.risk || null,
+          marketRescueRetryV992:
+            candidate?.marketRescueRetryV992 && typeof candidate.marketRescueRetryV992 === "object"
+              ? { ...candidate.marketRescueRetryV992 }
+              : null,
+          holderRescueRetryV993:
+            candidate?.holderRescueRetryV993 && typeof candidate.holderRescueRetryV993 === "object"
+              ? { ...candidate.holderRescueRetryV993 }
+              : null,
           telegramReasons:
             Array.isArray(d.telegramReasons)
               ? d.telegramReasons
@@ -167633,6 +167649,17 @@ function buildLaunchCoverageFunnelV474({
       currentLiveTelegramSent:
         currentLiveTelegramSent,
       currentLiveEvidenceCompletionV656,
+      analysisRetryQueueAtCaptureV995:
+        (Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : [])
+          .slice(0, V415_ANALYSIS_RETRY_QUEUE_MAX)
+          .map(row => ({
+            address: normalize(row?.address),
+            symbol: row?.symbol || null,
+            reason: row?.reason || null,
+            attempts: safeNumber(row?.attempts),
+            firstQueuedAt: safeNumber(row?.firstQueuedAt) || null,
+            lastDeferredAt: safeNumber(row?.lastDeferredAt) || null
+          })),
       evidenceCompletionQueueV658:
         evidenceCompletionQueueSnapshotV658(state)
     },
@@ -167897,7 +167924,12 @@ function launchCoverageTelegramMessageV985(state) {
       const fallbackText = (demo || cmc || traceRowV990)
         ? `; Market fallback — Gecko: ${escapeHtml(String(geckoDecisionV990 || "N/A"))} · Demo: ${escapeHtml(String(demoStatusV990))}${demoRequestedV990 ? " (REQUESTED)" : ""} · CMC: ${escapeHtml(String(cmcStatusV990))}${cmc?.requestSent === true ? " (REQUESTED)" : ""}`
         : "";
-      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}`;
+      const marketRetryV995 = row?.marketRescueRetryV992 || null;
+      const holderRetryV995 = row?.holderRescueRetryV993 || null;
+      const retryDecisionTextV995 =
+        `; Retry decision — Market ${marketRetryV995?.eligible === true ? "ELIGIBLE" : "NO"}/${marketRetryV995?.queued === true ? "QUEUED" : "NOT_QUEUED"}` +
+        ` · Holder ${holderRetryV995?.eligible === true ? "ELIGIBLE" : "NO"}/${holderRetryV995?.queued === true ? "QUEUED" : "NOT_QUEUED"}`;
+      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}${retryDecisionTextV995}`;
     });
 
   const lines = [
@@ -167924,15 +167956,17 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V994 holder/market retry diagnostic</b>",
+    "<b>V995 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
     `Second target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.selectedSymbol || diagnosticLastV994?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
-    `V992 market-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")).length)}`,
-    `V992 retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.address || "NONE"))}`,
-    `V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
-    `V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
+    `Scan-time V992 market retries queued: ${fmt((Array.isArray(diagnosticLastV994?.analysisRetryQueueAtCaptureV995) ? diagnosticLastV994.analysisRetryQueueAtCaptureV995 : []).filter(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")).length)}`,
+    `Scan-time V993 holder retries queued: ${fmt((Array.isArray(diagnosticLastV994?.analysisRetryQueueAtCaptureV995) ? diagnosticLastV994.analysisRetryQueueAtCaptureV995 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
+    `Current V992 market-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")).length)}`,
+    `Current V992 retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.address || "NONE"))}`,
+    `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
+    `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -167945,7 +167979,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V994 preserves all V993 retry behaviour unchanged. It keeps the true latest scan and separately retains the last candidate-bearing scan so /launchcoverage can show actionable V656/holder/market diagnostics even when the latest scan is empty. Diagnostic/state-retention only: no provider-limit, scoring/risk, request-ceiling or Telegram-threshold change.</i>"
+    "<i>V995 preserves all V994/V993 retry behaviour unchanged. It snapshots per-candidate retry eligibility/queue decisions and the exact V415 queue at the candidate-bearing scan, separating scan-time enqueue evidence from the current live queue. Diagnostic/state only: no provider-limit, scoring/risk, request-ceiling or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
