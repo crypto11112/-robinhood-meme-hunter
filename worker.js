@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V1009
+ * /LAUNCHCOVERAGE BITQUERY TELEMETRY WIRING HOTFIX:
+ * - builds directly from deployed V1008;
+ * - fixes the V1008 /launchcoverage runtime regression where the formatter
+ *   referenced env.BITQUERY_ACCESS_TOKEN without receiving env;
+ * - passes env into the existing compact launchcoverage formatter so the
+ *   Bitquery token-present diagnostic can render safely;
+ * - no scanner, provider, retry, holder, scoring, risk, budget or Telegram
+ *   qualification behaviour is changed.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1008
  * HOLDER-FALLBACK PREREQUISITE + BITQUERY HEALTH TELEMETRY:
  * - builds directly from deployed V1007;
@@ -8712,7 +8724,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1008";
+const VERSION = "V1009";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -168799,7 +168811,7 @@ function updateLaunchCoverageCumulativeV474(
    Telegram delivery cannot be blocked by the very large diagnostic sections
    accumulated in the main state. Zero provider requests and zero writes.
 */
-function launchCoverageTelegramMessageV985(state) {
+function launchCoverageTelegramMessageV985(state, env) {
   const c = ensureLaunchCoverageCumulativeV474(state);
   const last = c?.lastScan || {};
   const lastCandidateBearingV994 = c?.lastCandidateBearingScanV994 || null;
@@ -168922,7 +168934,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1008 holder/market retry diagnostic</b>",
+    "<b>V1009 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168934,14 +168946,14 @@ function launchCoverageTelegramMessageV985(state) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1008 injected-retry outcome</b>",
+    "<b>V1009 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1008 Bitquery health</b>",
+    "<b>V1009 Bitquery health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
@@ -168960,7 +168972,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1008 preserves V1007 scanner/provider behaviour, prevents already-verified holders from entering the direct-chain fallback, exposes exact holder-fallback prerequisites, and adds zero-request Bitquery health telemetry to /launchcoverage. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1009 preserves V1008 scanner/provider behaviour and fixes only the /launchcoverage Bitquery diagnostic wiring by passing env into the formatter. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\n");
 }
@@ -172495,7 +172507,8 @@ async function telegramCommandReplyV271(
   ) {
     reply =
       launchCoverageTelegramMessageV985(
-        state
+        state,
+        env
       );
 
     if (diagnosticV273) {
