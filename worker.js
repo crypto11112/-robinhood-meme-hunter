@@ -1,6 +1,9 @@
 /**
  * Robinhood Chain Meme Hunter
- * V1017
+ * V1018
+ * - adds zero-request Bitquery candidate-recovery telemetry to /launchcoverage;
+ * - measures the existing shared Bitquery holder/market/ranked-pair/liquidity aliases instead of treating HTTP 200 alone as improvement;
+ * - adds no Bitquery HTTP requests and changes no scoring, risk, Telegram thresholds or request ceilings;
  * - reconnects the existing ONE shared Bitquery production query after the V1016 HTTP 200 auth proof;
  * - discovery-live remains first choice; if unavailable, one ordinary analysis-budget slot may fund that same shared query;
  * - adds /launchcoverage production Bitquery HTTP/status/budget-lane telemetry;
@@ -8821,7 +8824,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1017";
+const VERSION = "V1018";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -169239,7 +169242,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1017 holder/market retry diagnostic</b>",
+    "<b>V1018 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -169251,14 +169254,14 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1017 injected-retry outcome</b>",
+    "<b>V1018 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1017 Bitquery production health</b>",
+    "<b>V1018 Bitquery production health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
@@ -169268,6 +169271,13 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Shared production query: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastStatus || "UNRECORDED"))}`,
     `Shared production HTTP: ${state?.bagsDiscoveryV210?.lastHttpStatus ?? "UNRECORDED"}`,
     `Budget lane: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastBudgetLaneV1017 || "UNRECORDED"))}`,
+    "",
+    "<b>V1018 Bitquery candidate recovery — zero extra requests</b>",
+    `Holder target: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.address || state?.bitqueryHolderEvidenceV227?.targetAddress || "NONE"))} · attempted ${state?.bitqueryHolderEvidenceV227?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryHolderEvidenceV227?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryHolderEvidenceV227?.status || "UNVERIFIED"))}`,
+    `Market target: ${escapeHtml(String(state?.bitqueryMarketEvidenceV233?.address || state?.bitqueryMarketEvidenceV233?.targetAddress || "NONE"))} · attempted ${state?.bitqueryMarketEvidenceV233?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryMarketEvidenceV233?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryMarketEvidenceV233?.status || "UNVERIFIED"))}`,
+    `Ranked-pair target: ${escapeHtml(String(state?.bitqueryRankedPairEvidenceV234?.address || state?.bitqueryRankedPairEvidenceV234?.targetAddress || "NONE"))} · attempted ${state?.bitqueryRankedPairEvidenceV234?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryRankedPairEvidenceV234?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryRankedPairEvidenceV234?.status || "UNVERIFIED"))}`,
+    `Liquidity target: ${escapeHtml(String(state?.bitqueryLiquidityEvidenceV237?.address || state?.bitqueryLiquidityEvidenceV237?.targetAddress || state?.bitqueryLiquidityEvidenceV237?.poolId || "NONE"))} · attempted ${state?.bitqueryLiquidityEvidenceV237?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryLiquidityEvidenceV237?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryLiquidityEvidenceV237?.status || "UNVERIFIED"))}`,
+    `Verified Bitquery evidence lanes: ${[state?.bitqueryHolderEvidenceV227, state?.bitqueryMarketEvidenceV233, state?.bitqueryRankedPairEvidenceV234, state?.bitqueryLiquidityEvidenceV237].filter(row => row?.verified === true).length}/4`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -169280,7 +169290,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1017 keeps the V1016 provider/scoring/Telegram rules and lets the existing single shared Bitquery production request use one normal analysis slot only when discovery-live cannot fund it. Global/request ceilings and notification reserves remain enforced.</i>"
+    "<i>V1018 keeps V1017 production Bitquery routing unchanged and adds only candidate-level recovery telemetry using evidence already returned by the same shared request. Zero extra Bitquery HTTP requests; scoring/risk/Telegram thresholds and request ceilings are unchanged.</i>"
   ];
   return lines.join("\n");
 }
