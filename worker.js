@@ -7888,7 +7888,8 @@
  * - No scoring, Momentum, verified USD, holder, qualification, KV or request-budget changes
  *
  * CURRENT BUILD: V231
- * - FIX: Bitquery holder fallback now uses dataset: realtime, matching the entitlement proven by V229 diagnostics
+ * - V1021: Bitquery EVM.Holders holder alias uses dataset: combined for current holder state; same shared request, zero added HTTP calls
+ * - PRESERVED: earlier realtime entitlement diagnostics remain historical context only
  * - FIX: removes the combined-dataset entitlement 403 that blocked the shared Bitquery launch/trading/holder request
  * - SAFETY: realtime holder rows are still exact-token matched, positive-balance filtered, freshness bounded and passed through existing holder-integrity maths before concentration can be verified
  * - SAFETY: Pons V2 remains excluded from Bitquery concentration promotion until dynamic protocol-owned balances are explicitly reconciled
@@ -8824,7 +8825,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1020";
+const VERSION = "V1021";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -51721,7 +51722,7 @@ async function discoverVerifiedBagsLaunchesV210(
   const bitqueryHolderGraphqlV227 =
     bitqueryHolderTargetAddressV227
       ? `
-      HolderEvidenceV227: EVM(network: robinhood, dataset: realtime) {
+      HolderEvidenceV227: EVM(network: robinhood, dataset: combined) {
         PriorityHolderRowsV227: Holders(
           limit: {count: ${BITQUERY_HOLDER_ROW_LIMIT_V227}}
           orderBy: {descending: Balance_Amount}
@@ -52593,8 +52594,8 @@ async function discoverVerifiedBagsLaunchesV210(
                   ? "ROWS_RETURNED_BUT_NONE_PASSED_POSITIVE_ADDRESS_AMOUNT_FILTER_V1019"
                   : "NO_POSITIVE_HOLDER_ROWS_V1019",
         rows: bitqueryHolderRowsV227,
-        dataset: "realtime",
-        source: "BITQUERY_EVM_HOLDERS_V227",
+        dataset: "combined",
+        source: "BITQUERY_EVM_HOLDERS_COMBINED_V1021",
         externalRequestsAdded: 0,
         sharedRequestHttpStatusV229: response.status,
         sharedRequestContentTypeV229: bitqueryResponseContentTypeV229 || null,
@@ -169296,7 +169297,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Shared production HTTP: ${state?.bagsDiscoveryV210?.lastHttpStatus ?? "UNRECORDED"}`,
     `Budget lane: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastBudgetLaneV1017 || "UNRECORDED"))}`,
     "",
-    "<b>V1020 Bitquery candidate recovery — current/live holder priority · zero extra requests</b>",
+    "<b>V1021 Bitquery candidate recovery — EVM.Holders combined dataset · zero extra requests</b>",
     `Holder target: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.address || state?.bitqueryHolderEvidenceV227?.targetAddress || "NONE"))} · attempted ${state?.bitqueryHolderEvidenceV227?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryHolderEvidenceV227?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryHolderEvidenceV227?.status || "UNVERIFIED"))}`,
     `↳ Holder rows — raw ${fmt(state?.bitqueryHolderEvidenceV227?.rawRowCountV1019)} · positive accepted ${fmt(state?.bitqueryHolderEvidenceV227?.rowCount)} · count rows ${fmt(state?.bitqueryHolderEvidenceV227?.holderCountRowCountV1019)} · holder count ${state?.bitqueryHolderEvidenceV227?.holderCount ?? "UNVERIFIED"}`,
     `↳ Holder diagnosis: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.holderDiagnosticV1019 || "AWAITING_V1019_SAMPLE"))} · dataset ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.dataset || "UNVERIFIED"))} · reason ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.targetReason || "UNVERIFIED"))}`,
@@ -169316,7 +169317,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1020 preserves V1019 production/scoring behaviour and prioritizes the highest-priority current/live token in the existing shared Bitquery holder alias before older persisted holder targets. It records raw holder rows, accepted positive rows and holder-count rows so NO_POSITIVE_HOLDER_ROWS can be diagnosed without adding any Bitquery HTTP requests. Existing V240 market promotion, V227 holder fallback, risk/scoring rules, Telegram thresholds and request ceilings are unchanged.</i>"
+    "<i>V1021 preserves V1020 production/scoring behaviour and migrates only the existing shared Robinhood EVM.Holders holder alias from dataset realtime to dataset combined. The same single Bitquery HTTP request is reused; no extra request is added. Positive-balance/address verification, V227 holder promotion, concentration/risk rules, Telegram thresholds and request ceilings are unchanged.</i>"
   ];
   return lines.join("\n");
 }
