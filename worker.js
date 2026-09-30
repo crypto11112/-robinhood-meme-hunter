@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V1008
+ * HOLDER-FALLBACK PREREQUISITE + BITQUERY HEALTH TELEMETRY:
+ * - builds directly from deployed V1007;
+ * - prevents already-VERIFIED holder evidence from entering the direct-chain fallback;
+ * - exposes direct-chain prerequisite telemetry (totalSupply, verified launch block,
+ *   current head, priority entry, holder already verified);
+ * - adds zero-request Bitquery health telemetry to /launchcoverage using the existing
+ *   V251 service state and BITQUERY_ACCESS_TOKEN presence only;
+ * - no provider request is added for diagnostics;
+ * - scanner, provider routing, request ceilings, scoring, risk, qualification and
+ *   Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1007
  * /LAUNCHCOVERAGE TELEGRAM NEWLINE HOTFIX:
  * - builds directly from deployed V1006;
@@ -8698,7 +8712,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1007";
+const VERSION = "V1008";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -98024,11 +98038,26 @@ async function analyzeToken(
     source: "DIRECT_CHAIN_TRANSFER_RECONSTRUCTION_V1004",
     entrySignalsV1006: [],
     observedReasonsV1006: [],
-    observedFailureClassesV1006: []
+    observedFailureClassesV1006: [],
+    prerequisitesV1008: {
+      totalSupply: false,
+      verifiedLaunchBlock: false,
+      currentHead: false,
+      holderPriorityEntry: false,
+      holdersAlreadyVerified: false
+    }
   };
 
   const directChainHolderEntryEvidenceV1006 =
     directChainHolderTemporaryEvidenceV1006(holders);
+
+  const directLaunchBlockV1008 =
+    directChainHolderLaunchBlockV1004(watched);
+  const directHeadV1008 =
+    safeNumber(options?.latestNumberV749 ?? null);
+  const holdersAlreadyVerifiedV1008 =
+    holders?.verified === true &&
+    holders?.concentrationVerified === true;
 
   directChainHolderFallbackTelemetryV1004.entrySignalsV1006 =
     directChainHolderEntryEvidenceV1006.signals;
@@ -98036,9 +98065,27 @@ async function analyzeToken(
     directChainHolderEntryEvidenceV1006.reasons;
   directChainHolderFallbackTelemetryV1004.observedFailureClassesV1006 =
     directChainHolderEntryEvidenceV1006.failureClasses;
+  directChainHolderFallbackTelemetryV1004.prerequisitesV1008 = {
+    totalSupply: Boolean(validation.totalSupply),
+    verifiedLaunchBlock:
+      Number.isFinite(Number(directLaunchBlockV1008)) &&
+      Number(directLaunchBlockV1008) > 0,
+    currentHead:
+      Number.isFinite(Number(directHeadV1008)) &&
+      Number(directHeadV1008) > 0,
+    holderPriorityEntry:
+      holderPriorityEntryRequestedV987 === true,
+    holdersAlreadyVerified:
+      holdersAlreadyVerifiedV1008
+  };
 
   if (
+    holdersAlreadyVerifiedV1008 !== true &&
     validation.totalSupply &&
+    Number.isFinite(Number(directLaunchBlockV1008)) &&
+    Number(directLaunchBlockV1008) > 0 &&
+    Number.isFinite(Number(directHeadV1008)) &&
+    Number(directHeadV1008) > 0 &&
     directChainHolderEntryEvidenceV1006.eligible === true &&
     holderPriorityEntryRequestedV987 === true
   ) {
@@ -98074,6 +98121,33 @@ async function analyzeToken(
         directChainHolderFallbackV1004:
           directFallbackV1004
       };
+    }
+  }
+
+  if (
+    directChainHolderFallbackTelemetryV1004.eligible !== true &&
+    !directChainHolderFallbackTelemetryV1004.status
+  ) {
+    const pV1008 =
+      directChainHolderFallbackTelemetryV1004.prerequisitesV1008 || {};
+    if (pV1008.holdersAlreadyVerified === true) {
+      directChainHolderFallbackTelemetryV1004.status =
+        "HOLDERS_ALREADY_VERIFIED_V1008";
+    } else if (pV1008.totalSupply !== true) {
+      directChainHolderFallbackTelemetryV1004.status =
+        "TOTAL_SUPPLY_PREREQUISITE_MISSING_V1008";
+    } else if (pV1008.verifiedLaunchBlock !== true) {
+      directChainHolderFallbackTelemetryV1004.status =
+        "VERIFIED_LAUNCH_BLOCK_PREREQUISITE_MISSING_V1008";
+    } else if (pV1008.currentHead !== true) {
+      directChainHolderFallbackTelemetryV1004.status =
+        "CURRENT_HEAD_PREREQUISITE_MISSING_V1008";
+    } else if (pV1008.holderPriorityEntry !== true) {
+      directChainHolderFallbackTelemetryV1004.status =
+        "HOLDER_PRIORITY_PREREQUISITE_MISSING_V1008";
+    } else if (directChainHolderEntryEvidenceV1006.eligible !== true) {
+      directChainHolderFallbackTelemetryV1004.status =
+        "TEMPORARY_HOLDER_FAILURE_SIGNAL_MISSING_V1008";
     }
   }
 
@@ -168773,8 +168847,13 @@ function launchCoverageTelegramMessageV985(state) {
         ? `; V987 holder-priority entry ${v987.enteredHolderIntelligence === true ? "YES" : "NO"}${v987.rescueEntryUsed === true ? " (RESCUE)" : ""} · V666 claim/use ${v987.v666ClaimedForToken === true ? "YES" : "NO"}/${v987.v666UsedForToken === true ? "YES" : "NO"}${v987.v666ConsumeStatus ? ` · ${escapeHtml(String(v987.v666ConsumeStatus))}` : ""}`
         : "";
       const directHolderV1005 = row?.holders?.directChainHolderFallbackV1004 || null;
+      const directPrereqV1008 =
+        directHolderV1005?.prerequisitesV1008 || null;
+      const directPrereqTextV1008 = directPrereqV1008
+        ? ` · prereq supply:${directPrereqV1008.totalSupply === true ? "Y" : "N"} launch:${directPrereqV1008.verifiedLaunchBlock === true ? "Y" : "N"} head:${directPrereqV1008.currentHead === true ? "Y" : "N"} priority:${directPrereqV1008.holderPriorityEntry === true ? "Y" : "N"} alreadyVerified:${directPrereqV1008.holdersAlreadyVerified === true ? "Y" : "N"}`
+        : "";
       const directHolderTextV1005 = directHolderV1005
-        ? `; Direct-chain holders — eligible ${directHolderV1005.eligible === true ? "YES" : "NO"} · attempted ${directHolderV1005.attempted === true ? "YES" : "NO"} · verified ${directHolderV1005.verified === true ? "YES" : "NO"} · ${escapeHtml(String(directHolderV1005.status || "NO_STATUS"))}${Array.isArray(directHolderV1005.entrySignalsV1006) && directHolderV1005.entrySignalsV1006.length ? ` · entry ${escapeHtml(directHolderV1005.entrySignalsV1006.join(","))}` : ""}${safeNumber(directHolderV1005.blocks) > 0 ? ` · ${fmt(directHolderV1005.blocks)} blocks` : ""}${safeNumber(directHolderV1005.transferRows) >= 0 && directHolderV1005.attempted === true ? ` · ${fmt(directHolderV1005.transferRows)} transfers` : ""}`
+        ? `; Direct-chain holders — eligible ${directHolderV1005.eligible === true ? "YES" : "NO"} · attempted ${directHolderV1005.attempted === true ? "YES" : "NO"} · verified ${directHolderV1005.verified === true ? "YES" : "NO"} · ${escapeHtml(String(directHolderV1005.status || "NO_STATUS"))}${Array.isArray(directHolderV1005.entrySignalsV1006) && directHolderV1005.entrySignalsV1006.length ? ` · entry ${escapeHtml(directHolderV1005.entrySignalsV1006.join(","))}` : ""}${directPrereqTextV1008}${safeNumber(directHolderV1005.blocks) > 0 ? ` · ${fmt(directHolderV1005.blocks)} blocks` : ""}${safeNumber(directHolderV1005.transferRows) >= 0 && directHolderV1005.attempted === true ? ` · ${fmt(directHolderV1005.transferRows)} transfers` : ""}`
         : "";
       const demo = row?.market?.alternative?.coinGeckoDemoV660 || null;
       const cmc = row?.market?.alternative?.coinMarketCapV739 || null;
@@ -168804,6 +168883,21 @@ function launchCoverageTelegramMessageV985(state) {
       return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}${directHolderTextV1005}${retryDecisionTextV995}`;
     });
 
+  const bitqueryServiceStateV1008 =
+    state?.services?.bitqueryV251 || {};
+  const bitqueryCooldownUntilV1008 =
+    safeNumber(bitqueryServiceStateV1008?.cooldownUntil) || null;
+  const bitqueryLastSuccessV1008 =
+    safeNumber(bitqueryServiceStateV1008?.lastSuccessAt) || null;
+  const bitqueryLast402V1008 =
+    safeNumber(bitqueryServiceStateV1008?.last402At) || null;
+  const bitqueryStatusV1008 =
+    String(bitqueryServiceStateV1008?.lastStatus || "NO_RECORDED_STATUS");
+  const bitqueryCoolingV1008 =
+    Boolean(bitqueryCooldownUntilV1008 && bitqueryCooldownUntilV1008 > Date.now());
+  const bitqueryTokenConfiguredV1008 =
+    Boolean(String(env?.BITQUERY_ACCESS_TOKEN || "").trim());
+
   const lines = [
     `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
     "",
@@ -168828,7 +168922,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1007 holder/market retry diagnostic</b>",
+    "<b>V1008 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168840,12 +168934,20 @@ function launchCoverageTelegramMessageV985(state) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1007 injected-retry outcome</b>",
+    "<b>V1008 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
+    "",
+    "<b>V1008 Bitquery health</b>",
+    `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
+    `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
+    `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
+    `Cooldown until: ${bitqueryCooldownUntilV1008 ? escapeHtml(new Date(bitqueryCooldownUntilV1008).toISOString()) : "NONE"}`,
+    `Last success: ${bitqueryLastSuccessV1008 ? escapeHtml(new Date(bitqueryLastSuccessV1008).toISOString()) : "UNRECORDED"}`,
+    `Last 402: ${bitqueryLast402V1008 ? escapeHtml(new Date(bitqueryLast402V1008).toISOString()) : "UNRECORDED"}`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -168858,7 +168960,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1007 preserves V1006 scanner/provider/verification behaviour and fixes only /launchcoverage formatting so the proven line-safe Telegram chunker receives real newline separators. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1008 preserves V1007 scanner/provider behaviour, prevents already-verified holders from entering the direct-chain fallback, exposes exact holder-fallback prerequisites, and adds zero-request Bitquery health telemetry to /launchcoverage. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\n");
 }
