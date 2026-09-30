@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V1001
+ * V1000 LIVE-SET SCOPE HOTFIX:
+ * - builds directly from deployed V1000;
+ * - fixes SCAN_SCHEDULER_REQUEST_EXCEPTION_V673 / HTTP 500:
+ *     ReferenceError: liveSet is not defined;
+ * - V999/V1000 correctly aligned retry-origin semantics with the launch-coverage
+ *   current/live definition, but accidentally referenced launchcoverage-local `liveSet`
+ *   from inside the production analysis loop;
+ * - production analysis already has the authoritative in-scope current/live Set
+ *   named `liveTokens`, so V1001 uses liveTokens.has(address) there instead;
+ * - preserves V1000's verified-launch rule exactly:
+ *     verifiedLaunchSourceV476 OR verifiedLaunchAgeV223;
+ * - no retry-policy, provider, request-budget, scoring, risk, holder-standard,
+ *   qualification or Telegram-threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1000
  * VERIFIED-LAUNCH ORIGIN PARITY FIX:
  * - builds directly from deployed V999;
@@ -8585,7 +8602,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1000";
+const VERSION = "V1001";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111407,7 +111424,7 @@ for (
     );
 
     const verifiedCurrentLiveOriginV999 = Boolean(
-      liveSet.has(address) &&
+      liveTokens.has(address) &&
       verifiedLaunchOriginV1000
     );
 
@@ -168088,7 +168105,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1000 holder/market retry diagnostic</b>",
+    "<b>V1001 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168111,7 +168128,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1000 preserves V999 recovery logic and makes retry-origin verification exactly match the launch-coverage funnel: V476 verified source OR V223 verified launch-age/source proof, while still requiring liveSet membership or bounded V415 injection. Existing retry limits remain unchanged; no cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
+    "<i>V1001 preserves V1000 recovery semantics and fixes only the production-scan scope error: the analysis loop uses its existing in-scope liveTokens Set instead of the launchcoverage-local liveSet variable. V476 OR V223 launch verification and all bounded retry/provider/scoring/risk/Telegram rules remain unchanged.</i>"
   ];
   return lines.join("\\n");
 }
