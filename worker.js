@@ -1,4 +1,13 @@
 /**
+ * Robinhood Chain Meme Hunter — V994
+ * V994 LAST CANDIDATE-BEARING LAUNCH-COVERAGE SNAPSHOT:
+ * - preserves all V993 holder/market retry behaviour unchanged;
+ * - keeps the absolute latest scan exactly as before, including genuine zero-candidate scans;
+ * - additionally persists the most recent scan that actually returned one or more current/live candidates;
+ * - /launchcoverage uses that candidate-bearing snapshot for V656 evidence and holder/market retry diagnostics when the absolute latest scan is empty;
+ * - prevents stale holder-target telemetry from being presented as if it belonged to a zero-candidate latest scan;
+ * - diagnostic/state-retention only: zero provider requests, zero extra scan passes, no scoring/risk/Telegram/request-limit changes.
+ *
  * Robinhood Chain Meme Hunter — V993
  * V991 POST-RISK MARKET-FALLBACK PRIORITISATION:
  * - preserves V990 diagnostics and V988 holder-claim routing;
@@ -8493,7 +8502,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V993";
+const VERSION = "V994";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167798,6 +167807,17 @@ function updateLaunchCoverageCumulativeV474(
       )
   };
 
+  /*
+   * V994: retain the most recent scan that actually returned current/live
+   * candidates. This is diagnostic state only. The authoritative latest scan
+   * above is never replaced or hidden, so genuine empty scans remain visible.
+   */
+  if (safeNumber(row?.currentLiveReturnedCandidates) > 0) {
+    cumulative.lastCandidateBearingScanV994 = {
+      ...cumulative.lastScan
+    };
+  }
+
   return cumulative;
 }
 
@@ -167813,6 +167833,14 @@ function updateLaunchCoverageCumulativeV474(
 function launchCoverageTelegramMessageV985(state) {
   const c = ensureLaunchCoverageCumulativeV474(state);
   const last = c?.lastScan || {};
+  const lastCandidateBearingV994 = c?.lastCandidateBearingScanV994 || null;
+  const diagnosticLastV994 =
+    safeNumber(last?.currentLiveReturnedCandidates) > 0
+      ? last
+      : (lastCandidateBearingV994 || last);
+  const usingPriorCandidateScanV994 =
+    diagnosticLastV994 !== last &&
+    safeNumber(diagnosticLastV994?.currentLiveReturnedCandidates) > 0;
   const fmt = value => Number(safeNumber(value)).toLocaleString("en-GB");
   const ratio = (a, b) => {
     const n = safeNumber(a), d = safeNumber(b);
@@ -167833,8 +167861,8 @@ function launchCoverageTelegramMessageV985(state) {
       : "None";
   };
 
-  const evidence = (Array.isArray(last.currentLiveEvidenceCompletionV656)
-    ? last.currentLiveEvidenceCompletionV656 : [])
+  const evidence = (Array.isArray(diagnosticLastV994.currentLiveEvidenceCompletionV656)
+    ? diagnosticLastV994.currentLiveEvidenceCompletionV656 : [])
     .slice(0, 4)
     .map((row, i) => {
       const a = normalize(row?.address);
@@ -167893,12 +167921,14 @@ function launchCoverageTelegramMessageV985(state) {
     `Telegram sent: ${fmt(last?.currentLiveTelegramSent)}`,
     "",
     "<b>V656 evidence completion — current/live returned</b>",
+    ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V993 holder/market retry diagnostic</b>",
-    `First target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
-    `First claim consumed / re-rank: ${last?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${last?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
-    `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || last?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
+    "<b>V994 holder/market retry diagnostic</b>",
+    `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
+    `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
+    `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
+    `Second target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.selectedSymbol || diagnosticLastV994?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
     `V992 market-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")).length)}`,
     `V992 retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.address || "NONE"))}`,
     `V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
@@ -167915,7 +167945,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V993 preserves V992 market-rescue retry behaviour and adds the matching bounded retry for a viable current/live candidate whose market is verified but holder/risk evidence is temporarily unavailable from Blockscout/indexing. It reuses the existing V415 queue and makes no extra request in the current scan. No provider-limit increase, scoring/risk change or Telegram-threshold change.</i>"
+    "<i>V994 preserves all V993 retry behaviour unchanged. It keeps the true latest scan and separately retains the last candidate-bearing scan so /launchcoverage can show actionable V656/holder/market diagnostics even when the latest scan is empty. Diagnostic/state-retention only: no provider-limit, scoring/risk, request-ceiling or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
