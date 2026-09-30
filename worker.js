@@ -1,5 +1,5 @@
 /**
- * Robinhood Chain Meme Hunter — V991
+ * Robinhood Chain Meme Hunter — V992
  * V991 POST-RISK MARKET-FALLBACK PRIORITISATION:
  * - preserves V990 diagnostics and V988 holder-claim routing;
  * - for automatic priority/current-live candidates, defers CoinGecko Demo/CMC rescue until holder evidence has been gathered;
@@ -8493,7 +8493,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V991";
+const VERSION = "V992";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111255,6 +111255,47 @@ for (
       v417ProgressivePriorityAttempt &&
       progressiveEvidenceIncompleteV417(candidate);
 
+    /*
+     * V992: if the best current/live candidate survives post-risk routing but
+     * the already-configured market fallbacks are temporarily unavailable,
+     * retain it in the EXISTING bounded V415 retry queue instead of clearing it.
+     * No cooldown is bypassed and no request limit is raised. The next scan may
+     * retry it only through the normal V415 one-candidate injection path.
+     */
+    const postRiskTelemetryV992 =
+      candidate?.market?.postRiskMarketFallbackV991 || null;
+    const demoStatusV992 =
+      String(postRiskTelemetryV992?.demoStatus || "");
+    const cmcStatusV992 =
+      String(postRiskTelemetryV992?.cmcStatus || "");
+    const marketTemporarilyUnavailableV992 =
+      [
+        "COINGECKO_DEMO_FRESH_SPACING_V660",
+        "COINGECKO_DEMO_COOLDOWN_V660",
+        "COINGECKO_DEMO_SCAN_LIMIT_V660",
+        "COINGECKO_DEMO_BUDGET_PROTECTED_V660"
+      ].includes(demoStatusV992) ||
+      cmcStatusV992 === "CMC_COOLDOWN_V739";
+    const verifiedTerminalRiskV992 =
+      candidate?.risk?.verified === true &&
+      safeNumber(candidate?.risk?.score) > 59;
+    const marketRescueRetryV992 = Boolean(
+      currentLiveVerifiedLaunchTokensV621.has(address) &&
+      candidate?.market?.verified !== true &&
+      !verifiedTerminalRiskV992 &&
+      marketTemporarilyUnavailableV992
+    );
+
+    candidate.marketRescueRetryV992 = {
+      eligible: marketRescueRetryV992,
+      queued: false,
+      demoStatus: demoStatusV992 || null,
+      cmcStatus: cmcStatusV992 || null,
+      terminalRisk: verifiedTerminalRiskV992,
+      requestCeilingsChanged: false,
+      cooldownBypassed: false
+    };
+
     if (v417IncompleteProgress) {
       queueDeferredAnalysisV415(
         state,
@@ -111263,6 +111304,14 @@ for (
         marketFreshPriorityScore(watched, newTokens, liveTokens)
       );
       scannerFunnelV415.progressiveCompletionV417.incompleteRequeued++;
+    } else if (marketRescueRetryV992) {
+      queueDeferredAnalysisV415(
+        state,
+        watched,
+        `MARKET_RESCUE_RETRY_V992:${demoStatusV992 || cmcStatusV992 || "TEMPORARILY_UNAVAILABLE"}`,
+        marketFreshPriorityScore(watched, newTokens, liveTokens)
+      );
+      candidate.marketRescueRetryV992.queued = true;
     } else {
       clearDeferredAnalysisV415(
         state,
@@ -167781,10 +167830,12 @@ function launchCoverageTelegramMessageV985(state) {
     "<b>V656 evidence completion — current/live returned</b>",
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V990 holder-claim / market-fallback trace diagnostic</b>",
+    "<b>V992 holder-claim / market-fallback trace diagnostic</b>",
     `First target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${last?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${last?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
     `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || last?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
+    `V992 market-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")).length)}`,
+    `V992 retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.address || "NONE"))}`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -167797,7 +167848,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V990 preserves V988 holder-claim behaviour unchanged. It reads the already-existing per-token CoinGecko decision trace when candidate alternativeMarketData is absent, so GeckoTerminal cooldown/429 fallback decisions are visible without making any extra provider request. Diagnostic-only: no provider request, budget, cooldown, scoring, risk or Telegram threshold changes.</i>"
+    "<i>V992 preserves V991 post-risk market prioritisation. A viable current/live candidate blocked only by temporary CoinGecko Demo spacing/cooldown or CMC cooldown is retained in the existing bounded V415 retry queue for a later normal scan. No cooldown bypass, provider-limit increase, scoring/risk change or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
