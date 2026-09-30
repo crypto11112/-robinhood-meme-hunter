@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V999
+ * AUTHORITATIVE CURRENT/LIVE RETRY-ORIGIN FIX:
+ * - builds directly from deployed V998;
+ * - fixes the V998-proven AVAST case where a candidate was a genuine current/live returned
+ *   candidate with verified launch source, but was excluded from retry solely because it was
+ *   not present in the narrower currentLiveVerifiedLaunchTokensV621 set;
+ * - retry eligibility now accepts any candidate that is:
+ *     (a) currently in liveSet AND has verified launch source, OR
+ *     (b) injected from the existing bounded V415 retry queue;
+ * - this matches the authoritative /launchcoverage current/live returned-candidate definition
+ *   while preventing old/non-live watchlist rows from entering the recovery lane;
+ * - existing V415 queue size, max attempts, max age and one-injection-per-scan remain unchanged;
+ * - no extra immediate provider request, cooldown bypass, request-ceiling increase,
+ *   scoring/risk/holder-standard change or Telegram-threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V998
  * V998 RETRY-CONTINUATION ORIGIN FIX:
  * - builds directly from deployed V997;
@@ -8552,7 +8569,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V998";
+const VERSION = "V999";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111368,8 +111385,13 @@ for (
       candidate?.risk?.verified === true &&
       safeNumber(candidate?.risk?.score) > 59;
 
+    const verifiedCurrentLiveOriginV999 = Boolean(
+      liveSet.has(address) &&
+      candidate?.verifiedLaunchSourceV476?.verified === true
+    );
+
     const retryEligibleOriginV998 = Boolean(
-      currentLiveVerifiedLaunchTokensV621.has(address) ||
+      verifiedCurrentLiveOriginV999 ||
       retryInjectedAddressesV998.has(address)
     );
 
@@ -111389,6 +111411,7 @@ for (
       dexTemporarilyUnavailableV997,
       terminalRisk: verifiedTerminalRiskV992,
       retryEligibleOriginV998,
+      verifiedCurrentLiveOriginV999,
       currentLiveOriginV998: currentLiveVerifiedLaunchTokensV621.has(address),
       retryInjectedOriginV998: retryInjectedAddressesV998.has(address),
       requestCeilingsChanged: false,
@@ -111449,6 +111472,7 @@ for (
       holderEvidenceComplete: holderEvidenceCompleteV993,
       terminalRisk: verifiedTerminalRiskV992,
       retryEligibleOriginV998,
+      verifiedCurrentLiveOriginV999,
       currentLiveOriginV998: currentLiveVerifiedLaunchTokensV621.has(address),
       retryInjectedOriginV998: retryInjectedAddressesV998.has(address),
       requestCeilingsChanged: false,
@@ -168041,7 +168065,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V998 holder/market retry diagnostic</b>",
+    "<b>V999 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168064,7 +168088,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V998 preserves V997 provider classifications and fixes retry continuation: the existing bounded V992/V993 recovery lanes may continue for a same-scan current/live launch or the one candidate injected from V415. Existing max attempts/age/queue size remain authoritative. No cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
+    "<i>V999 preserves V998/V997 recovery logic and aligns retry origin with the authoritative funnel definition: a verified-launch candidate currently in liveSet, or a bounded V415-injected retry, may continue recovery. Old/non-live watchlist rows remain excluded. Existing retry limits remain unchanged; no cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
