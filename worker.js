@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V997
+ * V997 DEXSCREENER FRESH-RESERVE RETRY COMPLETION:
+ * - builds directly from deployed V996 and preserves V995 diagnostics plus V994/V993/V992 retry behaviour;
+ * - fixes the V996-proven HOOD IS / INTERNET case where DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY is
+ *   a temporary same-scan scheduling state but was not classified as retryable;
+ * - a non-terminal verified current/live launch with market still unverified may enter the EXISTING
+ *   bounded V415 retry queue when its market status is DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY;
+ * - genuine no-market results remain non-retryable by themselves;
+ * - adds no immediate provider request, bypasses no cooldown, raises no request ceiling, and changes
+ *   no scoring, risk proof, holder standard or Telegram threshold.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V996
  * V996 TEMPORARY MARKET-PROVIDER FAILURE RETRY:
  * - preserves V995 diagnostics and all V994/V993 retry, scoring, risk and Telegram behaviour;
@@ -8523,7 +8536,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V996";
+const VERSION = "V997";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111310,6 +111323,10 @@ for (
       /^CMC_HTTP_5\d\d_V739$/.test(cmcStatusV992)
     );
 
+    const dexTemporarilyUnavailableV997 =
+      String(candidate?.market?.status || "") ===
+        "DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY";
+
     const marketTemporarilyUnavailableV992 =
       [
         "COINGECKO_DEMO_FRESH_SPACING_V660",
@@ -111317,7 +111334,8 @@ for (
         "COINGECKO_DEMO_SCAN_LIMIT_V660",
         "COINGECKO_DEMO_BUDGET_PROTECTED_V660"
       ].includes(demoStatusV992) ||
-      cmcTemporarilyUnavailableV996;
+      cmcTemporarilyUnavailableV996 ||
+      dexTemporarilyUnavailableV997;
     const verifiedTerminalRiskV992 =
       candidate?.risk?.verified === true &&
       safeNumber(candidate?.risk?.score) > 59;
@@ -111334,6 +111352,7 @@ for (
       demoStatus: demoStatusV992 || null,
       cmcStatus: cmcStatusV992 || null,
       cmcTemporarilyUnavailableV996,
+      dexTemporarilyUnavailableV997,
       terminalRisk: verifiedTerminalRiskV992,
       requestCeilingsChanged: false,
       cooldownBypassed: false
@@ -167982,7 +168001,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V996 holder/market retry diagnostic</b>",
+    "<b>V997 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168005,7 +168024,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V996 preserves V995 diagnostics and extends the existing bounded V992 market retry only to temporary CMC failures (429/5xx/fetch/spacing/scan-limit/budget/cooldown). CoinGecko NO_MARKET_FOUND alone is not retried. No cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
+    "<i>V997 preserves V996/V995 diagnostics and also treats DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY as temporary retryable scheduling evidence for a non-terminal current/live candidate. Genuine no-market results remain non-retryable by themselves. Existing bounded V415 queue only; no cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
