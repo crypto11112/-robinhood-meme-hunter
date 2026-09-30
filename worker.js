@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V1014
+ * TWO-STAGE /BITQUERYTEST ROUTE PROBE:
+ * - builds directly from deployed V1013;
+ * - /bitquerytest sends an immediate Telegram acknowledgement BEFORE any Bitquery request;
+ * - if the acknowledgement arrives but the result does not, the fault is isolated to the
+ *   external Bitquery request/result stage;
+ * - if the acknowledgement itself does not arrive, the deployed Worker is not executing
+ *   this command route;
+ * - the Bitquery request remains bounded and manual only;
+ * - no scanner/provider/holder/scoring/risk/qualification behaviour changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1013
  * SELF-CONTAINED /BITQUERYTEST ROUTE:
  * - builds directly from deployed V1012;
@@ -8776,7 +8789,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1013";
+const VERSION = "V1014";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -169163,7 +169176,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1013 holder/market retry diagnostic</b>",
+    "<b>V1014 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -169175,14 +169188,14 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1013 injected-retry outcome</b>",
+    "<b>V1014 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1013 Bitquery health</b>",
+    "<b>V1014 Bitquery health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
@@ -169201,7 +169214,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1013 preserves V1012 scanner/provider/holder behaviour and moves only /bitquerytest into a self-contained early command that sends its own bounded result directly. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1014 preserves V1013 scanner/provider/holder behaviour and adds only a pre-request Telegram acknowledgement to /bitquerytest so command routing and Bitquery request execution can be isolated independently. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\n");
 }
@@ -172711,65 +172724,78 @@ async function telegramCommandReplyV271(
     parsed.command === "/bitquerytest" ||
     parsed.command === "/bqtest"
   ) {
-    const resultV1013 =
+    /*
+     * V1014: prove command routing before touching Bitquery.
+     * This first Telegram message contains no provider dependency.
+     */
+    const routeAckV1014 =
+      await sendTelegram(
+        env,
+        `🧭 <b>Bitquery Test Route — ${escapeHtml(VERSION)}</b>\n\nRoute reached: <b>YES</b>\nStarting one bounded Bitquery request now…`,
+        null,
+        null
+      );
+
+    const resultV1014 =
       await bitqueryConnectivityTestV1013(
         env
       );
 
-    const replyV1013 =
+    const replyV1014 =
       bitqueryConnectivityMessageV1013(
-        resultV1013
+        resultV1014
       );
 
-    if (diagnosticV273) {
-      diagnosticV273.replyAttempted = true;
-      diagnosticV273.bitqueryConnectivityV1013 = {
-        scannerBudgetConsumed: false,
-        externalProviderRequests:
-          resultV1013?.attempted === true ? 1 : 0,
-        configured:
-          resultV1013?.configured === true,
-        httpStatus:
-          resultV1013?.httpStatus ?? null,
-        status:
-          resultV1013?.status || null
-      };
-    }
-
-    const sentV1013 =
+    const resultSendV1014 =
       await sendTelegram(
         env,
-        replyV1013,
+        replyV1014,
         null,
         null
       );
 
     if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.bitqueryConnectivityV1014 = {
+        routeAckSuccess:
+          routeAckV1014?.success === true,
+        scannerBudgetConsumed: false,
+        externalProviderRequests:
+          resultV1014?.attempted === true ? 1 : 0,
+        configured:
+          resultV1014?.configured === true,
+        httpStatus:
+          resultV1014?.httpStatus ?? null,
+        status:
+          resultV1014?.status || null
+      };
       diagnosticV273.replySuccess =
-        sentV1013?.success === true;
+        resultSendV1014?.success === true;
       diagnosticV273.telegramStatus =
-        sentV1013?.status || null;
+        resultSendV1014?.status || null;
       diagnosticV273.telegramMode =
-        sentV1013?.mode || null;
+        resultSendV1014?.mode || null;
       diagnosticV273.telegramError =
-        sentV1013?.error || null;
+        resultSendV1014?.error || null;
       diagnosticV273.result =
-        sentV1013?.success === true
+        resultSendV1014?.success === true
           ? "REPLY_SENT"
           : "REPLY_FAILED";
     }
 
     return {
       success:
-        sentV1013?.success === true,
+        resultSendV1014?.success === true,
       ignored: false,
       command:
         parsed.command,
+      routeAckSuccess:
+        routeAckV1014?.success === true,
       scannerBudgetConsumed: false,
       externalProviderRequests:
-        resultV1013?.attempted === true ? 1 : 0,
-      bitqueryConnectivityV1013:
-        resultV1013
+        resultV1014?.attempted === true ? 1 : 0,
+      bitqueryConnectivityV1014:
+        resultV1014
     };
   }
 
