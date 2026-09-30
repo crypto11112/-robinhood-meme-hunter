@@ -1,5 +1,5 @@
 /**
- * Robinhood Chain Meme Hunter — V992
+ * Robinhood Chain Meme Hunter — V993
  * V991 POST-RISK MARKET-FALLBACK PRIORITISATION:
  * - preserves V990 diagnostics and V988 holder-claim routing;
  * - for automatic priority/current-live candidates, defers CoinGecko Demo/CMC rescue until holder evidence has been gathered;
@@ -8493,7 +8493,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V992";
+const VERSION = "V993";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111296,6 +111296,63 @@ for (
       cooldownBypassed: false
     };
 
+    /*
+     * V993: V992 proved that market routing can succeed while the strongest
+     * surviving current/live candidate is still stranded by temporary holder
+     * evidence unavailability. Preserve that candidate in the same bounded
+     * V415 retry queue when market evidence is already verified, holder/risk
+     * evidence is not yet complete, and Blockscout/indexing state explicitly
+     * says the holder failure is retryable. No extra holder request is made in
+     * this scan; the normal one-candidate retry injection handles the next try.
+     */
+    const holderStatusV993 = String(
+      candidate?.holders?.reason ||
+      candidate?.holders?.status ||
+      candidate?.holders?.holderIndexLagV422?.lastStatus ||
+      ""
+    );
+    const holderFailureClassV993 = String(
+      candidate?.holders?.holderIndexLagV422?.failureClassV437 ||
+      candidate?.holders?.holderEndpointRecoveryV437?.failureClass ||
+      candidate?.holders?.holderProviderCooldownRecoveryV439?.failureClass ||
+      ""
+    );
+    const holderTemporarilyUnavailableV993 = Boolean(
+      candidate?.holders?.blockscoutUnavailable === true ||
+      candidate?.holders?.holderIndexLagV422?.active === true ||
+      [
+        "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+        "BLOCKSCOUT_PRO_COOLDOWN_V145",
+        "NO_HOLDER_ROWS",
+        "VERIFIED_EMPTY_RETRY_V422"
+      ].includes(holderStatusV993) ||
+      [
+        "HOLDER_ENDPOINT_UNAVAILABLE",
+        "HOLDER_PROVIDER_COOLDOWN",
+        "ZERO_ROWS_INDEXING_LAG"
+      ].includes(holderFailureClassV993)
+    );
+    const holderEvidenceCompleteV993 = holderEvidenceVerifiedForAlertV422(candidate);
+    const holderRescueRetryV993 = Boolean(
+      currentLiveVerifiedLaunchTokensV621.has(address) &&
+      candidate?.market?.verified === true &&
+      !holderEvidenceCompleteV993 &&
+      !verifiedTerminalRiskV992 &&
+      holderTemporarilyUnavailableV993
+    );
+
+    candidate.holderRescueRetryV993 = {
+      eligible: holderRescueRetryV993,
+      queued: false,
+      holderStatus: holderStatusV993 || null,
+      failureClass: holderFailureClassV993 || null,
+      marketVerified: candidate?.market?.verified === true,
+      holderEvidenceComplete: holderEvidenceCompleteV993,
+      terminalRisk: verifiedTerminalRiskV992,
+      requestCeilingsChanged: false,
+      retryQueueReused: true
+    };
+
     if (v417IncompleteProgress) {
       queueDeferredAnalysisV415(
         state,
@@ -111312,6 +111369,14 @@ for (
         marketFreshPriorityScore(watched, newTokens, liveTokens)
       );
       candidate.marketRescueRetryV992.queued = true;
+    } else if (holderRescueRetryV993) {
+      queueDeferredAnalysisV415(
+        state,
+        watched,
+        `HOLDER_RESCUE_RETRY_V993:${holderStatusV993 || holderFailureClassV993 || "TEMPORARILY_UNAVAILABLE"}`,
+        marketFreshPriorityScore(watched, newTokens, liveTokens)
+      );
+      candidate.holderRescueRetryV993.queued = true;
     } else {
       clearDeferredAnalysisV415(
         state,
@@ -167830,12 +167895,14 @@ function launchCoverageTelegramMessageV985(state) {
     "<b>V656 evidence completion — current/live returned</b>",
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V992 holder-claim / market-fallback trace diagnostic</b>",
+    "<b>V993 holder/market retry diagnostic</b>",
     `First target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${last?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${last?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
     `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || last?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
     `V992 market-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")).length)}`,
     `V992 retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("MARKET_RESCUE_RETRY_V992")) || {})?.address || "NONE"))}`,
+    `V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
+    `V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -167848,7 +167915,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V992 preserves V991 post-risk market prioritisation. A viable current/live candidate blocked only by temporary CoinGecko Demo spacing/cooldown or CMC cooldown is retained in the existing bounded V415 retry queue for a later normal scan. No cooldown bypass, provider-limit increase, scoring/risk change or Telegram-threshold change.</i>"
+    "<i>V993 preserves V992 market-rescue retry behaviour and adds the matching bounded retry for a viable current/live candidate whose market is verified but holder/risk evidence is temporarily unavailable from Blockscout/indexing. It reuses the existing V415 queue and makes no extra request in the current scan. No provider-limit increase, scoring/risk change or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
