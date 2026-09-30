@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V1015
+ * /BITQUERYTEST HARD-ABORT HOTFIX:
+ * - builds directly from deployed V1014;
+ * - V1014 proved Telegram command routing works and isolated the failure to the
+ *   external Bitquery request stage;
+ * - replaces the soft Promise.race timeout with an AbortController that actively
+ *   cancels the manual Bitquery fetch after 4.5 seconds;
+ * - the command still sends the immediate route acknowledgement first, then sends
+ *   either HTTP/GraphQL evidence or an explicit BITQUERY_TEST_ABORTED_V1015 result;
+ * - manual test only; no scanner/provider/holder/scoring/risk/qualification change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1014
  * TWO-STAGE /BITQUERYTEST ROUTE PROBE:
  * - builds directly from deployed V1013;
@@ -8789,7 +8802,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1014";
+const VERSION = "V1015";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -169176,7 +169189,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1014 holder/market retry diagnostic</b>",
+    "<b>V1015 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -169188,14 +169201,14 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1014 injected-retry outcome</b>",
+    "<b>V1015 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1014 Bitquery health</b>",
+    "<b>V1015 Bitquery health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
@@ -169214,7 +169227,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1014 preserves V1013 scanner/provider/holder behaviour and adds only a pre-request Telegram acknowledgement to /bitquerytest so command routing and Bitquery request execution can be isolated independently. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1015 preserves V1014 scanner/provider/holder behaviour and changes only the manual /bitquerytest request so its Bitquery fetch is actively aborted after 4.5 seconds instead of relying on a soft timeout. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\n");
 }
@@ -171694,88 +171707,89 @@ async function bitqueryConnectivityTestV1013(env) {
     }
   `;
 
-  const requestPromise = (async () => {
+  const controllerV1015 = new AbortController();
+  const timeoutIdV1015 = setTimeout(() => {
     try {
-      const response = await fetch(
-        BITQUERY_GRAPHQL_V2,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            accept: "application/json",
-            authorization: `Bearer ${token}`
-          },
-          body: JSON.stringify({query})
-        }
-      );
+      controllerV1015.abort("BITQUERY_TEST_TIMEOUT_V1015");
+    } catch (_) {}
+  }, 4500);
 
-      let payload = null;
-      try {
-        payload = await response.json();
-      } catch {
-        payload = null;
+  try {
+    const response = await fetch(
+      BITQUERY_GRAPHQL_V2,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({query}),
+        signal: controllerV1015.signal
       }
+    );
 
-      if (!response.ok) {
-        return {
-          ...base,
-          attempted: true,
-          httpStatus: response.status,
-          status: `HTTP_${response.status}_V1013`,
-          error:
-            payload?.errors?.[0]?.message ||
-            `BITQUERY_HTTP_${response.status}`
-        };
-      }
+    clearTimeout(timeoutIdV1015);
 
-      const graphqlErrors = Array.isArray(payload?.errors)
-        ? payload.errors
-            .map(row => String(row?.message || "GRAPHQL_ERROR"))
-            .slice(0, 5)
-        : [];
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
 
-      const rows = Array.isArray(payload?.data?.EVM?.Events)
-        ? payload.data.EVM.Events
-        : [];
-
+    if (!response.ok) {
       return {
         ...base,
         attempted: true,
         httpStatus: response.status,
-        status: graphqlErrors.length
-          ? "HTTP_200_GRAPHQL_ERROR_V1013"
-          : "HTTP_200_OK_V1013",
-        graphqlErrors,
-        rowCount: rows.length,
-        latestBlock: rows?.[0]?.Block?.Number ?? null,
-        latestTime: rows?.[0]?.Block?.Time ?? null
-      };
-    } catch (error) {
-      return {
-        ...base,
-        attempted: true,
-        status: "REQUEST_FAILED_V1013",
-        error: errorString(error)
+        status: `HTTP_${response.status}_V1015`,
+        error:
+          payload?.errors?.[0]?.message ||
+          `BITQUERY_HTTP_${response.status}`
       };
     }
-  })();
 
-  const timeoutPromise = new Promise(resolve => {
-    setTimeout(
-      () => resolve({
-        ...base,
-        attempted: true,
-        status: "BITQUERY_TEST_TIMEOUT_V1013",
-        error: "No Bitquery response within 4500ms"
-      }),
-      4500
-    );
-  });
+    const graphqlErrors = Array.isArray(payload?.errors)
+      ? payload.errors
+          .map(row => String(row?.message || "GRAPHQL_ERROR"))
+          .slice(0, 5)
+      : [];
 
-  return await Promise.race([
-    requestPromise,
-    timeoutPromise
-  ]);
+    const rows = Array.isArray(payload?.data?.EVM?.Events)
+      ? payload.data.EVM.Events
+      : [];
+
+    return {
+      ...base,
+      attempted: true,
+      httpStatus: response.status,
+      status: graphqlErrors.length
+        ? "HTTP_200_GRAPHQL_ERROR_V1015"
+        : "HTTP_200_OK_V1015",
+      graphqlErrors,
+      rowCount: rows.length,
+      latestBlock: rows?.[0]?.Block?.Number ?? null,
+      latestTime: rows?.[0]?.Block?.Time ?? null
+    };
+  } catch (error) {
+    clearTimeout(timeoutIdV1015);
+
+    const aborted =
+      controllerV1015.signal.aborted === true ||
+      String(error?.name || "").toLowerCase() === "aborterror";
+
+    return {
+      ...base,
+      attempted: true,
+      status: aborted
+        ? "BITQUERY_TEST_ABORTED_V1015"
+        : "REQUEST_FAILED_V1015",
+      error: aborted
+        ? "Bitquery request exceeded 4500ms and was actively aborted."
+        : errorString(error)
+    };
+  }
 }
 
 function bitqueryConnectivityMessageV1013(result) {
