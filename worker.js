@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V990
+ * Robinhood Chain Meme Hunter — V991
+ * V991 POST-RISK MARKET-FALLBACK PRIORITISATION:
+ * - preserves V990 diagnostics and V988 holder-claim routing;
+ * - for automatic priority/current-live candidates, defers CoinGecko Demo/CMC rescue until holder evidence has been gathered;
+ * - if the candidate is already VERIFIED risk > Telegram ceiling, skips scarce rescue capacity;
+ * - otherwise uses the existing CoinGecko Demo -> CMC fallback chain under unchanged spacing/cooldown/request caps;
+ * - no provider ceiling, request budget, risk proof, score, or Telegram threshold changes.
+ *
  * V990 MARKET-FALLBACK TRACE DIAGNOSTIC:
  * - preserves V988 sequential holder-claim behaviour unchanged;
  * - fixes /launchcoverage second-target display by falling back to the selected address when the symbol is unavailable;
@@ -8486,7 +8493,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V990";
+const VERSION = "V991";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -96745,6 +96752,150 @@ function promoteBitqueryMarketFallbackV240(
   };
 }
 
+async function postRiskMarketFallbackV991(
+  token,
+  budget,
+  watched,
+  state,
+  env,
+  market,
+  provisionalRisk,
+  eligible
+) {
+  const original = market && typeof market === "object"
+    ? market
+    : { verified:false, status:"UNVERIFIED" };
+
+  const telemetry = {
+    enabled:true,
+    eligible:eligible === true,
+    originalStatus:original?.status || null,
+    provisionalRiskVerified:provisionalRisk?.verified === true,
+    provisionalRiskScore:provisionalRisk?.verified === true ? safeNumber(provisionalRisk?.score) : null,
+    terminalRisk:provisionalRisk?.verified === true && safeNumber(provisionalRisk?.score) > 59,
+    demoAttempted:false,
+    demoStatus:null,
+    demoRequestSent:false,
+    cmcAttempted:false,
+    cmcStatus:null,
+    cmcRequestSent:false,
+    promoted:false,
+    promotedSource:null
+  };
+
+  if (original?.verified === true || eligible !== true) {
+    return {
+      market:{ ...original, postRiskMarketFallbackV991:telemetry },
+      telemetry
+    };
+  }
+
+  if (telemetry.terminalRisk) {
+    telemetry.skipReason = "VERIFIED_TERMINAL_RISK_BEFORE_MARKET_RESCUE_V991";
+    return {
+      market:{ ...original, postRiskMarketFallbackV991:telemetry },
+      telemetry
+    };
+  }
+
+  const trigger = original?.status || "POST_RISK_MARKET_RESCUE_V991";
+
+  if (coinGeckoDemoConfiguredV660(env)) {
+    telemetry.demoAttempted = true;
+    const demo = await coinGeckoDemoMarketDataV660(
+      token, budget, watched, state, env, trigger
+    );
+    telemetry.demoStatus = demo?.status || (demo?.verified === true ? "VERIFIED" : null);
+    telemetry.demoRequestSent = demo?.requestSent === true;
+
+    traceCoinGeckoDecisionV664(state, token, {
+      stage:"POST_RISK_DEMO_RESULT_V991",
+      decision:"POST_RISK_RESCUE",
+      provisionalRiskVerified:telemetry.provisionalRiskVerified,
+      provisionalRiskScore:telemetry.provisionalRiskScore,
+      demoStatus:telemetry.demoStatus,
+      demoRequestSent:telemetry.demoRequestSent,
+      demoVerified:demo?.verified === true
+    });
+
+    if (demo?.verified === true) {
+      telemetry.promoted = true;
+      telemetry.promotedSource = demo?.source || "COINGECKO_DEMO_V660";
+      return {
+        market:{
+          ...original,
+          ...demo,
+          postRiskMarketFallbackV991:telemetry
+        },
+        telemetry
+      };
+    }
+
+    telemetry.cmcAttempted = true;
+    const cmc = await maybeCoinMarketCapFallbackV739(
+      token, budget, watched, state, env, true, telemetry.demoStatus || trigger
+    );
+    telemetry.cmcStatus = cmc?.status || (cmc?.verified === true ? "VERIFIED" : null);
+    telemetry.cmcRequestSent = cmc?.requestSent === true;
+
+    if (cmc?.verified === true) {
+      telemetry.promoted = true;
+      telemetry.promotedSource = cmc?.source || "COINMARKETCAP_V739";
+      return {
+        market:{
+          ...original,
+          ...cmc,
+          postRiskMarketFallbackV991:telemetry
+        },
+        telemetry
+      };
+    }
+
+    return {
+      market:{
+        ...original,
+        alternativeMarketData:{
+          ...(original?.alternativeMarketData || {}),
+          coinGeckoDemoV660:demo,
+          coinMarketCapV739:cmc
+        },
+        postRiskMarketFallbackV991:telemetry
+      },
+      telemetry
+    };
+  }
+
+  telemetry.demoStatus = "COINGECKO_DEMO_NOT_CONFIGURED_V660";
+  telemetry.cmcAttempted = true;
+  const cmc = await maybeCoinMarketCapFallbackV739(
+    token, budget, watched, state, env, true, trigger
+  );
+  telemetry.cmcStatus = cmc?.status || (cmc?.verified === true ? "VERIFIED" : null);
+  telemetry.cmcRequestSent = cmc?.requestSent === true;
+
+  if (cmc?.verified === true) {
+    telemetry.promoted = true;
+    telemetry.promotedSource = cmc?.source || "COINMARKETCAP_V739";
+    return {
+      market:{ ...original, ...cmc, postRiskMarketFallbackV991:telemetry },
+      telemetry
+    };
+  }
+
+  return {
+    market:{
+      ...original,
+      alternativeMarketData:{
+        ...(original?.alternativeMarketData || {}),
+        coinGeckoDemoV660:{verified:false,status:"COINGECKO_DEMO_NOT_CONFIGURED_V660",requestSent:false},
+        coinMarketCapV739:cmc
+      },
+      postRiskMarketFallbackV991:telemetry
+    },
+    telemetry
+  };
+}
+
 async function analyzeToken(
   env,
   budget,
@@ -96992,6 +97143,16 @@ async function analyzeToken(
       "LOOKUP_SKIPPED"
   };
 
+  /*
+   * V991: automatic priority/current-live candidates keep the ordinary market
+   * pass, but scarce CoinGecko Demo/CMC rescue is held until holder evidence
+   * can identify already-terminal risk. Manual /analyse behaviour is unchanged.
+   */
+  const postRiskMarketRescueEligibleV991 = Boolean(
+    (options?.marketPriority ?? options?.priorityCompletion) &&
+    options?.manualAnalyseOptimizationV280 !== true
+  );
+
   if (
     budgetAvailable(
       budget,
@@ -97019,8 +97180,9 @@ async function analyzeToken(
          * at one request per scan with its existing spacing/cooldown guards.
          */
         Boolean(
-          options?.marketPriority ??
-          options?.priorityCompletion
+          (options?.marketPriority ??
+          options?.priorityCompletion) &&
+          !postRiskMarketRescueEligibleV991
         )
       );
   }
@@ -97237,6 +97399,58 @@ async function analyzeToken(
     requestBudgetSnapshotV264(
       budget
     );
+
+  /*
+   * V991: make the market-rescue decision only after holder evidence exists.
+   * A VERIFIED risk above the unchanged Telegram ceiling (>59) is terminal, so
+   * scarce Demo/CMC capacity is preserved for the next unresolved/non-terminal
+   * candidate. Unverified risk remains eligible; we never assume it is safe.
+   */
+  if (
+    postRiskMarketRescueEligibleV991 &&
+    market?.verified !== true
+  ) {
+    const provisionalWhaleFlowV991 =
+      analyseWhaleFlow(
+        previous,
+        holders
+      );
+
+    const provisionalRiskV991 =
+      scoreRisk(
+        validation,
+        market,
+        holders,
+        activity,
+        provisionalWhaleFlowV991
+      );
+
+    const existingFoundationV991 =
+      market?.onChainMarketFoundationV438 || null;
+    const existingOnChainEvidenceV991 =
+      market?.onChainEvidence || null;
+    const existingOnChainVerifiedV991 =
+      market?.onChainMarketVerified === true;
+
+    const postRiskRescueV991 =
+      await postRiskMarketFallbackV991(
+        address,
+        budget,
+        watched,
+        state,
+        env,
+        market,
+        provisionalRiskV991,
+        true
+      );
+
+    market = {
+      ...(postRiskRescueV991?.market || market),
+      onChainMarketFoundationV438:existingFoundationV991,
+      onChainEvidence:existingOnChainEvidenceV991,
+      onChainMarketVerified:existingOnChainVerifiedV991
+    };
+  }
 
   const whaleFlow =
     analyseWhaleFlow(
