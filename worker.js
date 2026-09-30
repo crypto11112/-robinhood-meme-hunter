@@ -1,4 +1,11 @@
 /**
+ * Robinhood Chain Meme Hunter
+ * V1017
+ * - reconnects the existing ONE shared Bitquery production query after the V1016 HTTP 200 auth proof;
+ * - discovery-live remains first choice; if unavailable, one ordinary analysis-budget slot may fund that same shared query;
+ * - adds /launchcoverage production Bitquery HTTP/status/budget-lane telemetry;
+ * - no score, risk, qualification, Telegram threshold, global ceiling or notification-reserve change.
+ *
  * Robinhood Chain Meme Hunter — V1016
  * BACKGROUND BITQUERY CLOUDFLARE CONNECTIVITY PROBE:
  * - builds directly from deployed V1015;
@@ -8814,7 +8821,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1016";
+const VERSION = "V1017";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -51882,6 +51889,7 @@ async function discoverVerifiedBagsLaunchesV210(
     protocol: BAGS_PROTOCOL_V210,
     attempted: false,
     externalRequestsUsed: 0,
+    budgetLaneV1017: null,
     launchesSeen: 0,
     verifiedTokensAdded: 0,
     launches: [],
@@ -52061,19 +52069,49 @@ async function discoverVerifiedBagsLaunchesV210(
    * room. Telegram/global reserves and the 42-request hard ceiling remain
    * controlled by the existing consumeBudget() implementation.
    */
+  /*
+   * V1017: the shared Bitquery request was repeatedly starved after the live
+   * discovery phase even though the newly corrected Bearer token is proven
+   * healthy. Keep the existing discovery-live claim first. If that phase is
+   * already closed/exhausted, permit exactly this ONE existing shared Bitquery
+   * request to use one ordinary analysis slot. consumeBudget() remains
+   * authoritative, so the global hard ceiling / notification reserve / adaptive
+   * analysis ceiling are NOT bypassed. No second Bitquery request is added.
+   */
+  let bitqueryBudgetLaneV1017 = null;
+
   if (
-    !budgetAvailable(budget, "discovery-live") ||
-    !consumeBudget(
+    budgetAvailable(budget, "discovery-live") &&
+    consumeBudget(
       budget,
       "discovery-live",
       "BITQUERY_SHARED_LAUNCH_DISCOVERY_V224"
     )
   ) {
+    bitqueryBudgetLaneV1017 = "DISCOVERY_LIVE";
+  } else if (
+    budgetAvailable(budget, "analysis") &&
+    consumeBudget(
+      budget,
+      "analysis",
+      "BITQUERY_SHARED_PRODUCTION_RECOVERY_V1017"
+    )
+  ) {
+    bitqueryBudgetLaneV1017 = "ANALYSIS_RECOVERY_V1017";
+  }
+
+  if (!bitqueryBudgetLaneV1017) {
+    telemetry.lastStatus = "BITQUERY_SHARED_BUDGET_PROTECTED_V1017";
+    telemetry.lastBudgetLaneV1017 = null;
     return {
       ...base,
-      status: "DISCOVERY_LIVE_BUDGET_PROTECTED"
+      status: "BITQUERY_SHARED_BUDGET_PROTECTED_V1017",
+      budgetLaneV1017: null
     };
   }
+
+  telemetry.lastBudgetLaneV1017 = bitqueryBudgetLaneV1017;
+  base.budgetLaneV1017 = bitqueryBudgetLaneV1017;
 
   const query = `
     {
@@ -169201,7 +169239,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1016 holder/market retry diagnostic</b>",
+    "<b>V1017 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -169213,20 +169251,23 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1016 injected-retry outcome</b>",
+    "<b>V1017 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1016 Bitquery health</b>",
+    "<b>V1017 Bitquery production health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
     `Cooldown until: ${bitqueryCooldownUntilV1008 ? escapeHtml(new Date(bitqueryCooldownUntilV1008).toISOString()) : "NONE"}`,
     `Last success: ${bitqueryLastSuccessV1008 ? escapeHtml(new Date(bitqueryLastSuccessV1008).toISOString()) : "UNRECORDED"}`,
     `Last 402: ${bitqueryLast402V1008 ? escapeHtml(new Date(bitqueryLast402V1008).toISOString()) : "UNRECORDED"}`,
+    `Shared production query: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastStatus || "UNRECORDED"))}`,
+    `Shared production HTTP: ${state?.bagsDiscoveryV210?.lastHttpStatus ?? "UNRECORDED"}`,
+    `Budget lane: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastBudgetLaneV1017 || "UNRECORDED"))}`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -169239,7 +169280,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1016 preserves V1015 scanner/provider/holder behaviour and adds only background HTTP diagnostics for Cloudflare→Bitquery connectivity. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1017 keeps the V1016 provider/scoring/Telegram rules and lets the existing single shared Bitquery production request use one normal analysis slot only when discovery-live cannot fund it. Global/request ceilings and notification reserves remain enforced.</i>"
   ];
   return lines.join("\n");
 }
