@@ -8824,7 +8824,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1019";
+const VERSION = "V1020";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -107522,15 +107522,26 @@ for (
       watchPriority(b, newTokens, liveTokens) - watchPriority(a, newTokens, liveTokens)
     )[0] || null;
 
-  const bitqueryHolderTargetV227 = persistedBitqueryHolderTargetEligibleV228
+  /*
+   * V1020: prefer the highest-priority CURRENT/LIVE token for the holder alias
+   * before an older persisted handoff. V1019 proved the shared Bitquery request
+   * was healthy but holder diagnostics were repeatedly describing an older
+   * V228 target. This changes only which token is placed into the holder alias
+   * of the SAME shared Bitquery request; it adds zero HTTP requests and does
+   * not weaken holder verification or concentration/risk gates.
+   */
+  const bitqueryHolderTargetV227 = isAddress(liveHolderTargetRowV227?.address)
     ? {
-        address: persistedBitqueryHolderTargetAddressV228,
-        reason: "PERSISTED_UNRESOLVED_HOLDER_TARGET_V228"
+        address: normalize(liveHolderTargetRowV227.address),
+        reason: "CURRENT_LIVE_PRIORITY_FIRST_V1020"
       }
-    : isAddress(persistedHolderTargetAddressV227)
-      ? {address: persistedHolderTargetAddressV227, reason: "PERSISTED_PRIORITY_COMPLETION_V227"}
-      : isAddress(liveHolderTargetRowV227?.address)
-        ? {address: normalize(liveHolderTargetRowV227.address), reason: "HIGHEST_PRIORITY_CURRENT_LIVE_OR_NEW_V227"}
+    : persistedBitqueryHolderTargetEligibleV228
+      ? {
+          address: persistedBitqueryHolderTargetAddressV228,
+          reason: "PERSISTED_UNRESOLVED_HOLDER_TARGET_V228"
+        }
+      : isAddress(persistedHolderTargetAddressV227)
+        ? {address: persistedHolderTargetAddressV227, reason: "PERSISTED_PRIORITY_COMPLETION_V227"}
         : null;
 
   /*
@@ -169285,7 +169296,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Shared production HTTP: ${state?.bagsDiscoveryV210?.lastHttpStatus ?? "UNRECORDED"}`,
     `Budget lane: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastBudgetLaneV1017 || "UNRECORDED"))}`,
     "",
-    "<b>V1019 Bitquery candidate recovery — zero extra requests</b>",
+    "<b>V1020 Bitquery candidate recovery — current/live holder priority · zero extra requests</b>",
     `Holder target: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.address || state?.bitqueryHolderEvidenceV227?.targetAddress || "NONE"))} · attempted ${state?.bitqueryHolderEvidenceV227?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryHolderEvidenceV227?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryHolderEvidenceV227?.status || "UNVERIFIED"))}`,
     `↳ Holder rows — raw ${fmt(state?.bitqueryHolderEvidenceV227?.rawRowCountV1019)} · positive accepted ${fmt(state?.bitqueryHolderEvidenceV227?.rowCount)} · count rows ${fmt(state?.bitqueryHolderEvidenceV227?.holderCountRowCountV1019)} · holder count ${state?.bitqueryHolderEvidenceV227?.holderCount ?? "UNVERIFIED"}`,
     `↳ Holder diagnosis: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.holderDiagnosticV1019 || "AWAITING_V1019_SAMPLE"))} · dataset ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.dataset || "UNVERIFIED"))} · reason ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.targetReason || "UNVERIFIED"))}`,
@@ -169305,7 +169316,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1019 preserves V1018 production/scoring behaviour and adds holder-result diagnostics to the existing shared Bitquery request. It records raw holder rows, accepted positive rows and holder-count rows so NO_POSITIVE_HOLDER_ROWS can be diagnosed without adding any Bitquery HTTP requests. Existing V240 market promotion, V227 holder fallback, risk/scoring rules, Telegram thresholds and request ceilings are unchanged.</i>"
+    "<i>V1020 preserves V1019 production/scoring behaviour and prioritizes the highest-priority current/live token in the existing shared Bitquery holder alias before older persisted holder targets. It records raw holder rows, accepted positive rows and holder-count rows so NO_POSITIVE_HOLDER_ROWS can be diagnosed without adding any Bitquery HTTP requests. Existing V240 market promotion, V227 holder fallback, risk/scoring rules, Telegram thresholds and request ceilings are unchanged.</i>"
   ];
   return lines.join("\n");
 }
