@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V1005
+ * DIRECT-CHAIN HOLDER ENTRY + TELEMETRY FIX:
+ * - builds directly from deployed V1004;
+ * - fixes the V1004 entry detector: generic holders.integrity.status could mask the
+ *   specific BLOCKSCOUT_HOLDERS_UNAVAILABLE / BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED /
+ *   HOLDER_INDEXING_LAG_WAIT_V422 reason, preventing the direct-chain fallback from running;
+ * - the detector now considers all relevant holder status/reason fields and enters when any
+ *   proven temporary indexed-holder failure is present;
+ * - exposes V1004/V1005 direct-chain fallback eligible/attempted/verified/status/range/rows
+ *   in /launchcoverage for each returned current/live candidate;
+ * - direct-chain verification rules remain unchanged: one bounded complete launch->head
+ *   Transfer-history request, exact totalSupply reconciliation, no partial promotion;
+ * - no provider removal, cooldown bypass, request-ceiling increase, scoring/risk change
+ *   or Telegram-threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1004
  * BOUNDED DIRECT-CHAIN HOLDER FALLBACK:
  * - builds directly from deployed V1003;
@@ -8651,7 +8668,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1004";
+const VERSION = "V1005";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -15419,19 +15436,28 @@ const TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168 =
 const DIRECT_CHAIN_HOLDER_MAX_BLOCKS_V1004 = 20000;
 
 function directChainHolderTemporaryReasonV1004(holders) {
-  const reason = String(
-    holders?.integrity?.status ||
-    holders?.reason ||
-    holders?.status ||
-    holders?.holderIndexLagV422?.lastStatus ||
-    ""
-  );
-  return [
+  const reasons = [
+    holders?.reason,
+    holders?.status,
+    holders?.integrity?.status,
+    holders?.holderIndexLagV422?.lastStatus,
+    holders?.holderIndexLagV422?.status,
+    holders?.blockscoutProV143?.status,
+    holders?.blockscoutPro?.status
+  ]
+    .map(value => String(value || "").trim())
+    .filter(Boolean);
+
+  const temporary = new Set([
     "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
     "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED",
     "HOLDER_INDEXING_LAG_WAIT_V422",
-    "NO_HOLDER_ROWS"
-  ].includes(reason);
+    "NO_HOLDER_ROWS",
+    "BLOCKSCOUT_PRO_404_RETRY_V146",
+    "BLOCKSCOUT_RUN_CIRCUIT_BREAKER_DEFERRED"
+  ]);
+
+  return reasons.some(reason => temporary.has(reason));
 }
 
 function directChainHolderLaunchBlockV1004(watched) {
@@ -111665,7 +111691,11 @@ for (
           pathDiagnosticV665:
             holdersV656?.holderPathDiagnosticV665 || null,
           priorityEntryV987:
-            holdersV656?.holderPriorityEntryV987 || null
+            holdersV656?.holderPriorityEntryV987 || null,
+          directChainHolderFallbackV1004:
+            holdersV656?.directChainHolderFallbackTelemetryV1004 ||
+            holdersV656?.directChainHolderFallbackV1004 ||
+            null
         },
         risk: {
           verified: riskV656?.verified === true,
@@ -168644,6 +168674,10 @@ function launchCoverageTelegramMessageV985(state) {
       const v987Text = v987
         ? `; V987 holder-priority entry ${v987.enteredHolderIntelligence === true ? "YES" : "NO"}${v987.rescueEntryUsed === true ? " (RESCUE)" : ""} · V666 claim/use ${v987.v666ClaimedForToken === true ? "YES" : "NO"}/${v987.v666UsedForToken === true ? "YES" : "NO"}${v987.v666ConsumeStatus ? ` · ${escapeHtml(String(v987.v666ConsumeStatus))}` : ""}`
         : "";
+      const directHolderV1005 = row?.holders?.directChainHolderFallbackV1004 || null;
+      const directHolderTextV1005 = directHolderV1005
+        ? `; Direct-chain holders — eligible ${directHolderV1005.eligible === true ? "YES" : "NO"} · attempted ${directHolderV1005.attempted === true ? "YES" : "NO"} · verified ${directHolderV1005.verified === true ? "YES" : "NO"} · ${escapeHtml(String(directHolderV1005.status || "NO_STATUS"))}${safeNumber(directHolderV1005.blocks) > 0 ? ` · ${fmt(directHolderV1005.blocks)} blocks` : ""}${safeNumber(directHolderV1005.transferRows) >= 0 && directHolderV1005.attempted === true ? ` · ${fmt(directHolderV1005.transferRows)} transfers` : ""}`
+        : "";
       const demo = row?.market?.alternative?.coinGeckoDemoV660 || null;
       const cmc = row?.market?.alternative?.coinMarketCapV739 || null;
       const traceRootV990 = state?.coinGeckoDecisionTraceV664 || null;
@@ -168669,7 +168703,7 @@ function launchCoverageTelegramMessageV985(state) {
       const retryDecisionTextV995 =
         `; Retry decision — Market ${marketRetryV995?.eligible === true ? "ELIGIBLE" : "NO"}/${marketRetryV995?.queued === true ? "QUEUED" : "NOT_QUEUED"}` +
         ` · Holder ${holderRetryV995?.eligible === true ? "ELIGIBLE" : "NO"}/${holderRetryV995?.queued === true ? "QUEUED" : "NOT_QUEUED"}`;
-      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}${retryDecisionTextV995}`;
+      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}${directHolderTextV1005}${retryDecisionTextV995}`;
     });
 
   const lines = [
@@ -168696,7 +168730,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1004 holder/market retry diagnostic</b>",
+    "<b>V1005 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168708,7 +168742,7 @@ function launchCoverageTelegramMessageV985(state) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1004 injected-retry outcome</b>",
+    "<b>V1005 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
@@ -168726,7 +168760,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1004 preserves V1003 recovery logic and adds one bounded direct-chain holder fallback for a fresh/current-live priority candidate when indexed holder evidence is temporarily unavailable. Only complete launch→head Transfer history with exact totalSupply reconciliation can become VERIFIED; partial/incomplete histories remain UNVERIFIED. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1005 preserves V1004 direct-chain verification rules and fixes only its temporary-holder entry detector so specific Blockscout/indexing failures cannot be masked by a generic integrity status. /launchcoverage now exposes direct-chain eligibility/attempt/verification status. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
