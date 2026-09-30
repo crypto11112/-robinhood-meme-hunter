@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V1004
+ * BOUNDED DIRECT-CHAIN HOLDER FALLBACK:
+ * - builds directly from deployed V1003;
+ * - activates a production-safe subset of the already-proven V947/V950 direct-chain
+ *   ERC-20 holder reconstruction work for fresh/current-live candidates only;
+ * - runs only after the existing holder providers leave holder evidence temporarily
+ *   unavailable/indexing-lagged and only when the token has a verified launch block;
+ * - uses the already-known scanner head when available and allows ONE full-history
+ *   eth_getLogs Transfer request only when launch->head is <= 20,000 blocks;
+ * - reconstructs all balances from the complete verified Transfer history and promotes
+ *   holder evidence ONLY when every decoded balance is non-negative and the complete
+ *   reconstructed positive-balance sum exactly reconciles to verified totalSupply;
+ * - applies the existing infrastructure exclusions and existing concentration thresholds;
+ * - partial/incomplete/malformed histories stay UNVERIFIED and fall back to the existing
+ *   V422/V437/V993 retry machinery;
+ * - no provider is removed, no cooldown bypass, no request-ceiling increase, no scoring,
+ *   risk threshold, qualification rule or Telegram threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1003
  * DEXSCREENER COOLDOWN RETRY COMPLETION:
  * - builds directly from deployed V1002;
@@ -8631,7 +8651,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1003";
+const VERSION = "V1004";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -15388,6 +15408,388 @@ const TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168 =
 
 const TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168 =
   HOLDER_CACHE_MS;
+
+
+/* =========================================================
+   V1004 BOUNDED DIRECT-CHAIN HOLDER FALLBACK
+   - Production-safe subset of the V947/V950 prototype.
+   - One full-history Transfer-log request only.
+   - Never promotes partial history.
+   ========================================================= */
+const DIRECT_CHAIN_HOLDER_MAX_BLOCKS_V1004 = 20000;
+
+function directChainHolderTemporaryReasonV1004(holders) {
+  const reason = String(
+    holders?.integrity?.status ||
+    holders?.reason ||
+    holders?.status ||
+    holders?.holderIndexLagV422?.lastStatus ||
+    ""
+  );
+  return [
+    "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+    "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED",
+    "HOLDER_INDEXING_LAG_WAIT_V422",
+    "NO_HOLDER_ROWS"
+  ].includes(reason);
+}
+
+function directChainHolderLaunchBlockV1004(watched) {
+  const launch = verifiedLaunchSourceIdentityV476(watched);
+  const candidates = [
+    launch?.launchBlock,
+    watched?.verifiedLaunchAgeV223?.launchBlock,
+    watched?.launchpadV258?.launchBlock,
+    watched?.launchBlock,
+    watched?.metadata?.launchBlock
+  ];
+  for (const value of candidates) {
+    const n = safeNumber(value);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return null;
+}
+
+async function directChainHolderFallbackV1004(
+  token,
+  totalSupply,
+  budget,
+  watched,
+  market,
+  env,
+  headBlock
+) {
+  const base = {
+    attempted: false,
+    verified: false,
+    status: "NOT_ELIGIBLE_V1004",
+    source: "DIRECT_CHAIN_TRANSFER_RECONSTRUCTION_V1004",
+    launchBlock: null,
+    headBlock: Number.isFinite(Number(headBlock)) ? Math.floor(Number(headBlock)) : null,
+    blocks: null,
+    transferRows: 0,
+    decodedTransfers: 0,
+    requestUsed: false
+  };
+
+  const address = normalize(token);
+  const launchBlock = directChainHolderLaunchBlockV1004(watched);
+  const head = safeNumber(headBlock);
+
+  if (!isAddress(address) || !(launchBlock > 0) || !(head > 0) || launchBlock > head) {
+    return {...base, status: "VERIFIED_RANGE_UNAVAILABLE_V1004", launchBlock};
+  }
+
+  const blocks = Math.max(1, Math.floor(head) - launchBlock + 1);
+  if (blocks > DIRECT_CHAIN_HOLDER_MAX_BLOCKS_V1004) {
+    return {
+      ...base,
+      status: "FULL_HISTORY_TOO_LARGE_V1004",
+      launchBlock,
+      blocks
+    };
+  }
+
+  if (!budgetAvailable(budget, "analysis")) {
+    return {
+      ...base,
+      status: "ANALYSIS_BUDGET_UNAVAILABLE_V1004",
+      launchBlock,
+      blocks
+    };
+  }
+
+  let supply = 0n;
+  try { supply = BigInt(String(totalSupply)); } catch (_) {}
+  if (supply <= 0n) {
+    return {
+      ...base,
+      status: "TOTAL_SUPPLY_UNAVAILABLE_V1004",
+      launchBlock,
+      blocks
+    };
+  }
+
+  const response = await rpc(
+    env,
+    "eth_getLogs",
+    [{
+      address,
+      fromBlock: "0x" + launchBlock.toString(16),
+      toBlock: "0x" + Math.floor(head).toString(16),
+      topics: [ERC20_TRANSFER_TOPIC_V947]
+    }],
+    budget,
+    "analysis"
+  );
+
+  const rows = Array.isArray(response?.result) ? response.result : null;
+  if (!rows) {
+    return {
+      ...base,
+      attempted: true,
+      requestUsed: true,
+      status: "FULL_HISTORY_ETH_GETLOGS_UNVERIFIED_V1004",
+      launchBlock,
+      blocks,
+      error: response?.error || response?.status || null
+    };
+  }
+
+  const balances = new Map();
+  let decodedTransfers = 0;
+
+  for (const log of rows) {
+    const topics = Array.isArray(log?.topics) ? log.topics : [];
+    const from = topicAddressV947(topics[1]);
+    const to = topicAddressV947(topics[2]);
+    const amount = transferAmountV947(log?.data);
+
+    if (!from || !to || amount === null || amount < 0n) {
+      return {
+        ...base,
+        attempted: true,
+        requestUsed: true,
+        status: "MALFORMED_TRANSFER_LOG_V1004",
+        launchBlock,
+        blocks,
+        transferRows: rows.length,
+        decodedTransfers
+      };
+    }
+
+    decodedTransfers++;
+
+    if (from !== ZERO) {
+      balances.set(from, (balances.get(from) || 0n) - amount);
+    }
+    if (to !== ZERO) {
+      balances.set(to, (balances.get(to) || 0n) + amount);
+    }
+  }
+
+  const negativeRows = [...balances.values()].filter(v => v < 0n).length;
+  if (negativeRows > 0) {
+    return {
+      ...base,
+      attempted: true,
+      requestUsed: true,
+      status: "NEGATIVE_RECONSTRUCTED_BALANCE_V1004",
+      launchBlock,
+      blocks,
+      transferRows: rows.length,
+      decodedTransfers,
+      negativeRows
+    };
+  }
+
+  const positiveAll = [...balances.entries()]
+    .filter(([, balance]) => balance > 0n);
+
+  const reconstructedTotal =
+    positiveAll.reduce((sum, [, balance]) => sum + balance, 0n);
+
+  if (reconstructedTotal !== supply) {
+    return {
+      ...base,
+      attempted: true,
+      requestUsed: true,
+      status: "TOTAL_SUPPLY_RECONCILIATION_FAILED_V1004",
+      launchBlock,
+      blocks,
+      transferRows: rows.length,
+      decodedTransfers,
+      reconstructedTotal: reconstructedTotal.toString(),
+      totalSupply: supply.toString()
+    };
+  }
+
+  const verifiedPairAddress =
+    market?.verified === true
+      ? normalize(market?.pairAddress)
+      : null;
+
+  let infrastructureBalanceSum = 0n;
+  const infrastructureHolders = [];
+  const ownershipRows = [];
+
+  for (const [holderAddress, balance] of positiveAll) {
+    const infrastructureReason =
+      infrastructureHolderReason(
+        holderAddress,
+        address,
+        verifiedPairAddress
+      );
+
+    if (infrastructureReason) {
+      infrastructureBalanceSum += balance;
+      infrastructureHolders.push({
+        address: holderAddress,
+        value: balance.toString(),
+        percentage: null,
+        rawSupplyPercentage: holderPercent(balance.toString(), supply.toString()),
+        infrastructure: true,
+        infrastructureReason
+      });
+    } else {
+      ownershipRows.push({
+        address: holderAddress,
+        balance
+      });
+    }
+  }
+
+  const ownershipSupply = supply - infrastructureBalanceSum;
+  if (ownershipSupply <= 0n || ownershipRows.length === 0) {
+    return {
+      ...base,
+      attempted: true,
+      requestUsed: true,
+      status: "NO_POSITIVE_OWNERSHIP_SUPPLY_V1004",
+      launchBlock,
+      blocks,
+      transferRows: rows.length,
+      decodedTransfers,
+      totalSupply: supply.toString(),
+      infrastructureBalanceSum: infrastructureBalanceSum.toString(),
+      ownershipSupply: ownershipSupply.toString()
+    };
+  }
+
+  ownershipRows.sort((a, b) =>
+    a.balance === b.balance ? 0 : (a.balance > b.balance ? -1 : 1)
+  );
+
+  const topHolders = ownershipRows.map(row => ({
+    address: row.address,
+    value: row.balance.toString(),
+    percentage: holderPercent(
+      row.balance.toString(),
+      ownershipSupply.toString()
+    ),
+    rawSupplyPercentage: holderPercent(
+      row.balance.toString(),
+      supply.toString()
+    ),
+    infrastructure: false,
+    infrastructureReason: null
+  }));
+
+  const percentages = topHolders
+    .map(row => safeNumber(row.percentage))
+    .filter(value => Number.isFinite(value) && value >= 0 && value <= 100);
+
+  if (!percentages.length) {
+    return {
+      ...base,
+      attempted: true,
+      requestUsed: true,
+      status: "NO_VALID_OWNERSHIP_PERCENTAGES_V1004",
+      launchBlock,
+      blocks,
+      transferRows: rows.length,
+      decodedTransfers
+    };
+  }
+
+  const top1 = percentages[0];
+  const top5 = percentages.slice(0, 5).reduce((a, b) => a + b, 0);
+  const top10 = percentages.slice(0, 10).reduce((a, b) => a + b, 0);
+
+  if (top5 > 100.000001 || top10 > 100.000001) {
+    return {
+      ...base,
+      attempted: true,
+      requestUsed: true,
+      status: "OWNERSHIP_PERCENTAGE_SUM_EXCEEDS_100_V1004",
+      launchBlock,
+      blocks,
+      transferRows: rows.length,
+      decodedTransfers
+    };
+  }
+
+  let concentrationRisk = "LOW";
+  if (top1 >= 20 || top10 >= 80) concentrationRisk = "HIGH";
+  else if (top1 >= 10 || top10 >= 60) concentrationRisk = "MEDIUM";
+
+  const whales = topHolders.filter(row => safeNumber(row.percentage) >= 1);
+
+  let smartMoneyScore = 0;
+  if (whales.length >= 2) smartMoneyScore += 20;
+  if (whales.length >= 4) smartMoneyScore += 15;
+  if (top10 > 0 && top10 <= 60) smartMoneyScore += 20;
+  if (top1 <= 15) smartMoneyScore += 15;
+  if (concentrationRisk === "HIGH") smartMoneyScore = Math.min(smartMoneyScore, 25);
+
+  const result = {
+    verified: true,
+    countersVerified: true,
+    counterSource: "DIRECT_CHAIN_TRANSFER_RECONSTRUCTION_V1004",
+    concentrationVerified: true,
+    holderCount: ownershipRows.length,
+    transferCount: rows.length,
+    holderSource: "DIRECT_CHAIN_TRANSFER_RECONSTRUCTION_V1004",
+    topHolders: [
+      ...topHolders.slice(0, 25),
+      ...infrastructureHolders
+    ],
+    infrastructureHolders,
+    positiveHolderRows: ownershipRows.length,
+    integrity: {
+      verified: true,
+      status: "FULL_HISTORY_RECONCILED_V1004",
+      impossibleBalanceCount: 0,
+      percentageSum: top10,
+      supply: supply.toString(),
+      ownershipSupply: ownershipSupply.toString(),
+      infrastructureBalanceSum: infrastructureBalanceSum.toString(),
+      infrastructureRows: infrastructureHolders.length,
+      topHolderBalanceSum: ownershipRows
+        .slice(0, 10)
+        .reduce((sum, row) => sum + row.balance, 0n)
+        .toString(),
+      ownershipConcentrationBasis:
+        "FULL_TRANSFER_HISTORY_TOTAL_SUPPLY_MINUS_KNOWN_INFRASTRUCTURE_V1004",
+      completeTransferHistory: true,
+      launchBlock,
+      headBlock: Math.floor(head),
+      historyBlocks: blocks,
+      reconstructedTotalSupply: reconstructedTotal.toString()
+    },
+    whale: {
+      verified: true,
+      whaleCount: whales.length,
+      top1Percent: top1,
+      top5Percent: top5,
+      top10Percent: top10,
+      concentrationRisk,
+      smartMoneyScore: clamp(smartMoneyScore, 0, 100),
+      smartMoneyCandidate: smartMoneyScore >= 55,
+      infrastructureExcluded: infrastructureHolders.length
+    },
+    directChainHolderFallbackV1004: {
+      attempted: true,
+      verified: true,
+      status: "FULL_HISTORY_HOLDERS_VERIFIED_V1004",
+      source: "DIRECT_CHAIN_TRANSFER_RECONSTRUCTION_V1004",
+      launchBlock,
+      headBlock: Math.floor(head),
+      blocks,
+      transferRows: rows.length,
+      decodedTransfers,
+      requestUsed: true,
+      exactSupplyReconciliation: true,
+      providerFallbackOnly: true
+    }
+  };
+
+  clearPartialHolderStateV149(watched);
+  clearHolderIndexLagV422(watched);
+  saveHolderIntelligence(watched, result);
+
+  return result;
+}
 
 /* =========================================================
    SNAPSHOTS
@@ -97497,6 +97899,60 @@ async function analyzeToken(
       );
   }
 
+
+  /*
+   * V1004: if legacy/indexed holder providers cannot complete a fresh/current-live
+   * candidate, attempt one exact full-history direct-chain reconstruction.
+   * This uses the existing analysis budget and never crosses the normal request ceiling.
+   */
+  const directChainHolderFallbackTelemetryV1004 = {
+    eligible: false,
+    attempted: false,
+    verified: false,
+    status: null,
+    source: "DIRECT_CHAIN_TRANSFER_RECONSTRUCTION_V1004"
+  };
+
+  if (
+    validation.totalSupply &&
+    directChainHolderTemporaryReasonV1004(holders) &&
+    holderPriorityEntryRequestedV987 === true
+  ) {
+    directChainHolderFallbackTelemetryV1004.eligible = true;
+
+    const directFallbackV1004 =
+      await directChainHolderFallbackV1004(
+        address,
+        validation.totalSupply,
+        budget,
+        watched,
+        market,
+        env,
+        options?.latestNumberV749 ?? null
+      );
+
+    directChainHolderFallbackTelemetryV1004.attempted =
+      directFallbackV1004?.attempted === true;
+    directChainHolderFallbackTelemetryV1004.verified =
+      directFallbackV1004?.verified === true;
+    directChainHolderFallbackTelemetryV1004.status =
+      directFallbackV1004?.status || null;
+    directChainHolderFallbackTelemetryV1004.blocks =
+      safeNumber(directFallbackV1004?.blocks);
+    directChainHolderFallbackTelemetryV1004.transferRows =
+      safeNumber(directFallbackV1004?.transferRows);
+
+    if (directFallbackV1004?.verified === true) {
+      holders = directFallbackV1004;
+    } else {
+      holders = {
+        ...holders,
+        directChainHolderFallbackV1004:
+          directFallbackV1004
+      };
+    }
+  }
+
   {
     const laneV987 =
       budget?.analysis?.priorityHolderProCompletionV666 || null;
@@ -97515,7 +97971,8 @@ async function analyzeToken(
     holders = {
       ...holders,
       holderPriorityEntryV987:
-        holderPriorityEntryTelemetryV987
+        holderPriorityEntryTelemetryV987,
+      directChainHolderFallbackTelemetryV1004
     };
   }
 
@@ -168239,7 +168696,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1003 holder/market retry diagnostic</b>",
+    "<b>V1004 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168251,7 +168708,7 @@ function launchCoverageTelegramMessageV985(state) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1003 injected-retry outcome</b>",
+    "<b>V1004 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
@@ -168269,7 +168726,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1003 preserves V1002 retry-outcome tracing and extends only the existing bounded market-retry classifier so DEXSCREENER_COOLDOWN is treated as temporary retryable evidence for a non-terminal eligible candidate. No cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
+    "<i>V1004 preserves V1003 recovery logic and adds one bounded direct-chain holder fallback for a fresh/current-live priority candidate when indexed holder evidence is temporarily unavailable. Only complete launch→head Transfer history with exact totalSupply reconciliation can become VERIFIED; partial/incomplete histories remain UNVERIFIED. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
