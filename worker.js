@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V1016
+ * BACKGROUND BITQUERY CLOUDFLARE CONNECTIVITY PROBE:
+ * - builds directly from deployed V1015;
+ * - adds GET /bitquery-http-test, which returns immediately and runs ONE Bitquery
+ *   Robinhood query in ctx.waitUntil() outside the Telegram webhook lifecycle;
+ * - adds GET /bitquery-http-result to read the persisted raw Cloudflare->Bitquery result;
+ * - stores only status/timing/error metadata and sample block/time/hash, never the API token;
+ * - no scanner, provider routing, request ceilings, holder logic, scoring, risk or
+ *   Telegram qualification behaviour changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1015
  * /BITQUERYTEST HARD-ABORT HOTFIX:
  * - builds directly from deployed V1014;
@@ -8802,7 +8814,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1015";
+const VERSION = "V1016";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -169189,7 +169201,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1015 holder/market retry diagnostic</b>",
+    "<b>V1016 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -169201,14 +169213,14 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1015 injected-retry outcome</b>",
+    "<b>V1016 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1015 Bitquery health</b>",
+    "<b>V1016 Bitquery health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
@@ -169227,7 +169239,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1015 preserves V1014 scanner/provider/holder behaviour and changes only the manual /bitquerytest request so its Bitquery fetch is actively aborted after 4.5 seconds instead of relying on a soft timeout. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1016 preserves V1015 scanner/provider/holder behaviour and adds only background HTTP diagnostics for Cloudflare→Bitquery connectivity. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\n");
 }
@@ -180294,9 +180306,277 @@ async function diagnosticsReadV897(request, env) {
 }
 
 
+
+/* =========================================================
+   V1016 BACKGROUND BITQUERY CLOUDFLARE CONNECTIVITY PROBE
+   ========================================================= */
+const BITQUERY_HTTP_TEST_KEY_V1016 =
+  "robinhood-meme-hunter-bitquery-http-test-v1016";
+
+async function writeBitqueryHttpTestV1016(env, value) {
+  const {kv} = getKV(env);
+  if (!kv) return false;
+  try {
+    await kv.put(
+      BITQUERY_HTTP_TEST_KEY_V1016,
+      JSON.stringify(value)
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function readBitqueryHttpTestV1016(env) {
+  const {kv} = getKV(env);
+  if (!kv) {
+    return {
+      version: VERSION,
+      status: "KV_UNAVAILABLE_V1016",
+      timestamp: now()
+    };
+  }
+
+  try {
+    const raw =
+      await kv.get(
+        BITQUERY_HTTP_TEST_KEY_V1016
+      );
+
+    if (!raw) {
+      return {
+        version: VERSION,
+        status: "NO_TEST_RESULT_V1016",
+        timestamp: now()
+      };
+    }
+
+    const parsed = JSON.parse(raw);
+    return {
+      ...parsed,
+      version: VERSION
+    };
+  } catch (error) {
+    return {
+      version: VERSION,
+      status: "TEST_RESULT_READ_ERROR_V1016",
+      error: errorString(error),
+      timestamp: now()
+    };
+  }
+}
+
+async function runBitqueryHttpTestV1016(env) {
+  const token =
+    String(
+      env?.BITQUERY_ACCESS_TOKEN || ""
+    ).trim();
+
+  const startedAt = Date.now();
+
+  const started = {
+    version: VERSION,
+    status: token
+      ? "STARTED_V1016"
+      : "BITQUERY_ACCESS_TOKEN_NOT_CONFIGURED_V1016",
+    tokenConfigured:
+      Boolean(token),
+    startedAt:
+      new Date(startedAt).toISOString(),
+    finishedAt: null,
+    elapsedMs: null,
+    httpStatus: null,
+    graphqlErrors: [],
+    rowCount: 0,
+    latestBlock: null,
+    latestTime: null,
+    transactionHash: null,
+    error: null
+  };
+
+  await writeBitqueryHttpTestV1016(
+    env,
+    started
+  );
+
+  if (!token) return started;
+
+  const query = `
+    {
+      EVM(network: robinhood) {
+        Events(
+          limit: {count: 1}
+          orderBy: {descending: Block_Time}
+        ) {
+          Block {
+            Number
+            Time
+          }
+          Transaction {
+            Hash
+          }
+        }
+      }
+    }
+  `;
+
+  const controller =
+    new AbortController();
+
+  const timeoutId =
+    setTimeout(
+      () => {
+        try {
+          controller.abort();
+        } catch (_) {}
+      },
+      10000
+    );
+
+  let result = null;
+
+  try {
+    const response =
+      await fetch(
+        BITQUERY_GRAPHQL_V2,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json",
+            accept:
+              "application/json",
+            authorization:
+              `Bearer ${token}`
+          },
+          body:
+            JSON.stringify({
+              query
+            }),
+          signal:
+            controller.signal
+        }
+      );
+
+    let payload = null;
+
+    try {
+      payload =
+        await response.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    const graphqlErrors =
+      Array.isArray(
+        payload?.errors
+      )
+        ? payload.errors
+            .map(
+              row =>
+                String(
+                  row?.message ||
+                  "GRAPHQL_ERROR"
+                )
+            )
+            .slice(0, 5)
+        : [];
+
+    const rows =
+      Array.isArray(
+        payload?.data?.EVM?.Events
+      )
+        ? payload.data.EVM.Events
+        : [];
+
+    result = {
+      version: VERSION,
+      status:
+        response.ok
+          ? (
+              graphqlErrors.length
+                ? "HTTP_200_GRAPHQL_ERROR_V1016"
+                : "HTTP_200_OK_V1016"
+            )
+          : `HTTP_${response.status}_V1016`,
+      tokenConfigured: true,
+      startedAt:
+        new Date(startedAt).toISOString(),
+      finishedAt:
+        new Date().toISOString(),
+      elapsedMs:
+        Date.now() - startedAt,
+      httpStatus:
+        response.status,
+      graphqlErrors,
+      rowCount:
+        rows.length,
+      latestBlock:
+        rows?.[0]?.Block?.Number ??
+        null,
+      latestTime:
+        rows?.[0]?.Block?.Time ??
+        null,
+      transactionHash:
+        rows?.[0]?.Transaction?.Hash ??
+        null,
+      error:
+        response.ok
+          ? null
+          : (
+              payload?.errors?.[0]?.message ||
+              `BITQUERY_HTTP_${response.status}`
+            )
+    };
+  } catch (error) {
+    const aborted =
+      controller.signal.aborted === true ||
+      String(
+        error?.name || ""
+      ).toLowerCase() ===
+        "aborterror";
+
+    result = {
+      version: VERSION,
+      status:
+        aborted
+          ? "BITQUERY_FETCH_ABORTED_V1016"
+          : "BITQUERY_FETCH_ERROR_V1016",
+      tokenConfigured: true,
+      startedAt:
+        new Date(startedAt).toISOString(),
+      finishedAt:
+        new Date().toISOString(),
+      elapsedMs:
+        Date.now() - startedAt,
+      httpStatus: null,
+      graphqlErrors: [],
+      rowCount: 0,
+      latestBlock: null,
+      latestTime: null,
+      transactionHash: null,
+      error:
+        aborted
+          ? "Cloudflare->Bitquery request exceeded 10 seconds and was aborted."
+          : errorString(error)
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  await writeBitqueryHttpTestV1016(
+    env,
+    result
+  );
+
+  return result;
+}
+
+
 async function handleRequest(
   request,
-  env
+  env,
+  ctx
 ) {
   const url =
     new URL(
@@ -180404,6 +180684,60 @@ async function handleRequest(
       },
 
       405
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-http-test"
+  ) {
+    const tokenConfigured =
+      Boolean(
+        String(
+          env?.BITQUERY_ACCESS_TOKEN || ""
+        ).trim()
+      );
+
+    const started = {
+      version: VERSION,
+      status:
+        tokenConfigured
+          ? "BACKGROUND_TEST_SCHEDULED_V1016"
+          : "BITQUERY_ACCESS_TOKEN_NOT_CONFIGURED_V1016",
+      tokenConfigured,
+      resultRoute:
+        "/bitquery-http-result",
+      timestamp:
+        now()
+    };
+
+    if (
+      tokenConfigured &&
+      ctx?.waitUntil
+    ) {
+      ctx.waitUntil(
+        runBitqueryHttpTestV1016(
+          env
+        )
+      );
+    }
+
+    return jsonResponse(
+      started,
+      tokenConfigured
+        ? 202
+        : 500
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-http-result"
+  ) {
+    return jsonResponse(
+      await readBitqueryHttpTestV1016(
+        env
+      )
     );
   }
 
@@ -181905,6 +182239,8 @@ async function handleRequest(
 
       routes: [
         "/health",
+        "/bitquery-http-test",
+        "/bitquery-http-result",
         "/rpc-test",
         "/scan",
         "/state",
@@ -190165,7 +190501,8 @@ export default {
     try {
       return await handleRequest(
         request,
-        env
+        env,
+        ctx
       );
     }
 
