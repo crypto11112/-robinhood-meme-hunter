@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V1007
+ * /LAUNCHCOVERAGE TELEGRAM NEWLINE HOTFIX:
+ * - builds directly from deployed V1006;
+ * - fixes the compact V985 launch-coverage formatter returning literal "\\n"
+ *   characters instead of real newline separators;
+ * - restores the existing V292 line-safe chunker so Telegram chunks are split
+ *   between complete diagnostic lines rather than through HTML tags;
+ * - scanner, Bitquery, provider routing, budgets, holder reconstruction,
+ *   scoring, risk, qualification and Telegram alert thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1006
  * DIRECT-CHAIN HOLDER AUTHORITATIVE ENTRY FIX:
  * - builds directly from deployed V1005;
@@ -8686,7 +8698,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1006";
+const VERSION = "V1007";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -168816,7 +168828,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1006 holder/market retry diagnostic</b>",
+    "<b>V1007 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168828,7 +168840,7 @@ function launchCoverageTelegramMessageV985(state) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1006 injected-retry outcome</b>",
+    "<b>V1007 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
@@ -168846,9 +168858,9 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1006 preserves V1004/V1005 direct-chain proof rules and expands only the entry detector to use the same authoritative Blockscout-unavailable/index-lag/failure-class signals already trusted by V993. /launchcoverage now also exposes the entry signal. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1007 preserves V1006 scanner/provider/verification behaviour and fixes only /launchcoverage formatting so the proven line-safe Telegram chunker receives real newline separators. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
-  return lines.join("\\n");
+  return lines.join("\n");
 }
 
 function launchCoverageTelegramMessageV474(state) {
