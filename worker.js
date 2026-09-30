@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V1010
+ * DIRECT-HOLDER ENTRY FIX + MANUAL BITQUERY LIVE TEST:
+ * - builds directly from deployed V1009;
+ * - fixes the direct-chain holder fallback prerequisite mismatch proven by LINE/PAVDRV:
+ *   the fallback now trusts the actual V987 holder-analysis entry result instead of requiring
+ *   the candidate to have been selected through the special priority-completion flag;
+ * - adds /bitquerytest: one explicit Bitquery Robinhood GraphQL request using the configured
+ *   BITQUERY_ACCESS_TOKEN so a newly changed key can be tested immediately;
+ * - /bitquerytest is manual only, makes at most one Bitquery request per invocation, and does
+ *   not alter scanner cadence, provider limits, scoring, risk or Telegram qualification;
+ * - existing strict direct-chain holder proof remains unchanged: complete bounded history
+ *   and exact totalSupply reconciliation are still required before VERIFIED promotion.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V1009
  * /LAUNCHCOVERAGE BITQUERY TELEMETRY WIRING HOTFIX:
  * - builds directly from deployed V1008;
@@ -8724,7 +8739,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1009";
+const VERSION = "V1010";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -98086,7 +98101,7 @@ async function analyzeToken(
       Number.isFinite(Number(directHeadV1008)) &&
       Number(directHeadV1008) > 0,
     holderPriorityEntry:
-      holderPriorityEntryRequestedV987 === true,
+      holderPriorityEntryTelemetryV987.enteredHolderIntelligence === true,
     holdersAlreadyVerified:
       holdersAlreadyVerifiedV1008
   };
@@ -98099,7 +98114,7 @@ async function analyzeToken(
     Number.isFinite(Number(directHeadV1008)) &&
     Number(directHeadV1008) > 0 &&
     directChainHolderEntryEvidenceV1006.eligible === true &&
-    holderPriorityEntryRequestedV987 === true
+    holderPriorityEntryTelemetryV987.enteredHolderIntelligence === true
   ) {
     directChainHolderFallbackTelemetryV1004.eligible = true;
 
@@ -130057,6 +130072,156 @@ function telegramAnalyseVerifiedUsdLinesV284(
 }
 
 
+
+
+
+/* =========================================================
+   V1010 MANUAL BITQUERY CONNECTIVITY TEST
+   - One explicit Robinhood GraphQL request per command invocation.
+   - Used only to prove current BITQUERY_ACCESS_TOKEN auth/connectivity.
+   ========================================================= */
+async function bitqueryConnectivityTestV1010(env, state) {
+  const token = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
+
+  const base = {
+    configured: Boolean(token),
+    attempted: false,
+    httpStatus: null,
+    status: token ? "READY" : "NOT_CONFIGURED",
+    graphqlErrors: [],
+    rowCount: 0,
+    latestBlock: null,
+    latestTime: null,
+    error: null
+  };
+
+  if (!token) return base;
+
+  const query = `
+    {
+      EVM(network: robinhood) {
+        Transfers(
+          limit: {count: 1}
+          orderBy: {descending: Block_Time}
+        ) {
+          Block {
+            Number
+            Time
+          }
+          Transaction {
+            Hash
+          }
+        }
+      }
+    }
+  `;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+
+  let response = null;
+  let payload = null;
+
+  try {
+    response = await fetch(BITQUERY_GRAPHQL_V2, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({query}),
+      signal: controller.signal
+    });
+
+    try {
+      payload = await response.json();
+    } catch (_) {
+      payload = null;
+    }
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      status: "REQUEST_FAILED_V1010",
+      error: errorString(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    if (response.status === 402) {
+      registerBitquery402V251(state);
+    }
+
+    return {
+      ...base,
+      attempted: true,
+      httpStatus: response.status,
+      status: `HTTP_${response.status}_V1010`,
+      error:
+        payload?.errors?.[0]?.message ||
+        `BITQUERY_HTTP_${response.status}`
+    };
+  }
+
+  registerBitqueryHttpSuccessV251(state);
+
+  const graphqlErrors = Array.isArray(payload?.errors)
+    ? payload.errors.map(row => String(row?.message || "GRAPHQL_ERROR")).slice(0, 5)
+    : [];
+
+  const rows = Array.isArray(payload?.data?.EVM?.Transfers)
+    ? payload.data.EVM.Transfers
+    : [];
+
+  return {
+    ...base,
+    attempted: true,
+    httpStatus: response.status,
+    status: graphqlErrors.length
+      ? "HTTP_200_GRAPHQL_ERROR_V1010"
+      : "HTTP_200_OK_V1010",
+    graphqlErrors,
+    rowCount: rows.length,
+    latestBlock: rows?.[0]?.Block?.Number ?? null,
+    latestTime: rows?.[0]?.Block?.Time ?? null
+  };
+}
+
+function bitqueryConnectivityMessageV1010(result) {
+  const lines = [
+    `🛰 <b>Bitquery Live Test — ${escapeHtml(VERSION)}</b>`,
+    "",
+    `Token configured: ${result?.configured === true ? "YES" : "NO"}`,
+    `Request attempted: ${result?.attempted === true ? "YES" : "NO"}`,
+    `HTTP: ${result?.httpStatus ?? "N/A"}`,
+    `Status: ${escapeHtml(String(result?.status || "UNKNOWN"))}`,
+    `Rows returned: ${fmt(safeNumber(result?.rowCount))}`,
+    `Latest Robinhood block: ${result?.latestBlock ?? "UNVERIFIED"}`,
+    `Latest time: ${result?.latestTime ? escapeHtml(String(result.latestTime)) : "UNVERIFIED"}`
+  ];
+
+  if (Array.isArray(result?.graphqlErrors) && result.graphqlErrors.length) {
+    lines.push(
+      `GraphQL error: ${escapeHtml(result.graphqlErrors.join(" | ").slice(0, 800))}`
+    );
+  }
+
+  if (result?.error) {
+    lines.push(
+      `Error: ${escapeHtml(String(result.error).slice(0, 800))}`
+    );
+  }
+
+  lines.push(
+    "",
+    "<i>Manual one-request connectivity test only. It does not change scanner cadence, scores, risk rules or Telegram qualification.</i>"
+  );
+
+  return lines.join("\n");
+}
 
 
 /* =========================================================
@@ -168934,7 +169099,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V1009 holder/market retry diagnostic</b>",
+    "<b>V1010 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -168946,14 +169111,14 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Current V993 holder-rescue retry queue: ${fmt((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).filter(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")).length)}`,
     `Current V993 holder retry target: ${escapeHtml(String(((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.symbol || ((Array.isArray(state?.analysisRetryQueueV415) ? state.analysisRetryQueueV415 : []).find(row => String(row?.reason || "").startsWith("HOLDER_RESCUE_RETRY_V993")) || {})?.address || "NONE"))}`,
     "",
-    "<b>V1009 injected-retry outcome</b>",
+    "<b>V1010 injected-retry outcome</b>",
     `Retry target: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.symbol || state?.lastRetryOutcomeTraceV1002?.address || "NONE"))}`,
     `Prior queue: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.priorReason || "NONE"))} · prior attempt ${fmt(state?.lastRetryOutcomeTraceV1002?.priorAttempts)}`,
     `Outcome: ${escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.outcome || "NONE"))}`,
     `↳ Market: ${state?.lastRetryOutcomeTraceV1002?.marketVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.marketStatus || "UNVERIFIED"))} · Holders: ${state?.lastRetryOutcomeTraceV1002?.holderVerified === true ? "VERIFIED" : escapeHtml(String(state?.lastRetryOutcomeTraceV1002?.holderStatus || "UNVERIFIED"))} · Risk: ${state?.lastRetryOutcomeTraceV1002?.riskVerified === true ? fmt(state?.lastRetryOutcomeTraceV1002?.riskScore) : "UNVERIFIED"}`,
     `↳ Requeued — Market: ${state?.lastRetryOutcomeTraceV1002?.marketRetryQueuedAgain === true ? "YES" : "NO"} · Holder: ${state?.lastRetryOutcomeTraceV1002?.holderRetryQueuedAgain === true ? "YES" : "NO"} · Progressive: ${state?.lastRetryOutcomeTraceV1002?.progressiveRetryQueuedAgain === true ? "YES" : "NO"}`,
     "",
-    "<b>V1009 Bitquery health</b>",
+    "<b>V1010 Bitquery health</b>",
     `Token configured: ${bitqueryTokenConfiguredV1008 ? "YES" : "NO"}`,
     `Last status: ${escapeHtml(bitqueryStatusV1008)}`,
     `Cooling now: ${bitqueryCoolingV1008 ? "YES" : "NO"}`,
@@ -168972,7 +169137,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1009 preserves V1008 scanner/provider behaviour and fixes only the /launchcoverage Bitquery diagnostic wiring by passing env into the formatter. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
+    "<i>V1010 preserves V1009 scanner/provider behaviour, fixes the direct-chain holder entry prerequisite to use the actual V987 holder-analysis entry result, and adds the manual one-request /bitquerytest connectivity check. No provider-limit, request-ceiling, scoring/risk or Telegram-threshold change.</i>"
   ];
   return lines.join("\n");
 }
@@ -172497,6 +172662,34 @@ async function telegramCommandReplyV271(
           ),
         chainWideLaunchpadTotal:
           "DATA UNVERIFIED"
+      };
+    }
+  } else if (
+    parsed.command === "/bitquerytest" ||
+    parsed.command === "/bqtest"
+  ) {
+    const bitqueryTestV1010 =
+      await bitqueryConnectivityTestV1010(
+        env,
+        state
+      );
+
+    reply =
+      bitqueryConnectivityMessageV1010(
+        bitqueryTestV1010
+      );
+
+    if (diagnosticV273) {
+      diagnosticV273.bitqueryConnectivityV1010 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests:
+          bitqueryTestV1010?.attempted === true ? 1 : 0,
+        configured:
+          bitqueryTestV1010?.configured === true,
+        httpStatus:
+          bitqueryTestV1010?.httpStatus ?? null,
+        status:
+          bitqueryTestV1010?.status || null
       };
     }
   } else if (
