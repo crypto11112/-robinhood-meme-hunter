@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V996
+ * V996 TEMPORARY MARKET-PROVIDER FAILURE RETRY:
+ * - preserves V995 diagnostics and all V994/V993 retry, scoring, risk and Telegram behaviour;
+ * - extends the existing V992 market-rescue retry classification to temporary CoinMarketCap failures
+ *   that can recover on a later normal scan: HTTP 429, HTTP 5xx, fetch/transport failure, CMC fresh-spacing,
+ *   per-scan limit, budget protection, and explicit CMC cooldown;
+ * - CoinGecko Demo NO_MARKET_FOUND remains non-retryable by itself; a retry is retained only when another
+ *   market provider is temporarily unavailable/failing, so missing listings cannot create endless retries;
+ * - reuses the existing bounded V415 queue, adds no immediate provider request, raises no request ceiling,
+ *   bypasses no cooldown, and changes no scoring, risk proof or Telegram threshold.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V995
  * V995 RETRY-QUEUE SNAPSHOT DIAGNOSTIC:
  * - preserves all V994/V993 scanner, retry, provider, scoring, risk and Telegram behaviour unchanged;
@@ -8510,7 +8523,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V995";
+const VERSION = "V996";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -111285,6 +111298,18 @@ for (
       String(postRiskTelemetryV992?.demoStatus || "");
     const cmcStatusV992 =
       String(postRiskTelemetryV992?.cmcStatus || "");
+    const cmcTemporarilyUnavailableV996 = Boolean(
+      [
+        "CMC_COOLDOWN_V739",
+        "CMC_FRESH_SPACING_V739",
+        "CMC_SCAN_LIMIT_V739",
+        "CMC_BUDGET_PROTECTED_V739",
+        "CMC_HTTP_429_V739",
+        "CMC_FETCH_ERROR_V739"
+      ].includes(cmcStatusV992) ||
+      /^CMC_HTTP_5\d\d_V739$/.test(cmcStatusV992)
+    );
+
     const marketTemporarilyUnavailableV992 =
       [
         "COINGECKO_DEMO_FRESH_SPACING_V660",
@@ -111292,7 +111317,7 @@ for (
         "COINGECKO_DEMO_SCAN_LIMIT_V660",
         "COINGECKO_DEMO_BUDGET_PROTECTED_V660"
       ].includes(demoStatusV992) ||
-      cmcStatusV992 === "CMC_COOLDOWN_V739";
+      cmcTemporarilyUnavailableV996;
     const verifiedTerminalRiskV992 =
       candidate?.risk?.verified === true &&
       safeNumber(candidate?.risk?.score) > 59;
@@ -111308,6 +111333,7 @@ for (
       queued: false,
       demoStatus: demoStatusV992 || null,
       cmcStatus: cmcStatusV992 || null,
+      cmcTemporarilyUnavailableV996,
       terminalRisk: verifiedTerminalRiskV992,
       requestCeilingsChanged: false,
       cooldownBypassed: false
@@ -167956,7 +167982,7 @@ function launchCoverageTelegramMessageV985(state) {
     ...(usingPriorCandidateScanV994 ? [`<i>Showing last candidate-bearing scan: ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}</i>`] : []),
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V995 holder/market retry diagnostic</b>",
+    "<b>V996 holder/market retry diagnostic</b>",
     `Diagnostic scan source: ${usingPriorCandidateScanV994 ? `LAST CANDIDATE-BEARING · ${escapeHtml(iso(diagnosticLastV994?.capturedAt))}` : "LATEST SCAN"}`,
     `First target: ${escapeHtml(String(diagnosticLastV994?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${diagnosticLastV994?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${diagnosticLastV994?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
@@ -167979,7 +168005,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V995 preserves all V994/V993 retry behaviour unchanged. It snapshots per-candidate retry eligibility/queue decisions and the exact V415 queue at the candidate-bearing scan, separating scan-time enqueue evidence from the current live queue. Diagnostic/state only: no provider-limit, scoring/risk, request-ceiling or Telegram-threshold change.</i>"
+    "<i>V996 preserves V995 diagnostics and extends the existing bounded V992 market retry only to temporary CMC failures (429/5xx/fetch/spacing/scan-limit/budget/cooldown). CoinGecko NO_MARKET_FOUND alone is not retried. No cooldown bypass, provider-limit increase, scoring/risk change, request-ceiling increase or Telegram-threshold change.</i>"
   ];
   return lines.join("\\n");
 }
