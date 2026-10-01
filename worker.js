@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1037";
+const VERSION = "V1038";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171550,7 +171550,8 @@ function telegramHelpV271() {
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/subscribers</code> — Stripe↔Telegram subscriber mappings (read-only)",
-    "<code>/accessexpiry</code> — V1037 cancellation/paid-through removal diagnostic (read-only)",
+     "<code>/accessexpiry</code> — cancellation/paid-through removal diagnostic (read-only)",
+    "<code>/stripetrace</code> — V1038 latest Stripe subscription lifecycle event trace (read-only)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -172501,6 +172502,18 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
+
+  // V1038: read-only Stripe lifecycle payload trace.
+  if (parsed.command === "/stripetrace") {
+    const replyV1038 = await stripeLifecycleTraceAdminMessageV1038(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1038 = await sendTelegram(env, replyV1038, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1038?.success === true;
+      diagnosticV273.result = sentV1038?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1038?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
 
   // V1036: read-only cancellation/access-expiry diagnostic.
   if (parsed.command === "/accessexpiry") {
@@ -181585,6 +181598,31 @@ async function recordStripeLifecycleV1036(env, event) {
        WHERE telegram_user_id=?`
     ).bind(nextStatus,effectiveEnd,cancelAtPeriodEnd,ts,String(row.telegram_user_id)).run();
 
+    // V1038: compact persisted trace in KV (if available), so Admin can inspect
+    // exactly what the latest Stripe subscription lifecycle event contained.
+    const traceV1038 = {
+      recordedAt: new Date().toISOString(),
+      eventId: String(event?.id || ""),
+      eventType: type,
+      subscriptionId: subscriptionId || null,
+      customerId: customerId || null,
+      stripeStatus: stripeStatus || null,
+      cancelAtPeriodEndRaw: obj?.cancel_at_period_end ?? null,
+      cancelAtRaw: obj?.cancel_at ?? null,
+      canceledAtRaw: obj?.canceled_at ?? null,
+      endedAtRaw: obj?.ended_at ?? null,
+      topLevelCurrentPeriodEndRaw: obj?.current_period_end ?? null,
+      itemPeriodEndsRaw: Array.isArray(obj?.items?.data)
+        ? obj.items.data.map((item) => item?.current_period_end ?? null)
+        : [],
+      derivedCurrentPeriodEnd: currentPeriodEnd,
+      derivedLocalStatus: nextStatus,
+      telegramUserId: String(row.telegram_user_id)
+    };
+    try {
+      if (env?.STATE) await env.STATE.put("stripeLifecycleTraceV1038", JSON.stringify(traceV1038));
+    } catch (_) {}
+
     const wouldRemove = nextStatus==="ENDED" || (
       nextStatus==="CANCEL_SCHEDULED" &&
       effectiveEnd!==null &&
@@ -181606,8 +181644,48 @@ async function recordStripeLifecycleV1036(env, event) {
   }
 }
 
+
+async function stripeLifecycleTraceAdminMessageV1038(env) {
+  let raw = null;
+  try {
+    if (env?.STATE) raw = await env.STATE.get("stripeLifecycleTraceV1038");
+  } catch (_) {}
+  if (!raw) return [
+    "🔬 <b>Stripe Lifecycle Trace — V1038</b>",
+    "",
+    "No V1038 subscription lifecycle event has been recorded yet.",
+    "",
+    "<i>Diagnostic only. No Telegram membership action is enabled.</i>"
+  ].join("\n");
+  try {
+    const t=JSON.parse(raw);
+    const fmt=(v)=>v===null||v===undefined||v===""?"NONE":escapeHtml(String(v));
+    const fmtTs=(v)=>{
+      const n=Number(v);
+      return Number.isFinite(n)&&n>0 ? `${escapeHtml(new Date(n*1000).toISOString())} (${Math.trunc(n)})` : fmt(v);
+    };
+    return [
+      "🔬 <b>Stripe Lifecycle Trace — V1038</b>","",
+      `Recorded: <code>${fmt(t.recordedAt)}</code>`,
+      `Event: <code>${fmt(t.eventType)}</code>`,
+      `Stripe status: <b>${fmt(t.stripeStatus)}</b>`,
+      `cancel_at_period_end raw: <b>${fmt(t.cancelAtPeriodEndRaw)}</b>`,
+      `cancel_at: <code>${fmtTs(t.cancelAtRaw)}</code>`,
+      `canceled_at: <code>${fmtTs(t.canceledAtRaw)}</code>`,
+      `ended_at: <code>${fmtTs(t.endedAtRaw)}</code>`,
+      `Top-level period end: <code>${fmtTs(t.topLevelCurrentPeriodEndRaw)}</code>`,
+      `Item period ends: <code>${escapeHtml(JSON.stringify(t.itemPeriodEndsRaw||[]))}</code>`,
+      `Derived period end: <code>${fmtTs(t.derivedCurrentPeriodEnd)}</code>`,
+      `Derived local status: <b>${fmt(t.derivedLocalStatus)}</b>`,"",
+      "<i>Diagnostic only. No Telegram membership action is enabled.</i>"
+    ].join("\n");
+  } catch(error) {
+    return `🔬 <b>Stripe Lifecycle Trace — V1038</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
+  }
+}
+
 async function accessExpiryAdminMessageV1036(env) {
-  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1037</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1038</b>\n\nD1 binding: MISSING";
   try {
     const nowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181615,7 +181693,7 @@ async function accessExpiryAdminMessageV1036(env) {
        FROM subscribers
        ORDER BY updated_at DESC LIMIT 25`
     ).all();
-    const lines=["🧪 <b>Premium Access Expiry — V1037</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1036.`,""];
+    const lines=["🧪 <b>Premium Access Expiry — V1038</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1038.`,""];
     for(const row of (rows?.results||[])){
       const user=row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
       const end=Number(row.current_period_end);
@@ -181627,7 +181705,7 @@ async function accessExpiryAdminMessageV1036(env) {
     if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
     return lines.join("\n");
   } catch(error){
-    return `🧪 <b>Premium Access Expiry — V1037</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧪 <b>Premium Access Expiry — V1038</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
