@@ -1,17 +1,4 @@
 /**
- * Robinhood Chain Meme Hunter — V1030
- * ADMIN READ-ONLY HEALTH SNAPSHOT:
- * - builds directly from deployed V1029;
- * - adds Admin-only Telegram /health using persisted telemetry only;
- * - reports scheduler freshness, persistence, Telegram role bindings, delayed-Free queue,
- *   and last-known Bitquery service status/cooldown;
- * - makes ZERO scanner/provider/RPC requests and ZERO state writes;
- * - preserves V1028/V1029 Premium→30-minute Free queue behaviour unchanged;
- * - no scanner, scoring, holder, risk, qualification, Telegram threshold, provider-routing,
- *   request-ceiling or member-permission changes.
- */
-
-/**
  * Robinhood Chain Meme Hunter
  * V1018
  * - adds zero-request Bitquery candidate-recovery telemetry to /launchcoverage;
@@ -171553,7 +171540,6 @@ function telegramHelpV271() {
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
-    "<code>/health</code> — V1030 Admin operational health snapshot (read-only, zero provider requests)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -171564,87 +171550,6 @@ function telegramHelpV271() {
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. /v3start and /v3stop control the token's V3 live collector. Other diagnostic/report commands do not trigger a fresh chain scan.</i>"
-  ].join("\n");
-}
-
-function adminHealthTelegramV1030(env, loaded) {
-  const state = loaded?.state || {};
-  const scheduler = state?.scheduler || {};
-  const lastRun = safeNumber(scheduler?.lastScheduledRunAt) || null;
-  const lastSuccess = safeNumber(scheduler?.lastScheduledSuccessAt) || null;
-  const ageMin = lastRun ? Math.max(0, (Date.now() - lastRun) / 60000) : null;
-  const schedulerHealthy = ageMin !== null && ageMin <= 10;
-
-  const adminId = String(env?.TELEGRAM_ADMIN_CHAT_ID || env?.TELEGRAM_CHAT_ID || "").trim();
-  const premiumId = String(env?.TELEGRAM_PREMIUM_CHAT_ID || "").trim();
-  const freeId = String(env?.TELEGRAM_FREE_CHAT_ID || "").trim();
-
-  const queue = state?.freeCallQueueV1028 || null;
-  const entries = Array.isArray(queue?.entries) ? queue.entries : [];
-  const nowMs = Date.now();
-  const dueNow = entries.filter(x => safeNumber(x?.dueAt) > 0 && safeNumber(x?.dueAt) <= nowMs).length;
-  const nextDue = entries
-    .map(x => safeNumber(x?.dueAt))
-    .filter(x => x > nowMs)
-    .sort((a,b) => a-b)[0] || null;
-
-  // Read the object directly: unlike bitqueryServiceV251(), this cannot initialise/mutate state.
-  const bq = state?.services?.bitqueryV251 || null;
-  const bqCooldown = safeNumber(bq?.cooldownUntil) || null;
-  const bqCooling = Boolean(bqCooldown && bqCooldown > nowMs);
-  const bqLastSuccess = safeNumber(bq?.lastSuccessAt) || null;
-  const bqLast402 = safeNumber(bq?.last402At) || null;
-  const bqStatus = String(bq?.lastStatus || "NO_RECORDED_STATUS");
-
-  const problems = [];
-  if (loaded?.persistent !== true) problems.push("KV persistence unavailable");
-  if (!schedulerHealthy) problems.push("scheduler stale/unverified");
-  if (!adminId || !premiumId || !freeId) problems.push("Telegram role binding missing");
-  if (dueNow > 0) problems.push(`${dueNow} Free call(s) due now`);
-  if (bqCooling) problems.push("Bitquery cooldown active");
-
-  const overall = problems.length === 0 ? "OK" : "ATTENTION";
-  const ts = value => value ? escapeHtml(new Date(value).toISOString()) : "NONE";
-  const age = ageMin === null ? "UNKNOWN" : `${Math.round(ageMin * 10) / 10}m`;
-
-  return [
-    `🩺 <b>ChainVanta Admin Health — V1030</b>`,
-    "",
-    `Overall: <b>${overall}</b>`,
-    "",
-    "<b>Scanner / scheduler</b>",
-    `Status: <b>${schedulerHealthy ? "HEALTHY" : "STALE / UNVERIFIED"}</b>`,
-    `Last scheduled run: <code>${ts(lastRun)}</code> · age ${escapeHtml(age)}`,
-    `Last scheduled success: <code>${ts(lastSuccess)}</code>`,
-    `Last status: <b>${escapeHtml(String(scheduler?.lastScheduledStatus || "UNRECORDED"))}</b>`,
-    `Last scanned block: <b>${escapeHtml(String(state?.lastScannedBlock ?? "UNRECORDED"))}</b>`,
-    "",
-    "<b>Persistence</b>",
-    `KV: <b>${loaded?.persistent === true ? "CONNECTED" : "UNAVAILABLE"}</b>${loaded?.error ? ` · ${escapeHtml(String(loaded.error).slice(0,160))}` : ""}`,
-    "",
-    "<b>Telegram routing</b>",
-    `Admin: <b>${adminId ? "CONFIGURED" : "MISSING"}</b>`,
-    `Premium: <b>${premiumId ? "CONFIGURED" : "MISSING"}</b>`,
-    `Free: <b>${freeId ? "CONFIGURED" : "MISSING"}</b>`,
-    "",
-    "<b>30-minute Free queue</b>",
-    `State: <b>${queue ? "INITIALISED" : "NO QUEUE STATE YET"}</b>`,
-    `Pending: <b>${entries.length}</b> · due now: <b>${dueNow}</b>`,
-    `Total enqueued: <b>${safeNumber(queue?.totalEnqueued)}</b> · sent: <b>${safeNumber(queue?.totalSent)}</b>`,
-    `Failed: <b>${safeNumber(queue?.failedAttempts)}</b> · dropped: <b>${safeNumber(queue?.dropped)}</b>`,
-    `Next due: <code>${ts(nextDue)}</code>`,
-    "",
-    "<b>Bitquery — last known telemetry</b>",
-    `Token configured: <b>${String(env?.BITQUERY_ACCESS_TOKEN || "").trim() ? "YES" : "NO"}</b>`,
-    `Last status: <b>${escapeHtml(bqStatus)}</b>`,
-    `Cooling now: <b>${bqCooling ? "YES" : "NO"}</b>`,
-    `Cooldown until: <code>${ts(bqCooldown)}</code>`,
-    `Last success: <code>${ts(bqLastSuccess)}</code>`,
-    `Last 402: <code>${ts(bqLast402)}</code>`,
-    "",
-    problems.length ? `<b>Attention:</b> ${escapeHtml(problems.join("; "))}` : "<b>Attention:</b> NONE",
-    "",
-    "<i>Read-only snapshot: 0 scanner/provider/RPC requests · 0 state writes. Provider fields are last-known persisted telemetry, not live probes.</i>"
   ].join("\n");
 }
 
@@ -172523,24 +172428,6 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
-
-  // V1030: Admin-only persisted operational health snapshot.
-  // Deliberately does NOT call the existing HTTP health() function because that performs a live RPC request.
-  if (parsed.command === "/health") {
-    const loadedV1030 = await readState(env);
-    const replyV1030 = adminHealthTelegramV1030(env, loadedV1030);
-    if (diagnosticV273) diagnosticV273.replyAttempted = true;
-    const sentV1030 = await sendTelegram(env, replyV1030, null, null);
-    if (diagnosticV273) {
-      diagnosticV273.replySuccess = sentV1030?.success === true;
-      diagnosticV273.telegramStatus = sentV1030?.status || null;
-      diagnosticV273.telegramMode = sentV1030?.mode || null;
-      diagnosticV273.telegramError = sentV1030?.error || null;
-      diagnosticV273.result = sentV1030?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
-      diagnosticV273.adminHealthV1030 = {scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
-    }
-    return {success:sentV1030?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
-  }
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
@@ -181196,6 +181083,159 @@ async function runBitqueryHttpTestV1016(env) {
 }
 
 
+/* ============================================================
+   V1030 — STRIPE WEBHOOK FOUNDATION
+   - isolated HTTPS POST /stripe-webhook route;
+   - verifies Stripe-Signature with STRIPE_WEBHOOK_SECRET using HMAC-SHA256;
+   - accepts only the five selected subscription/payment event types;
+   - logs compact event metadata only (no card data or Stripe secrets);
+   - no scanner, provider, scoring, risk, Telegram qualification, request-budget,
+     Premium routing, or V1028 delayed-Free queue behaviour is changed.
+   ============================================================ */
+
+const STRIPE_WEBHOOK_EVENTS_V1030 = new Set([
+  "checkout.session.completed",
+  "invoice.paid",
+  "invoice.payment_failed",
+  "customer.subscription.updated",
+  "customer.subscription.deleted"
+]);
+
+function stripeHexV1030(bytes) {
+  return Array.from(new Uint8Array(bytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function stripeConstantTimeEqualV1030(a, b) {
+  const aa = String(a || "").toLowerCase();
+  const bb = String(b || "").toLowerCase();
+  if (aa.length !== bb.length || aa.length === 0) return false;
+  let diff = 0;
+  for (let i = 0; i < aa.length; i++) {
+    diff |= aa.charCodeAt(i) ^ bb.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+async function verifyStripeSignatureV1030(rawBody, signatureHeader, secret) {
+  const header = String(signatureHeader || "");
+  const parts = header.split(",");
+  let timestamp = null;
+  const signatures = [];
+
+  for (const part of parts) {
+    const eq = part.indexOf("=");
+    if (eq < 1) continue;
+    const key = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (key === "t" && /^\d+$/.test(value)) timestamp = Number(value);
+    if (key === "v1" && /^[0-9a-fA-F]+$/.test(value)) signatures.push(value);
+  }
+
+  if (!timestamp || signatures.length === 0) {
+    return { ok: false, reason: "STRIPE_SIGNATURE_HEADER_INVALID_V1030" };
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSeconds - timestamp) > 300) {
+    return { ok: false, reason: "STRIPE_SIGNATURE_TIMESTAMP_OUTSIDE_TOLERANCE_V1030" };
+  }
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(String(secret)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const digest = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(signedPayload)
+  );
+  const expected = stripeHexV1030(digest);
+  const ok = signatures.some((candidate) =>
+    stripeConstantTimeEqualV1030(candidate, expected)
+  );
+
+  return {
+    ok,
+    reason: ok ? "VERIFIED_V1030" : "STRIPE_SIGNATURE_MISMATCH_V1030"
+  };
+}
+
+async function stripeWebhookV1030(request, env) {
+  const secret = String(env?.STRIPE_WEBHOOK_SECRET || "").trim();
+  if (!secret) {
+    console.error("V1030 Stripe webhook secret is not configured");
+    return jsonResponse(
+      { ok: false, version: VERSION, error: "STRIPE_WEBHOOK_SECRET_NOT_CONFIGURED_V1030", timestamp: now() },
+      503
+    );
+  }
+
+  const rawBody = await request.text();
+  const verification = await verifyStripeSignatureV1030(
+    rawBody,
+    request.headers.get("stripe-signature"),
+    secret
+  );
+
+  if (!verification.ok) {
+    console.warn("V1030 Stripe webhook rejected", verification.reason);
+    return jsonResponse(
+      { ok: false, version: VERSION, error: verification.reason, timestamp: now() },
+      400
+    );
+  }
+
+  let event;
+  try {
+    event = JSON.parse(rawBody);
+  } catch (_) {
+    return jsonResponse(
+      { ok: false, version: VERSION, error: "STRIPE_WEBHOOK_JSON_INVALID_V1030", timestamp: now() },
+      400
+    );
+  }
+
+  const eventId = String(event?.id || "");
+  const eventType = String(event?.type || "");
+  if (!eventId || !eventType) {
+    return jsonResponse(
+      { ok: false, version: VERSION, error: "STRIPE_EVENT_ID_OR_TYPE_MISSING_V1030", timestamp: now() },
+      400
+    );
+  }
+
+  const selected = STRIPE_WEBHOOK_EVENTS_V1030.has(eventType);
+  console.log("V1030 Stripe webhook verified", {
+    eventId,
+    eventType,
+    selected,
+    livemode: event?.livemode === true
+  });
+
+  // Foundation only: acknowledgement after cryptographic verification.
+  // D1 subscriber mutation / Telegram access changes are intentionally NOT enabled in V1030.
+  return jsonResponse(
+    {
+      ok: true,
+      version: VERSION,
+      received: true,
+      verified: true,
+      selected,
+      eventId,
+      eventType,
+      timestamp: now()
+    },
+    200
+  );
+}
+
 async function handleRequest(
   request,
   env,
@@ -181247,6 +181287,18 @@ async function handleRequest(
             "content-type, authorization"
         }
       }
+    );
+  }
+
+  if (
+    path ===
+      "/stripe-webhook" &&
+    request.method ===
+      "POST"
+  ) {
+    return await stripeWebhookV1030(
+      request,
+      env
     );
   }
 
@@ -182870,6 +182922,7 @@ async function handleRequest(
         "NOT_FOUND",
 
       routes: [
+        "/stripe-webhook",
         "/health",
         "/bitquery-http-test",
         "/bitquery-http-result",
