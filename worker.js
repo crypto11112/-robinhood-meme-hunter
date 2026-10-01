@@ -8846,13 +8846,21 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1027";
+const VERSION = "V1028";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
  * - records Telegram API response descriptions when a reply is rejected;
  * - preserves Premium/Free routing, scanner, providers, scoring, holder/risk logic,
  *   request ceilings and qualification thresholds unchanged.
+ */
+/* V1028 PERSISTED DELAYED FREE-CALL DELIVERY — TELEGRAM TRANSPORT ONLY:
+ * - successful autonomous Premium qualifying alerts are copied into a bounded KV-backed queue;
+ * - the existing scheduled scan drains due Free deliveries after 30 minutes;
+ * - reuses the already-rendered qualifying alert: no second analysis and zero provider requests;
+ * - successful Free deliveries are removed immediately; failures retry on later scheduled scans;
+ * - preserves Admin/Premium permissions, scanner, scoring, risk, holder logic, request ceilings
+ *   and qualification thresholds unchanged.
  */
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
@@ -79660,6 +79668,142 @@ async function sendTelegram(
 
 
 /* =========================================================
+   V1028 — PERSISTED 30-MINUTE FREE-CALL DELIVERY
+   Telegram transport only. No provider/scanner requests.
+   ========================================================= */
+const V1028_FREE_DELAY_MS = 30 * 60 * 1000;
+const V1028_FREE_RETRY_MS = 5 * 60 * 1000;
+const V1028_FREE_MAX_ATTEMPTS = 12;
+const V1028_FREE_QUEUE_MAX = 100;
+const V1028_FREE_SENDS_PER_RUN = 3;
+const V1028_FREE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function freeCallQueueV1028(state) {
+  if (!state || typeof state !== "object") return null;
+  if (!state.freeCallQueueV1028 || typeof state.freeCallQueueV1028 !== "object") {
+    state.freeCallQueueV1028 = {
+      schemaVersion: "V1028_1",
+      entries: [],
+      totalEnqueued: 0,
+      totalSent: 0,
+      totalFailedAttempts: 0,
+      totalDropped: 0,
+      lastUpdatedAt: null,
+      lastSentAt: null
+    };
+  }
+  if (!Array.isArray(state.freeCallQueueV1028.entries)) state.freeCallQueueV1028.entries = [];
+  return state.freeCallQueueV1028;
+}
+
+function enqueueFreeCallV1028(state, candidate, renderedMessage, premiumResult, imageUrl = null) {
+  const queue = freeCallQueueV1028(state);
+  if (!queue || !renderedMessage || premiumResult?.success !== true) {
+    return {queued:false, reason:"NOT_ELIGIBLE_V1028"};
+  }
+  const nowMs = Date.now();
+  const premiumMessageId = Number(premiumResult?.data?.result?.message_id);
+  const address = normalize(candidate?.address || "");
+  const key = Number.isFinite(premiumMessageId) && premiumMessageId > 0
+    ? `premium:${premiumMessageId}`
+    : `${address || "unknown"}:${nowMs}`;
+  if (queue.entries.some(row => row?.key === key)) {
+    return {queued:false, reason:"ALREADY_QUEUED_V1028", key};
+  }
+  queue.entries.push({
+    schemaVersion:"V1028_FREE_CALL_1",
+    key,
+    address: address || null,
+    symbol: candidate?.symbol || null,
+    message: String(renderedMessage),
+    imageUrl: imageUrl ? String(imageUrl) : null,
+    premiumMessageId: Number.isFinite(premiumMessageId) ? premiumMessageId : null,
+    enqueuedAt: nowMs,
+    dueAt: nowMs + V1028_FREE_DELAY_MS,
+    nextAttemptAt: nowMs + V1028_FREE_DELAY_MS,
+    attempts: 0,
+    lastAttemptAt: null,
+    lastError: null
+  });
+  if (queue.entries.length > V1028_FREE_QUEUE_MAX) {
+    const overflow = queue.entries.length - V1028_FREE_QUEUE_MAX;
+    queue.entries.splice(0, overflow);
+    queue.totalDropped = safeNumber(queue.totalDropped) + overflow;
+  }
+  queue.totalEnqueued = safeNumber(queue.totalEnqueued) + 1;
+  queue.lastUpdatedAt = nowMs;
+  return {queued:true, key, dueAt:nowMs + V1028_FREE_DELAY_MS};
+}
+
+async function processDueFreeCallsV1028(env) {
+  const freeChatId = String(env.TELEGRAM_FREE_CHAT_ID || "").trim();
+  if (!freeChatId) return {enabled:false, status:"FREE_CHAT_NOT_CONFIGURED_V1028", providerRequests:0};
+
+  const loaded = await readState(env);
+  const state = loaded?.state || newState();
+  const queue = freeCallQueueV1028(state);
+  const nowMs = Date.now();
+  let changed = false;
+  let sent = 0;
+  let attempted = 0;
+  let dropped = 0;
+  const retained = [];
+
+  for (const row of queue.entries) {
+    const enqueuedAt = Number(row?.enqueuedAt || 0);
+    const attempts = safeNumber(row?.attempts);
+    if (!enqueuedAt || nowMs - enqueuedAt > V1028_FREE_MAX_AGE_MS || attempts >= V1028_FREE_MAX_ATTEMPTS) {
+      dropped += 1;
+      changed = true;
+      continue;
+    }
+    const dueAt = Number(row?.nextAttemptAt || row?.dueAt || 0);
+    if (attempted >= V1028_FREE_SENDS_PER_RUN || !dueAt || dueAt > nowMs) {
+      retained.push(row);
+      continue;
+    }
+
+    attempted += 1;
+    const delivery = await sendTelegram(env, String(row.message || ""), null, row.imageUrl || null, freeChatId);
+    if (delivery?.success === true) {
+      sent += 1;
+      changed = true;
+      queue.totalSent = safeNumber(queue.totalSent) + 1;
+      queue.lastSentAt = nowMs;
+      continue;
+    }
+
+    changed = true;
+    queue.totalFailedAttempts = safeNumber(queue.totalFailedAttempts) + 1;
+    retained.push({
+      ...row,
+      attempts: attempts + 1,
+      lastAttemptAt: nowMs,
+      nextAttemptAt: nowMs + V1028_FREE_RETRY_MS,
+      lastError: delivery?.data?.description || delivery?.error || delivery?.reason || `HTTP_${delivery?.status || "UNKNOWN"}`
+    });
+  }
+
+  queue.entries = retained;
+  if (dropped) queue.totalDropped = safeNumber(queue.totalDropped) + dropped;
+  if (changed) {
+    queue.lastUpdatedAt = nowMs;
+    await writeState(env, state);
+  }
+  return {
+    enabled:true,
+    status:"FREE_DELAY_QUEUE_PROCESSED_V1028",
+    delayMinutes:30,
+    queuedRemaining:queue.entries.length,
+    attempted,
+    sent,
+    dropped,
+    providerRequests:0,
+    scannerBudgetConsumed:false
+  };
+}
+
+/* =========================================================
    V412 — TELEGRAM DELIVERY PROVENANCE
    ========================================================= */
 function telegramDeliveryProofV412(result, fallbackChatId = null) {
@@ -119065,6 +119209,19 @@ for (
     if (
       result.success
     ) {
+      // V1028: queue the already-rendered successful Premium alert for delayed
+      // Free delivery. This is KV state only and performs zero provider requests.
+      if (String(env.TELEGRAM_PREMIUM_CHAT_ID || "").trim() && String(env.TELEGRAM_FREE_CHAT_ID || "").trim()) {
+        telegramResults[telegramResults.length - 1].freeDelayQueueV1028 =
+          enqueueFreeCallV1028(
+            state,
+            candidate,
+            telegramMessage(candidate),
+            result,
+            candidate.market?.imageUrl || null
+          );
+      }
+
       // V412: bind this exact successful Telegram API delivery to the candidate
       // before call registration. The proof is only entry-frozen when there is
       // no pre-existing frozen entryTimestamp; repeat alerts remain separate.
@@ -183183,6 +183340,20 @@ async function scheduledScan(
           true
       }
     );
+
+  // V1028: drain due delayed Free alerts only after the normal scan has fully
+  // completed. Fail-open and isolated from scanner/provider request accounting.
+  try {
+    result.freeDelayedDeliveryV1028 = await processDueFreeCallsV1028(env);
+  } catch (error) {
+    result.freeDelayedDeliveryV1028 = {
+      enabled:Boolean(String(env.TELEGRAM_FREE_CHAT_ID || "").trim()),
+      status:"FREE_DELAY_QUEUE_ERROR_V1028",
+      error:errorString(error),
+      providerRequests:0,
+      scannerBudgetConsumed:false
+    };
+  }
 
   /* V333 Step 1A: autonomous native V3 collection is isolated from the
    * scanner budget and fails open so it cannot stop the normal scheduled scan. */
