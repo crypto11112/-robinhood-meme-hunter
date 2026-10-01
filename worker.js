@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1038";
+const VERSION = "V1039";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171551,7 +171551,7 @@ function telegramHelpV271() {
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/subscribers</code> — Stripe↔Telegram subscriber mappings (read-only)",
      "<code>/accessexpiry</code> — cancellation/paid-through removal diagnostic (read-only)",
-    "<code>/stripetrace</code> — V1038 latest Stripe subscription lifecycle event trace (read-only)",
+    "<code>/stripetrace</code> — V1039 latest Stripe subscription lifecycle event trace (read-only)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -181611,6 +181611,10 @@ async function recordStripeLifecycleV1036(env, event) {
       cancelAtRaw: obj?.cancel_at ?? null,
       canceledAtRaw: obj?.canceled_at ?? null,
       endedAtRaw: obj?.ended_at ?? null,
+      cancellationDetailsRaw: obj?.cancellation_details ?? null,
+      billingModeRaw: obj?.billing_mode ?? null,
+      pauseCollectionRaw: obj?.pause_collection ?? null,
+      pendingUpdateRaw: obj?.pending_update ?? null,
       topLevelCurrentPeriodEndRaw: obj?.current_period_end ?? null,
       itemPeriodEndsRaw: Array.isArray(obj?.items?.data)
         ? obj.items.data.map((item) => item?.current_period_end ?? null)
@@ -181620,8 +181624,32 @@ async function recordStripeLifecycleV1036(env, event) {
       telegramUserId: String(row.telegram_user_id)
     };
     try {
-      if (env?.STATE) await env.STATE.put("stripeLifecycleTraceV1038", JSON.stringify(traceV1038));
-    } catch (_) {}
+      await env.CHAINVANTA_DB.prepare(`
+        CREATE TABLE IF NOT EXISTS stripe_lifecycle_trace (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          event_id TEXT,
+          event_type TEXT,
+          payload_json TEXT NOT NULL,
+          recorded_at INTEGER NOT NULL
+        )
+      `).run();
+      await env.CHAINVANTA_DB.prepare(`
+        INSERT INTO stripe_lifecycle_trace (id,event_id,event_type,payload_json,recorded_at)
+        VALUES (1,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+          event_id=excluded.event_id,
+          event_type=excluded.event_type,
+          payload_json=excluded.payload_json,
+          recorded_at=excluded.recorded_at
+      `).bind(
+        traceV1038.eventId,
+        traceV1038.eventType,
+        JSON.stringify(traceV1038),
+        ts
+      ).run();
+    } catch (traceError) {
+      console.error("V1039 Stripe lifecycle trace D1 write failed", errorString(traceError));
+    }
 
     const wouldRemove = nextStatus==="ENDED" || (
       nextStatus==="CANCEL_SCHEDULED" &&
@@ -181648,12 +181676,17 @@ async function recordStripeLifecycleV1036(env, event) {
 async function stripeLifecycleTraceAdminMessageV1038(env) {
   let raw = null;
   try {
-    if (env?.STATE) raw = await env.STATE.get("stripeLifecycleTraceV1038");
+    if (env?.CHAINVANTA_DB) {
+      const row = await env.CHAINVANTA_DB.prepare(
+        "SELECT payload_json FROM stripe_lifecycle_trace WHERE id=1 LIMIT 1"
+      ).first();
+      raw = row?.payload_json || null;
+    }
   } catch (_) {}
   if (!raw) return [
-    "🔬 <b>Stripe Lifecycle Trace — V1038</b>",
+    "🔬 <b>Stripe Lifecycle Trace — V1039</b>",
     "",
-    "No V1038 subscription lifecycle event has been recorded yet.",
+    "No V1039 subscription lifecycle event has been recorded yet.",
     "",
     "<i>Diagnostic only. No Telegram membership action is enabled.</i>"
   ].join("\n");
@@ -181665,7 +181698,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       return Number.isFinite(n)&&n>0 ? `${escapeHtml(new Date(n*1000).toISOString())} (${Math.trunc(n)})` : fmt(v);
     };
     return [
-      "🔬 <b>Stripe Lifecycle Trace — V1038</b>","",
+      "🔬 <b>Stripe Lifecycle Trace — V1039</b>","",
       `Recorded: <code>${fmt(t.recordedAt)}</code>`,
       `Event: <code>${fmt(t.eventType)}</code>`,
       `Stripe status: <b>${fmt(t.stripeStatus)}</b>`,
@@ -181673,6 +181706,9 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       `cancel_at: <code>${fmtTs(t.cancelAtRaw)}</code>`,
       `canceled_at: <code>${fmtTs(t.canceledAtRaw)}</code>`,
       `ended_at: <code>${fmtTs(t.endedAtRaw)}</code>`,
+      `cancellation_details: <code>${escapeHtml(JSON.stringify(t.cancellationDetailsRaw ?? null))}</code>`,
+      `pause_collection: <code>${escapeHtml(JSON.stringify(t.pauseCollectionRaw ?? null))}</code>`,
+      `pending_update: <code>${escapeHtml(JSON.stringify(t.pendingUpdateRaw ?? null))}</code>`,
       `Top-level period end: <code>${fmtTs(t.topLevelCurrentPeriodEndRaw)}</code>`,
       `Item period ends: <code>${escapeHtml(JSON.stringify(t.itemPeriodEndsRaw||[]))}</code>`,
       `Derived period end: <code>${fmtTs(t.derivedCurrentPeriodEnd)}</code>`,
@@ -181680,12 +181716,12 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       "<i>Diagnostic only. No Telegram membership action is enabled.</i>"
     ].join("\n");
   } catch(error) {
-    return `🔬 <b>Stripe Lifecycle Trace — V1038</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
+    return `🔬 <b>Stripe Lifecycle Trace — V1039</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
   }
 }
 
 async function accessExpiryAdminMessageV1036(env) {
-  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1038</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1039</b>\n\nD1 binding: MISSING";
   try {
     const nowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181693,7 +181729,7 @@ async function accessExpiryAdminMessageV1036(env) {
        FROM subscribers
        ORDER BY updated_at DESC LIMIT 25`
     ).all();
-    const lines=["🧪 <b>Premium Access Expiry — V1038</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1038.`,""];
+    const lines=["🧪 <b>Premium Access Expiry — V1039</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1039.`,""];
     for(const row of (rows?.results||[])){
       const user=row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
       const end=Number(row.current_period_end);
@@ -181705,7 +181741,7 @@ async function accessExpiryAdminMessageV1036(env) {
     if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
     return lines.join("\n");
   } catch(error){
-    return `🧪 <b>Premium Access Expiry — V1038</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧪 <b>Premium Access Expiry — V1039</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
