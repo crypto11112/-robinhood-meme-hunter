@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1036";
+const VERSION = "V1037";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171550,7 +171550,7 @@ function telegramHelpV271() {
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/subscribers</code> — Stripe↔Telegram subscriber mappings (read-only)",
-    "<code>/accessexpiry</code> — V1036 cancellation/paid-through removal diagnostic (read-only)",
+    "<code>/accessexpiry</code> — V1037 cancellation/paid-through removal diagnostic (read-only)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -181444,7 +181444,7 @@ async function subscribersAdminMessageV1031(env) {
       lines.push(`${user} · ${escapeHtml(String(row.status || "UNKNOWN"))} · customer ${c} · sub ${sub}`);
     }
     if (!(rows?.results || []).length) lines.push("No mapped subscribers yet.");
-    lines.push("", "<i>Read-only. V1036 records cancellation/expiry state; Telegram removal remains disabled.</i>");
+    lines.push("", "<i>Read-only. V1037 records cancellation/expiry state; Telegram removal remains disabled.</i>");
     return lines.join("\n");
   } catch (error) {
     return `🧾 <b>ChainVanta Subscribers — V1035</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
@@ -181524,7 +181524,7 @@ async function grantPremiumInviteV1032(env, telegramUserId) {
 }
 
 
-/* V1036 — Stripe cancellation/access-expiry diagnostic only.
+/* V1037 — Stripe cancellation/access-expiry diagnostic only.
    Records subscription lifecycle fields in the existing subscribers table.
    It NEVER calls Telegram ban/kick/revoke methods. */
 async function recordStripeLifecycleV1036(env, event) {
@@ -181541,7 +181541,21 @@ async function recordStripeLifecycleV1036(env, event) {
 
   const stripeStatus=String(obj?.status||"").toLowerCase();
   const cancelAtPeriodEnd=obj?.cancel_at_period_end===true ? 1 : 0;
-  const currentPeriodEnd=Number.isFinite(Number(obj?.current_period_end)) ? Math.trunc(Number(obj.current_period_end)) : null;
+  // Stripe API versions from 2025-03-31.basil onward moved billing-period
+  // timestamps from Subscription to SubscriptionItem. Prefer the latest valid
+  // item period end; retain top-level parsing only as backward compatibility.
+  const itemPeriodEnds = Array.isArray(obj?.items?.data)
+    ? obj.items.data
+        .map((item) => Number(item?.current_period_end))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .map((value) => Math.trunc(value))
+    : [];
+  const itemCurrentPeriodEnd = itemPeriodEnds.length ? Math.max(...itemPeriodEnds) : null;
+  const legacyTopLevelPeriodEnd =
+    Number.isFinite(Number(obj?.current_period_end)) && Number(obj.current_period_end) > 0
+      ? Math.trunc(Number(obj.current_period_end))
+      : null;
+  const currentPeriodEnd = itemCurrentPeriodEnd || legacyTopLevelPeriodEnd;
   const endedAt=Number.isFinite(Number(obj?.ended_at)) ? Math.trunc(Number(obj.ended_at)) : null;
   const canceledAt=Number.isFinite(Number(obj?.canceled_at)) ? Math.trunc(Number(obj.canceled_at)) : null;
   const ts=Math.floor(Date.now()/1000);
@@ -181560,7 +181574,10 @@ async function recordStripeLifecycleV1036(env, event) {
     ).bind(key).first();
     if (!row) return {ok:false,reason:"SUBSCRIBER_MAPPING_NOT_FOUND_V1036",subscriptionId:Boolean(subscriptionId),customerId:Boolean(customerId)};
 
-    const effectiveEnd=currentPeriodEnd || endedAt || canceledAt || row.current_period_end || null;
+    const nowSec=Math.floor(Date.now()/1000);
+    const storedEnd=Number(row.current_period_end);
+    const storedEndUsable=Number.isFinite(storedEnd) && storedEnd > 0 ? Math.trunc(storedEnd) : null;
+    const effectiveEnd=currentPeriodEnd || endedAt || canceledAt || storedEndUsable || null;
     const nextStatus=localStatus || String(row.status||"ACTIVE");
     await env.CHAINVANTA_DB.prepare(
       `UPDATE subscribers
@@ -181568,7 +181585,6 @@ async function recordStripeLifecycleV1036(env, event) {
        WHERE telegram_user_id=?`
     ).bind(nextStatus,effectiveEnd,cancelAtPeriodEnd,ts,String(row.telegram_user_id)).run();
 
-    const nowSec=Math.floor(Date.now()/1000);
     const wouldRemove = nextStatus==="ENDED" || (
       nextStatus==="CANCEL_SCHEDULED" &&
       effectiveEnd!==null &&
@@ -181591,7 +181607,7 @@ async function recordStripeLifecycleV1036(env, event) {
 }
 
 async function accessExpiryAdminMessageV1036(env) {
-  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1036</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1037</b>\n\nD1 binding: MISSING";
   try {
     const nowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181599,7 +181615,7 @@ async function accessExpiryAdminMessageV1036(env) {
        FROM subscribers
        ORDER BY updated_at DESC LIMIT 25`
     ).all();
-    const lines=["🧪 <b>Premium Access Expiry — V1036</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1036.`,""];
+    const lines=["🧪 <b>Premium Access Expiry — V1037</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1036.`,""];
     for(const row of (rows?.results||[])){
       const user=row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
       const end=Number(row.current_period_end);
@@ -181611,7 +181627,7 @@ async function accessExpiryAdminMessageV1036(env) {
     if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
     return lines.join("\n");
   } catch(error){
-    return `🧪 <b>Premium Access Expiry — V1036</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧪 <b>Premium Access Expiry — V1037</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
