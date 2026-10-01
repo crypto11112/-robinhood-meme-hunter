@@ -8827,7 +8827,18 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1024";
+/*
+ * V1025 TELEGRAM ROLE SEPARATION — TRANSPORT / PERMISSIONS ONLY:
+ * - preserves TELEGRAM_CHAT_ID as the backward-compatible Admin chat;
+ * - optional TELEGRAM_ADMIN_CHAT_ID overrides the Admin destination;
+ * - optional TELEGRAM_PREMIUM_CHAT_ID receives autonomous qualifying calls;
+ * - optional TELEGRAM_FREE_CHAT_ID is recognised for safe member commands;
+ * - Premium/Free can use /performance, /best, /calls and /help only;
+ * - scanner/provider diagnostics remain Admin-only;
+ * - no scoring, risk, qualification thresholds or request ceilings changed;
+ * - delayed Free call delivery is intentionally NOT enabled yet.
+ */
+const VERSION = "V1025";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -79474,11 +79485,16 @@ async function sendTelegram(
   env,
   message,
   budget = null,
-  imageUrl = null
+  imageUrl = null,
+  targetChatIdV1025 = null
 ) {
+  const telegramDestinationV1025 =
+    targetChatIdV1025 !== undefined && targetChatIdV1025 !== null && String(targetChatIdV1025).trim()
+      ? String(targetChatIdV1025).trim()
+      : String(env.TELEGRAM_CHAT_ID || "").trim();
   if (
     !env.TELEGRAM_BOT_TOKEN ||
-    !env.TELEGRAM_CHAT_ID
+    !telegramDestinationV1025
   ) {
     return {
       success: false,
@@ -79521,7 +79537,7 @@ async function sendTelegram(
               "content-type": "application/json"
             },
             body: JSON.stringify({
-              chat_id: env.TELEGRAM_CHAT_ID,
+              chat_id: telegramDestinationV1025,
               photo: imageUrl,
               caption: message,
               parse_mode: "HTML"
@@ -79588,7 +79604,7 @@ async function sendTelegram(
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          chat_id: env.TELEGRAM_CHAT_ID,
+          chat_id: telegramDestinationV1025,
           text: message,
           parse_mode: "HTML",
           disable_web_page_preview: true
@@ -119015,7 +119031,8 @@ for (
           candidate
         ),
         budget,
-        candidate.market?.imageUrl || null
+        candidate.market?.imageUrl || null,
+        env.TELEGRAM_PREMIUM_CHAT_ID || env.TELEGRAM_CHAT_ID
       );
 
     telegramResults.push({
@@ -119037,7 +119054,10 @@ for (
       // before call registration. The proof is only entry-frozen when there is
       // no pre-existing frozen entryTimestamp; repeat alerts remain separate.
       candidate.telegramDeliveryProofV412 =
-        telegramDeliveryProofV412(result, env.TELEGRAM_CHAT_ID);
+        telegramDeliveryProofV412(
+          result,
+          env.TELEGRAM_PREMIUM_CHAT_ID || env.TELEGRAM_CHAT_ID
+        );
 
       // V411/V645 measurement-only entry telemetry. V645 may already expose a
       // pre-alert current/live measurement for diagnostics, but successful calls
@@ -171935,6 +171955,60 @@ function bitqueryConnectivityMessageV1013(result) {
 }
 
 
+function telegramChatRoleV1025(env, chatId) {
+  const id = String(chatId || "").trim();
+  if (!id) return "UNAUTHORIZED";
+
+  const adminId = String(env.TELEGRAM_ADMIN_CHAT_ID || env.TELEGRAM_CHAT_ID || "").trim();
+  const premiumId = String(env.TELEGRAM_PREMIUM_CHAT_ID || "").trim();
+  const freeId = String(env.TELEGRAM_FREE_CHAT_ID || "").trim();
+
+  if (adminId && id === adminId) return "ADMIN";
+  if (premiumId && id === premiumId) return "PREMIUM";
+  if (freeId && id === freeId) return "FREE";
+  return "UNAUTHORIZED";
+}
+
+function telegramMemberHelpV1025(role) {
+  const tier = role === "PREMIUM" ? "Premium" : "Free";
+  return [
+    `🤖 <b>Meme Hunter ${tier}</b>`,
+    "",
+    "Available commands:",
+    "<code>/performance</code> — frozen call performance",
+    "<code>/best</code> — best recorded calls",
+    "<code>/calls</code> — recent recorded calls",
+    "",
+    role === "PREMIUM"
+      ? "Premium receives the full qualifying-call feed when Premium routing is enabled."
+      : "Free receives the public/delayed call feed when Free routing is enabled.",
+    "",
+    "Internal diagnostics are Admin-only."
+  ].join("\n");
+}
+
+async function telegramMemberCommandV1025(env, parsed, role, chatId) {
+  const allowed = new Set(["/performance", "/best", "/calls", "/help", "/start"]);
+  if (!allowed.has(parsed?.command)) {
+    return await sendTelegram(
+      env,
+      "🔒 <b>Admin-only command.</b>\n\nUse <code>/help</code> for commands available in this chat.",
+      null,
+      null,
+      chatId
+    );
+  }
+
+  const loaded = await readState(env);
+  const state = loaded?.state || newState();
+  let reply = telegramMemberHelpV1025(role);
+  if (parsed.command === "/performance") reply = performanceSummaryV271(state);
+  else if (parsed.command === "/best") reply = bestCallsMessageV271(state);
+  else if (parsed.command === "/calls") reply = callsListMessageV271(state);
+
+  return await sendTelegram(env, reply, null, null, chatId);
+}
+
 async function telegramCommandReplyV271(
   env,
   update,
@@ -171990,14 +172064,14 @@ async function telegramCommandReplyV271(
       : null;
 
   const configuredChatId =
-    env.TELEGRAM_CHAT_ID !==
-      undefined &&
-    env.TELEGRAM_CHAT_ID !==
-      null
-      ? String(
-          env.TELEGRAM_CHAT_ID
-        )
-      : null;
+    String(
+      env.TELEGRAM_ADMIN_CHAT_ID ||
+      env.TELEGRAM_CHAT_ID ||
+      ""
+    ).trim() || null;
+
+  const chatRoleV1025 =
+    telegramChatRoleV1025(env, chatId);
 
   if (diagnosticV273) {
     diagnosticV273.receivedChatId =
@@ -172010,17 +172084,14 @@ async function telegramCommandReplyV271(
       Boolean(
         message &&
         chatId &&
-        configuredChatId &&
-        chatId ===
-          configuredChatId
+        chatRoleV1025 !== "UNAUTHORIZED"
       );
   }
 
   if (
     !message ||
     !chatId ||
-    !configuredChatId ||
-    chatId !== configuredChatId
+    chatRoleV1025 === "UNAUTHORIZED"
   ) {
     if (diagnosticV273) {
       diagnosticV273.commandParsed =
@@ -172068,6 +172139,34 @@ async function telegramCommandReplyV271(
       ignored: true,
       reason:
         "NOT_A_COMMAND"
+    };
+  }
+
+  if (chatRoleV1025 !== "ADMIN") {
+    if (diagnosticV273) {
+      diagnosticV273.chatRoleV1025 = chatRoleV1025;
+      diagnosticV273.replyAttempted = true;
+    }
+    const memberResultV1025 =
+      await telegramMemberCommandV1025(
+        env,
+        parsed,
+        chatRoleV1025,
+        chatId
+      );
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = memberResultV1025?.success === true;
+      diagnosticV273.telegramStatus = memberResultV1025?.status || null;
+      diagnosticV273.telegramMode = memberResultV1025?.mode || null;
+      diagnosticV273.result = memberResultV1025?.success === true ? "MEMBER_REPLY_SENT_V1025" : "MEMBER_REPLY_FAILED_V1025";
+    }
+    return {
+      success: memberResultV1025?.success === true,
+      ignored: false,
+      command: parsed.command,
+      chatRoleV1025,
+      scannerBudgetConsumed: false,
+      externalProviderRequests: 0
     };
   }
 
