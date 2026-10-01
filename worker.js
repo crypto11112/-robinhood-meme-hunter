@@ -8838,7 +8838,15 @@
  * - no scoring, risk, qualification thresholds or request ceilings changed;
  * - delayed Free call delivery is intentionally NOT enabled yet.
  */
-const VERSION = "V1025";
+/*
+ * V1026 TELEGRAM ROLE-BINDING DIAGNOSTIC ONLY:
+ * - adds GET /telegram-role-status to prove which Admin/Premium/Free chat bindings
+ *   are visible to the active Cloudflare Worker deployment;
+ * - reports presence and masked fingerprints only; no bot token/secrets are exposed;
+ * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
+ *   budget or alert-threshold behaviour is changed.
+ */
+const VERSION = "V1026";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -171955,6 +171963,33 @@ function bitqueryConnectivityMessageV1013(result) {
 }
 
 
+function telegramRoleStatusV1026(env) {
+  const rawAdmin = String(env.TELEGRAM_ADMIN_CHAT_ID || env.TELEGRAM_CHAT_ID || "").trim();
+  const rawPremium = String(env.TELEGRAM_PREMIUM_CHAT_ID || "").trim();
+  const rawFree = String(env.TELEGRAM_FREE_CHAT_ID || "").trim();
+
+  const masked = (value) => {
+    const v = String(value || "").trim();
+    if (!v) return null;
+    return `${v.slice(0, 4)}…${v.slice(-4)}`;
+  };
+
+  return {
+    agent: "Robinhood Chain Meme Hunter",
+    version: VERSION,
+    status: "TELEGRAM_ROLE_BINDINGS_V1026",
+    bindings: {
+      admin: { present: Boolean(rawAdmin), source: env.TELEGRAM_ADMIN_CHAT_ID ? "TELEGRAM_ADMIN_CHAT_ID" : (env.TELEGRAM_CHAT_ID ? "TELEGRAM_CHAT_ID_FALLBACK" : "MISSING"), fingerprint: masked(rawAdmin) },
+      premium: { present: Boolean(rawPremium), source: rawPremium ? "TELEGRAM_PREMIUM_CHAT_ID" : "MISSING", fingerprint: masked(rawPremium) },
+      free: { present: Boolean(rawFree), source: rawFree ? "TELEGRAM_FREE_CHAT_ID" : "MISSING", fingerprint: masked(rawFree) }
+    },
+    expectedRoleRoutingEnabled: Boolean(rawAdmin && rawPremium && rawFree),
+    scannerBudgetConsumed: false,
+    scannerProviderRequestsAdded: 0,
+    timestamp: now()
+  };
+}
+
 function telegramChatRoleV1025(env, chatId) {
   const id = String(chatId || "").trim();
   if (!id) return "UNAUTHORIZED";
@@ -182355,6 +182390,15 @@ async function handleRequest(
         request,
         env
       )
+    );
+  }
+
+  if (
+    path ===
+    "/telegram-role-status"
+  ) {
+    return jsonResponse(
+      telegramRoleStatusV1026(env)
     );
   }
 
