@@ -1,4 +1,11 @@
 /**
+ * ChainVanta / Robinhood Chain Meme Hunter — V1031
+ * STRIPE ↔ TELEGRAM SUBSCRIBER MAPPING FOUNDATION
+ * Builds directly from confirmed-working V1030 Stripe webhook baseline.
+ * No automatic Premium grant/revoke in this version.
+ */
+
+/**
  * Robinhood Chain Meme Hunter
  * V1018
  * - adds zero-request Bitquery candidate-recovery telemetry to /launchcoverage;
@@ -8846,7 +8853,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1030";
+const VERSION = "V1031";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171540,6 +171547,7 @@ function telegramHelpV271() {
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
+    "<code>/subscribers</code> — V1031 Stripe↔Telegram subscriber mappings (read-only)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -172342,6 +172350,42 @@ async function telegramCommandReplyV271(
       );
   }
 
+  // V1031: the only command accepted outside the three configured channel IDs is
+  // /subscribe in a real private Telegram chat. This does NOT open Admin/member commands.
+  const privateParsedV1031 = parseTelegramCommandV271(message?.text);
+  const privateSubscribeV1031 = Boolean(
+    message &&
+    chatId &&
+    chatRoleV1025 === "UNAUTHORIZED" &&
+    message?.chat?.type === "private" &&
+    privateParsedV1031?.command === "/subscribe" &&
+    message?.from?.id !== undefined &&
+    message?.from?.id !== null &&
+    String(message.from.id) === String(chatId)
+  );
+
+  if (privateSubscribeV1031) {
+    const telegramUserIdV1031 = String(message.from.id);
+    const telegramUsernameV1031 = message?.from?.username ? String(message.from.username) : "";
+    const checkoutV1031 = await createStripeCheckoutV1031(
+      env, telegramUserIdV1031, telegramUsernameV1031,
+      "https://robinhood-meme-hunter.johnd1987.workers.dev/telegram-webhook"
+    );
+    const replyV1031 = checkoutV1031.ok
+      ? `⚡ <b>ChainVanta Premium</b>\n\n£49/month. Your checkout is securely linked to Telegram user ID <code>${escapeHtml(telegramUserIdV1031)}</code>.\n\n${escapeHtml(checkoutV1031.url)}\n\n<i>V1031 maps the subscription only; automatic Premium access is not enabled yet.</i>`
+      : `⚠️ <b>ChainVanta checkout unavailable</b>\n\n${escapeHtml(String(checkoutV1031.reason || "UNKNOWN"))}${checkoutV1031.stripeMessage ? `\n${escapeHtml(checkoutV1031.stripeMessage)}` : ""}`;
+    const sentV1031 = await sendTelegram(env, replyV1031, null, null, chatId);
+    if (diagnosticV273) {
+      diagnosticV273.authorized = true;
+      diagnosticV273.commandParsed = true;
+      diagnosticV273.command = "/subscribe";
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.replySuccess = sentV1031?.success === true;
+      diagnosticV273.result = checkoutV1031.ok ? "PRIVATE_SUBSCRIBE_CHECKOUT_SENT_V1031" : checkoutV1031.reason;
+    }
+    return { success:sentV1031?.success===true, ignored:false, command:"/subscribe", scannerBudgetConsumed:false, externalProviderRequests:checkoutV1031.ok ? 1 : 0 };
+  }
+
   if (
     !message ||
     !chatId ||
@@ -172428,6 +172472,19 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
+
+  // V1031: read-only subscriber mapping diagnostic. Admin-only because member
+  // chats are intercepted above by the V1025 allowlist.
+  if (parsed.command === "/subscribers") {
+    const replyV1031 = await subscribersAdminMessageV1031(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1031 = await sendTelegram(env, replyV1031, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1031?.success === true;
+      diagnosticV273.result = sentV1031?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1031?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
@@ -181167,6 +181224,134 @@ async function verifyStripeSignatureV1030(rawBody, signatureHeader, secret) {
   };
 }
 
+
+/* ============================================================
+   V1031 — STRIPE <-> TELEGRAM SUBSCRIBER MAPPING FOUNDATION
+   - adds private-DM /subscribe without opening any Admin commands;
+   - creates a Stripe Checkout Session with the Telegram numeric user ID
+     carried in client_reference_id + metadata;
+   - checkout.session.completed writes/updates CHAINVANTA_DB.subscribers;
+   - adds read-only Admin /subscribers diagnostic;
+   - DOES NOT grant/revoke Premium Telegram access yet;
+   - scanner, scoring, risk, provider budgets, qualification and the V1028
+     delayed-Free queue are unchanged.
+   ============================================================ */
+
+function stripeFormV1031(entries) {
+  const body = new URLSearchParams();
+  for (const [k, v] of entries) {
+    if (v !== undefined && v !== null && String(v) !== "") body.append(k, String(v));
+  }
+  return body.toString();
+}
+
+async function createStripeCheckoutV1031(env, telegramUserId, telegramUsername, requestUrl) {
+  const secret = String(env?.STRIPE_SECRET_KEY || "").trim();
+  const priceId = String(env?.STRIPE_PRICE_ID || "").trim();
+  if (!secret) return { ok:false, reason:"STRIPE_SECRET_KEY_NOT_CONFIGURED_V1031" };
+  if (!priceId) return { ok:false, reason:"STRIPE_PRICE_ID_NOT_CONFIGURED_V1031" };
+
+  const origin = new URL(requestUrl).origin;
+  const body = stripeFormV1031([
+    ["mode", "subscription"],
+    ["line_items[0][price]", priceId],
+    ["line_items[0][quantity]", "1"],
+    ["client_reference_id", telegramUserId],
+    ["metadata[telegram_user_id]", telegramUserId],
+    ["metadata[telegram_username]", telegramUsername || ""],
+    ["success_url", `${origin}/subscription-success?session_id={CHECKOUT_SESSION_ID}`],
+    ["cancel_url", `${origin}/subscription-cancelled`]
+  ]);
+
+  try {
+    const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method:"POST",
+      headers:{
+        "authorization":`Bearer ${secret}`,
+        "content-type":"application/x-www-form-urlencoded"
+      },
+      body
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data?.url || !data?.id) {
+      return {
+        ok:false,
+        reason:"STRIPE_CHECKOUT_CREATE_FAILED_V1031",
+        httpStatus:response.status,
+        stripeType:data?.error?.type || null,
+        stripeCode:data?.error?.code || null,
+        stripeMessage:data?.error?.message ? String(data.error.message).slice(0,300) : null
+      };
+    }
+    return { ok:true, sessionId:String(data.id), url:String(data.url) };
+  } catch (error) {
+    return { ok:false, reason:"STRIPE_CHECKOUT_FETCH_FAILED_V1031", error:errorString(error) };
+  }
+}
+
+async function saveStripeCheckoutMappingV1031(env, event) {
+  if (!env?.CHAINVANTA_DB) return { ok:false, reason:"CHAINVANTA_DB_NOT_BOUND_V1031" };
+  const session = event?.data?.object || {};
+  const telegramUserId = String(session?.metadata?.telegram_user_id || session?.client_reference_id || "").trim();
+  if (!/^\d+$/.test(telegramUserId)) return { ok:false, reason:"TELEGRAM_USER_ID_MISSING_V1031" };
+
+  const telegramUsername = String(session?.metadata?.telegram_username || "").trim() || null;
+  const customerId = typeof session?.customer === "string" ? session.customer : (session?.customer?.id || null);
+  const subscriptionId = typeof session?.subscription === "string" ? session.subscription : (session?.subscription?.id || null);
+  const email = String(session?.customer_details?.email || session?.customer_email || "").trim() || null;
+  const paymentStatus = String(session?.payment_status || "").toLowerCase();
+  const status = paymentStatus === "paid" || paymentStatus === "no_payment_required" ? "ACTIVE" : "PENDING";
+  const ts = Math.floor(Date.now()/1000);
+
+  try {
+    await env.CHAINVANTA_DB.prepare(`
+      INSERT INTO subscribers (
+        telegram_user_id, telegram_username, stripe_customer_id, stripe_subscription_id,
+        email, status, plan, price_gbp_pence, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'CHAINVANTA_PREMIUM', 4900, ?, ?)
+      ON CONFLICT(telegram_user_id) DO UPDATE SET
+        telegram_username=excluded.telegram_username,
+        stripe_customer_id=excluded.stripe_customer_id,
+        stripe_subscription_id=excluded.stripe_subscription_id,
+        email=excluded.email,
+        status=excluded.status,
+        updated_at=excluded.updated_at
+    `).bind(
+      telegramUserId, telegramUsername, customerId, subscriptionId,
+      email, status, ts, ts
+    ).run();
+    return { ok:true, telegramUserId, status, customerId:Boolean(customerId), subscriptionId:Boolean(subscriptionId) };
+  } catch (error) {
+    console.error("V1031 D1 subscriber mapping failed", errorString(error));
+    return { ok:false, reason:"D1_SUBSCRIBER_MAPPING_FAILED_V1031", error:errorString(error) };
+  }
+}
+
+async function subscribersAdminMessageV1031(env) {
+  if (!env?.CHAINVANTA_DB) return "🧾 <b>ChainVanta Subscribers — V1031</b>\n\nD1 binding: MISSING";
+  try {
+    const countRow = await env.CHAINVANTA_DB.prepare("SELECT COUNT(*) AS n FROM subscribers").first();
+    const rows = await env.CHAINVANTA_DB.prepare(
+      "SELECT telegram_user_id, telegram_username, status, stripe_customer_id, stripe_subscription_id, updated_at FROM subscribers ORDER BY updated_at DESC LIMIT 10"
+    ).all();
+    const lines = [
+      "🧾 <b>ChainVanta Subscribers — V1031</b>", "",
+      `Total mapped: ${Number(countRow?.n || 0)}`, ""
+    ];
+    for (const row of (rows?.results || [])) {
+      const user = row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
+      const c = row.stripe_customer_id ? `…${escapeHtml(String(row.stripe_customer_id).slice(-6))}` : "NONE";
+      const sub = row.stripe_subscription_id ? `…${escapeHtml(String(row.stripe_subscription_id).slice(-6))}` : "NONE";
+      lines.push(`${user} · ${escapeHtml(String(row.status || "UNKNOWN"))} · customer ${c} · sub ${sub}`);
+    }
+    if (!(rows?.results || []).length) lines.push("No mapped subscribers yet.");
+    lines.push("", "<i>Read-only. Premium access automation is not enabled in V1031.</i>");
+    return lines.join("\n");
+  } catch (error) {
+    return `🧾 <b>ChainVanta Subscribers — V1031</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+  }
+}
+
 async function stripeWebhookV1030(request, env) {
   const secret = String(env?.STRIPE_WEBHOOK_SECRET || "").trim();
   if (!secret) {
@@ -181219,8 +181404,12 @@ async function stripeWebhookV1030(request, env) {
     livemode: event?.livemode === true
   });
 
-  // Foundation only: acknowledgement after cryptographic verification.
-  // D1 subscriber mutation / Telegram access changes are intentionally NOT enabled in V1030.
+  let subscriberMappingV1031 = null;
+  if (selected && eventType === "checkout.session.completed") {
+    subscriberMappingV1031 = await saveStripeCheckoutMappingV1031(env, event);
+  }
+
+  // V1031 maps identity only. Premium Telegram access mutation remains intentionally disabled.
   return jsonResponse(
     {
       ok: true,
@@ -181230,6 +181419,7 @@ async function stripeWebhookV1030(request, env) {
       selected,
       eventId,
       eventType,
+      subscriberMappingV1031,
       timestamp: now()
     },
     200
@@ -181287,6 +181477,20 @@ async function handleRequest(
             "content-type, authorization"
         }
       }
+    );
+  }
+
+  if (path === "/subscription-success" && request.method === "GET") {
+    return new Response(
+      "ChainVanta Premium test checkout completed. You can return to Telegram.",
+      { status:200, headers:{"content-type":"text/plain; charset=utf-8"} }
+    );
+  }
+
+  if (path === "/subscription-cancelled" && request.method === "GET") {
+    return new Response(
+      "ChainVanta checkout was cancelled. No access change was made.",
+      { status:200, headers:{"content-type":"text/plain; charset=utf-8"} }
     );
   }
 
