@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V1030
+ * ADMIN READ-ONLY HEALTH SNAPSHOT:
+ * - builds directly from deployed V1029;
+ * - adds Admin-only Telegram /health using persisted telemetry only;
+ * - reports scheduler freshness, persistence, Telegram role bindings, delayed-Free queue,
+ *   and last-known Bitquery service status/cooldown;
+ * - makes ZERO scanner/provider/RPC requests and ZERO state writes;
+ * - preserves V1028/V1029 Premium→30-minute Free queue behaviour unchanged;
+ * - no scanner, scoring, holder, risk, qualification, Telegram threshold, provider-routing,
+ *   request-ceiling or member-permission changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter
  * V1018
  * - adds zero-request Bitquery candidate-recovery telemetry to /launchcoverage;
@@ -8846,7 +8859,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1029";
+const VERSION = "V1030";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171540,6 +171553,7 @@ function telegramHelpV271() {
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
+    "<code>/health</code> — V1030 Admin operational health snapshot (read-only, zero provider requests)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -171550,6 +171564,87 @@ function telegramHelpV271() {
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. /v3start and /v3stop control the token's V3 live collector. Other diagnostic/report commands do not trigger a fresh chain scan.</i>"
+  ].join("\n");
+}
+
+function adminHealthTelegramV1030(env, loaded) {
+  const state = loaded?.state || {};
+  const scheduler = state?.scheduler || {};
+  const lastRun = safeNumber(scheduler?.lastScheduledRunAt) || null;
+  const lastSuccess = safeNumber(scheduler?.lastScheduledSuccessAt) || null;
+  const ageMin = lastRun ? Math.max(0, (Date.now() - lastRun) / 60000) : null;
+  const schedulerHealthy = ageMin !== null && ageMin <= 10;
+
+  const adminId = String(env?.TELEGRAM_ADMIN_CHAT_ID || env?.TELEGRAM_CHAT_ID || "").trim();
+  const premiumId = String(env?.TELEGRAM_PREMIUM_CHAT_ID || "").trim();
+  const freeId = String(env?.TELEGRAM_FREE_CHAT_ID || "").trim();
+
+  const queue = state?.freeCallQueueV1028 || null;
+  const entries = Array.isArray(queue?.entries) ? queue.entries : [];
+  const nowMs = Date.now();
+  const dueNow = entries.filter(x => safeNumber(x?.dueAt) > 0 && safeNumber(x?.dueAt) <= nowMs).length;
+  const nextDue = entries
+    .map(x => safeNumber(x?.dueAt))
+    .filter(x => x > nowMs)
+    .sort((a,b) => a-b)[0] || null;
+
+  // Read the object directly: unlike bitqueryServiceV251(), this cannot initialise/mutate state.
+  const bq = state?.services?.bitqueryV251 || null;
+  const bqCooldown = safeNumber(bq?.cooldownUntil) || null;
+  const bqCooling = Boolean(bqCooldown && bqCooldown > nowMs);
+  const bqLastSuccess = safeNumber(bq?.lastSuccessAt) || null;
+  const bqLast402 = safeNumber(bq?.last402At) || null;
+  const bqStatus = String(bq?.lastStatus || "NO_RECORDED_STATUS");
+
+  const problems = [];
+  if (loaded?.persistent !== true) problems.push("KV persistence unavailable");
+  if (!schedulerHealthy) problems.push("scheduler stale/unverified");
+  if (!adminId || !premiumId || !freeId) problems.push("Telegram role binding missing");
+  if (dueNow > 0) problems.push(`${dueNow} Free call(s) due now`);
+  if (bqCooling) problems.push("Bitquery cooldown active");
+
+  const overall = problems.length === 0 ? "OK" : "ATTENTION";
+  const ts = value => value ? escapeHtml(new Date(value).toISOString()) : "NONE";
+  const age = ageMin === null ? "UNKNOWN" : `${Math.round(ageMin * 10) / 10}m`;
+
+  return [
+    `🩺 <b>ChainVanta Admin Health — V1030</b>`,
+    "",
+    `Overall: <b>${overall}</b>`,
+    "",
+    "<b>Scanner / scheduler</b>",
+    `Status: <b>${schedulerHealthy ? "HEALTHY" : "STALE / UNVERIFIED"}</b>`,
+    `Last scheduled run: <code>${ts(lastRun)}</code> · age ${escapeHtml(age)}`,
+    `Last scheduled success: <code>${ts(lastSuccess)}</code>`,
+    `Last status: <b>${escapeHtml(String(scheduler?.lastScheduledStatus || "UNRECORDED"))}</b>`,
+    `Last scanned block: <b>${escapeHtml(String(state?.lastScannedBlock ?? "UNRECORDED"))}</b>`,
+    "",
+    "<b>Persistence</b>",
+    `KV: <b>${loaded?.persistent === true ? "CONNECTED" : "UNAVAILABLE"}</b>${loaded?.error ? ` · ${escapeHtml(String(loaded.error).slice(0,160))}` : ""}`,
+    "",
+    "<b>Telegram routing</b>",
+    `Admin: <b>${adminId ? "CONFIGURED" : "MISSING"}</b>`,
+    `Premium: <b>${premiumId ? "CONFIGURED" : "MISSING"}</b>`,
+    `Free: <b>${freeId ? "CONFIGURED" : "MISSING"}</b>`,
+    "",
+    "<b>30-minute Free queue</b>",
+    `State: <b>${queue ? "INITIALISED" : "NO QUEUE STATE YET"}</b>`,
+    `Pending: <b>${entries.length}</b> · due now: <b>${dueNow}</b>`,
+    `Total enqueued: <b>${safeNumber(queue?.totalEnqueued)}</b> · sent: <b>${safeNumber(queue?.totalSent)}</b>`,
+    `Failed: <b>${safeNumber(queue?.failedAttempts)}</b> · dropped: <b>${safeNumber(queue?.dropped)}</b>`,
+    `Next due: <code>${ts(nextDue)}</code>`,
+    "",
+    "<b>Bitquery — last known telemetry</b>",
+    `Token configured: <b>${String(env?.BITQUERY_ACCESS_TOKEN || "").trim() ? "YES" : "NO"}</b>`,
+    `Last status: <b>${escapeHtml(bqStatus)}</b>`,
+    `Cooling now: <b>${bqCooling ? "YES" : "NO"}</b>`,
+    `Cooldown until: <code>${ts(bqCooldown)}</code>`,
+    `Last success: <code>${ts(bqLastSuccess)}</code>`,
+    `Last 402: <code>${ts(bqLast402)}</code>`,
+    "",
+    problems.length ? `<b>Attention:</b> ${escapeHtml(problems.join("; "))}` : "<b>Attention:</b> NONE",
+    "",
+    "<i>Read-only snapshot: 0 scanner/provider/RPC requests · 0 state writes. Provider fields are last-known persisted telemetry, not live probes.</i>"
   ].join("\n");
 }
 
@@ -172428,6 +172523,24 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
+
+  // V1030: Admin-only persisted operational health snapshot.
+  // Deliberately does NOT call the existing HTTP health() function because that performs a live RPC request.
+  if (parsed.command === "/health") {
+    const loadedV1030 = await readState(env);
+    const replyV1030 = adminHealthTelegramV1030(env, loadedV1030);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1030 = await sendTelegram(env, replyV1030, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1030?.success === true;
+      diagnosticV273.telegramStatus = sentV1030?.status || null;
+      diagnosticV273.telegramMode = sentV1030?.mode || null;
+      diagnosticV273.telegramError = sentV1030?.error || null;
+      diagnosticV273.result = sentV1030?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+      diagnosticV273.adminHealthV1030 = {scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    }
+    return {success:sentV1030?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
