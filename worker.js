@@ -7888,6 +7888,7 @@
  * - No scoring, Momentum, verified USD, holder, qualification, KV or request-budget changes
  *
  * CURRENT BUILD: V231
+ * - V1023: disables inaccessible Bitquery combined-holder alias on realtime-only entitlement; preserves market/pair/liquidity shared request and existing holder fallbacks
  * - V1022: Bitquery EVM.Holders holder alias uses dataset: combined for current holder state; same shared request, zero added HTTP calls
  * - PRESERVED: earlier realtime entitlement diagnostics remain historical context only
  * - FIX: removes the combined-dataset entitlement 403 that blocked the shared Bitquery launch/trading/holder request
@@ -8825,7 +8826,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1022";
+const VERSION = "V1023";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -51719,31 +51720,15 @@ async function discoverVerifiedBagsLaunchesV210(
       ? String(holderTargetV227?.reason || "PRIORITY_OR_LIVE_TARGET")
       : null;
 
-  const bitqueryHolderGraphqlV227 =
-    bitqueryHolderTargetAddressV227
-      ? `
-      HolderEvidenceV227: EVM(network: robinhood, dataset: combined) {
-        PriorityHolderRowsV227: Holders(
-          limit: {count: ${BITQUERY_HOLDER_ROW_LIMIT_V227}}
-          orderBy: {descending: Balance_Amount}
-          where: {Currency: {SmartContract: {is: "${bitqueryHolderTargetAddressV227}"}}}
-        ) {
-          Holder { Address }
-          Balance {
-            Amount(selectWhere: {gt: "0"})
-            FirstChangeTime
-            LastChangeTime
-            UpdateCount
-          }
-        }
-        PriorityHolderCountV227: Holders(
-          where: {Currency: {SmartContract: {is: "${bitqueryHolderTargetAddressV227}"}}}
-        ) {
-          holderCount: uniq(of: Holder_Address, if: {Balance: {Amount: {gt: "0"}}})
-        }
-      }
-      `
-      : "";
+  /*
+   * V1023: current Bitquery entitlement is realtime-only. The V1022
+   * dataset:combined EVM.Holders alias makes the entire shared GraphQL request
+   * fail HTTP 403, taking the otherwise-working market/pair/liquidity aliases
+   * down with it. Do not send that guaranteed-rejected holder alias. Holder
+   * verification remains on the existing Blockscout/direct-chain/retry paths.
+   * No scoring, risk, Telegram threshold, or request-ceiling change.
+   */
+  const bitqueryHolderGraphqlV227 = "";
 
   /*
    * V235: market evidence now has its own persisted/current target. This is
@@ -52593,67 +52578,34 @@ async function discoverVerifiedBagsLaunchesV210(
         ? payload.data.Trading.PonsTradesV216
         : [];
 
-    const bitqueryHolderRowsRawV227 =
-      bitqueryHolderTargetAddressV227 &&
-      Array.isArray(payload?.data?.HolderEvidenceV227?.PriorityHolderRowsV227)
-        ? payload.data.HolderEvidenceV227.PriorityHolderRowsV227
-        : [];
-
-    const bitqueryHolderCountRowsV227 =
-      bitqueryHolderTargetAddressV227 &&
-      Array.isArray(payload?.data?.HolderEvidenceV227?.PriorityHolderCountV227)
-        ? payload.data.HolderEvidenceV227.PriorityHolderCountV227
-        : [];
-
-    const bitqueryHolderCountV227Number =
-      Number(bitqueryHolderCountRowsV227?.[0]?.holderCount);
-
-    const bitqueryHolderCountV227 =
-      Number.isFinite(bitqueryHolderCountV227Number) && bitqueryHolderCountV227Number > 0
-        ? Math.floor(bitqueryHolderCountV227Number)
-        : null;
-
-    const bitqueryHolderRowsV227 =
-      bitqueryHolderRowsRawV227
-        .map(row => ({
-          address: normalize(row?.Holder?.Address),
-          amount: row?.Balance?.Amount ?? null,
-          firstChangeTime: row?.Balance?.FirstChangeTime || null,
-          lastChangeTime: row?.Balance?.LastChangeTime || null,
-          updateCount: safeNumber(row?.Balance?.UpdateCount)
-        }))
-        .filter(row => isAddress(row.address) && row.address !== ZERO && row.amount !== null && Number(row.amount) > 0)
-        .slice(0, BITQUERY_HOLDER_ROW_LIMIT_V227);
+    /*
+     * V1023: holder alias intentionally not requested on realtime-only
+     * entitlement. Keep an explicit non-verified snapshot so diagnostics cannot
+     * confuse an older V1021/V1022 holder result with current evidence.
+     */
+    const bitqueryHolderRowsRawV227 = [];
+    const bitqueryHolderCountRowsV227 = [];
+    const bitqueryHolderCountV227 = null;
+    const bitqueryHolderRowsV227 = [];
 
     if (bitqueryHolderTargetAddressV227) {
-      const bitqueryHolderVerifiedV227 = bitqueryHolderRowsV227.length > 0;
       state.bitqueryHolderEvidenceV227 = {
+        ...base.bitqueryHolderEvidenceV227,
         address: bitqueryHolderTargetAddressV227,
         targetReason: bitqueryHolderTargetReasonV227,
-        attempted: true,
-        verified: bitqueryHolderVerifiedV227,
-        status: bitqueryHolderVerifiedV227
-          ? "VERIFIED_HOLDER_ROWS_V227"
-          : "NO_POSITIVE_HOLDER_ROWS_V227",
+        attempted: false,
+        verified: false,
+        status: "DISABLED_REALTIME_ONLY_ENTITLEMENT_V1023",
         fetchedAt: Date.now(),
-        holderCount: bitqueryHolderCountV227,
-        rowCount: bitqueryHolderRowsV227.length,
-        rawRowCountV1019: bitqueryHolderRowsRawV227.length,
-        holderCountRowCountV1019: bitqueryHolderCountRowsV227.length,
-        positiveAmountRowsV1019: bitqueryHolderRowsRawV227.filter(row => Number(row?.Balance?.Amount) > 0).length,
-        holderDiagnosticV1019:
-          bitqueryHolderRowsV227.length > 0
-            ? "POSITIVE_HOLDER_ROWS_RETURNED_V1019"
-            : bitqueryHolderRowsRawV227.length === 0 && bitqueryHolderCountRowsV227.length === 0
-              ? "REALTIME_DATASET_RETURNED_NO_HOLDER_OR_COUNT_ROWS_V1019"
-              : bitqueryHolderRowsRawV227.length === 0 && bitqueryHolderCountV227
-                ? "COUNT_PRESENT_BUT_NO_BALANCE_ROWS_V1019"
-                : bitqueryHolderRowsRawV227.length > 0
-                  ? "ROWS_RETURNED_BUT_NONE_PASSED_POSITIVE_ADDRESS_AMOUNT_FILTER_V1019"
-                  : "NO_POSITIVE_HOLDER_ROWS_V1019",
-        rows: bitqueryHolderRowsV227,
-        dataset: "combined",
-        source: "BITQUERY_EVM_HOLDERS_COMBINED_V1022",
+        holderCount: null,
+        rowCount: 0,
+        rawRowCountV1019: 0,
+        holderCountRowCountV1019: 0,
+        positiveAmountRowsV1019: 0,
+        holderDiagnosticV1019: "BITQUERY_COMBINED_HOLDERS_NOT_REQUESTED_V1023",
+        rows: [],
+        dataset: "NOT_REQUESTED_REALTIME_ONLY_PLAN",
+        source: "BLOCKSCOUT_DIRECT_CHAIN_RETRY_REMAINS_AUTHORITATIVE_V1023",
         externalRequestsAdded: 0,
         sharedRequestHttpStatusV229: response.status,
         sharedRequestContentTypeV229: bitqueryResponseContentTypeV229 || null,
@@ -52663,7 +52615,6 @@ async function discoverVerifiedBagsLaunchesV210(
         endpointV229: BITQUERY_GRAPHQL_V2
       };
     }
-
 
 
     /* V233: exact-token Trading.Tokens evidence. No liquidity/full-market promotion. */
@@ -169357,14 +169308,14 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Holder request HTTP: ${state?.bitqueryHolderEvidenceV227?.sharedRequestHttpStatusV229 ?? "UNRECORDED"} · class ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.sharedRequestErrorClassV229 || "NONE"))}`,
     `Holder request error: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.sharedRequestErrorPreviewV229 || "NONE"))}`,
     "",
-    "<b>V1022 Bitquery candidate recovery — current-request truth · zero extra requests</b>",
+    "<b>V1023 Bitquery recovery — realtime-entitlement safe</b>",
     `Holder target: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.address || state?.bitqueryHolderEvidenceV227?.targetAddress || "NONE"))} · attempted ${state?.bitqueryHolderEvidenceV227?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryHolderEvidenceV227?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryHolderEvidenceV227?.status || "UNVERIFIED"))}`,
     `↳ Holder rows — raw ${fmt(state?.bitqueryHolderEvidenceV227?.rawRowCountV1019)} · positive accepted ${fmt(state?.bitqueryHolderEvidenceV227?.rowCount)} · count rows ${fmt(state?.bitqueryHolderEvidenceV227?.holderCountRowCountV1019)} · holder count ${state?.bitqueryHolderEvidenceV227?.holderCount ?? "UNVERIFIED"}`,
     `↳ Holder diagnosis: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.holderDiagnosticV1019 || "AWAITING_V1019_SAMPLE"))} · dataset ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.dataset || "UNVERIFIED"))} · reason ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.targetReason || "UNVERIFIED"))}`,
     `Market target: ${escapeHtml(String(state?.bitqueryMarketEvidenceV233?.address || state?.bitqueryMarketEvidenceV233?.targetAddress || "NONE"))} · attempted ${state?.bitqueryMarketEvidenceV233?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryMarketEvidenceV233?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryMarketEvidenceV233?.status || "UNVERIFIED"))}`,
     `Ranked-pair target: ${escapeHtml(String(state?.bitqueryRankedPairEvidenceV234?.address || state?.bitqueryRankedPairEvidenceV234?.targetAddress || "NONE"))} · attempted ${state?.bitqueryRankedPairEvidenceV234?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryRankedPairEvidenceV234?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryRankedPairEvidenceV234?.status || "UNVERIFIED"))}`,
     `Liquidity target: ${escapeHtml(String(state?.bitqueryLiquidityEvidenceV237?.address || state?.bitqueryLiquidityEvidenceV237?.targetAddress || state?.bitqueryLiquidityEvidenceV237?.poolId || "NONE"))} · attempted ${state?.bitqueryLiquidityEvidenceV237?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryLiquidityEvidenceV237?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryLiquidityEvidenceV237?.status || "UNVERIFIED"))}`,
-    `Verified Bitquery evidence lanes: ${[state?.bitqueryHolderEvidenceV227, state?.bitqueryMarketEvidenceV233, state?.bitqueryRankedPairEvidenceV234, state?.bitqueryLiquidityEvidenceV237].filter(row => row?.verified === true).length}/4`,
+    `Verified paid-plan-compatible Bitquery lanes: ${[state?.bitqueryMarketEvidenceV233, state?.bitqueryRankedPairEvidenceV234, state?.bitqueryLiquidityEvidenceV237].filter(row => row?.verified === true).length}/3`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -169377,7 +169328,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1022 preserves the V1021 combined-holder query and all scoring/risk/Telegram rules. It adds zero Bitquery requests. A failed current shared request now invalidates matching stale candidate-level Bitquery evidence, and /launchcoverage exposes the holder HTTP/error class so HTTP 403 access failures cannot masquerade as a current 4/4 recovery.</i>"
+    "<i>V1023 removes the inaccessible Bitquery combined-holder alias from the existing shared request so a known holder-entitlement 403 cannot take down market/pair/liquidity recovery. Holders remain on Blockscout + direct-chain + retry. Scoring, risk, Telegram thresholds and request ceilings are unchanged.</i>"
   ];
   return lines.join("\n");
 }
