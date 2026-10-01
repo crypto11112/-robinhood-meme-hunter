@@ -7889,6 +7889,7 @@
  *
  * CURRENT BUILD: V231
  * - V1023: disables inaccessible Bitquery combined-holder alias on realtime-only entitlement; preserves market/pair/liquidity shared request and existing holder fallbacks
+ * - V1024: expands temporary holder-recovery signals, routes eligible failures into V993 retry, fail-closes oversized histories for indexed-provider recovery, and cleans stale holder diagnostics
  * - V1022: Bitquery EVM.Holders holder alias uses dataset: combined for current holder state; same shared request, zero added HTTP calls
  * - PRESERVED: earlier realtime entitlement diagnostics remain historical context only
  * - FIX: removes the combined-dataset entitlement 403 that blocked the shared Bitquery launch/trading/holder request
@@ -8826,7 +8827,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V1023";
+const VERSION = "V1024";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -15625,6 +15626,8 @@ function directChainHolderTemporaryEvidenceV1006(holders) {
     "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED",
     "HOLDER_INDEXING_LAG_WAIT_V422",
     "NO_HOLDER_ROWS",
+    "NO_POSITIVE_OWNERSHIP_SUPPLY",
+    "NO_POSITIVE_OWNERSHIP_SUPPLY_V1004",
     "BLOCKSCOUT_PRO_404_RETRY_V146",
     "BLOCKSCOUT_PRO_COOLDOWN_V145",
     "BLOCKSCOUT_RUN_CIRCUIT_BREAKER_DEFERRED",
@@ -15723,9 +15726,11 @@ async function directChainHolderFallbackV1004(
   if (blocks > DIRECT_CHAIN_HOLDER_MAX_BLOCKS_V1004) {
     return {
       ...base,
-      status: "FULL_HISTORY_TOO_LARGE_V1004",
+      status: "FULL_HISTORY_REQUIRES_INDEXED_PROVIDER_V1024",
       launchBlock,
-      blocks
+      blocks,
+      maxSafeSinglePassBlocksV1024: DIRECT_CHAIN_HOLDER_MAX_BLOCKS_V1004,
+      partialHistoryPromoted: false
     };
   }
 
@@ -112377,6 +112382,12 @@ for (
         "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
         "BLOCKSCOUT_PRO_COOLDOWN_V145",
         "NO_HOLDER_ROWS",
+        "NO_POSITIVE_OWNERSHIP_SUPPLY",
+        "NO_POSITIVE_OWNERSHIP_SUPPLY_V1004",
+        "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED",
+        "BLOCKSCOUT_PRO_404_RETRY_V146",
+        "BLOCKSCOUT_RUN_CIRCUIT_BREAKER_DEFERRED",
+        "HOLDER_INDEXING_LAG_WAIT_V422",
         "VERIFIED_EMPTY_RETRY_V422"
       ].includes(holderStatusV993) ||
       [
@@ -169305,13 +169316,10 @@ function launchCoverageTelegramMessageV985(state, env) {
     `Shared production query: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastStatus || "UNRECORDED"))}`,
     `Shared production HTTP: ${state?.bagsDiscoveryV210?.lastHttpStatus ?? "UNRECORDED"}`,
     `Budget lane: ${escapeHtml(String(state?.bagsDiscoveryV210?.lastBudgetLaneV1017 || "UNRECORDED"))}`,
-    `Holder request HTTP: ${state?.bitqueryHolderEvidenceV227?.sharedRequestHttpStatusV229 ?? "UNRECORDED"} · class ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.sharedRequestErrorClassV229 || "NONE"))}`,
-    `Holder request error: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.sharedRequestErrorPreviewV229 || "NONE"))}`,
+    "Holder request: DISABLED on current realtime-only entitlement (combined/archive holder alias is not sent)",
     "",
-    "<b>V1023 Bitquery recovery — realtime-entitlement safe</b>",
-    `Holder target: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.address || state?.bitqueryHolderEvidenceV227?.targetAddress || "NONE"))} · attempted ${state?.bitqueryHolderEvidenceV227?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryHolderEvidenceV227?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryHolderEvidenceV227?.status || "UNVERIFIED"))}`,
-    `↳ Holder rows — raw ${fmt(state?.bitqueryHolderEvidenceV227?.rawRowCountV1019)} · positive accepted ${fmt(state?.bitqueryHolderEvidenceV227?.rowCount)} · count rows ${fmt(state?.bitqueryHolderEvidenceV227?.holderCountRowCountV1019)} · holder count ${state?.bitqueryHolderEvidenceV227?.holderCount ?? "UNVERIFIED"}`,
-    `↳ Holder diagnosis: ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.holderDiagnosticV1019 || "AWAITING_V1019_SAMPLE"))} · dataset ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.dataset || "UNVERIFIED"))} · reason ${escapeHtml(String(state?.bitqueryHolderEvidenceV227?.targetReason || "UNVERIFIED"))}`,
+    "<b>V1024 Bitquery recovery — realtime-entitlement safe</b>",
+    "Holder lane: BLOCKSCOUT + DIRECT_CHAIN + V993_RETRY (Bitquery combined holders intentionally disabled until archive entitlement)",
     `Market target: ${escapeHtml(String(state?.bitqueryMarketEvidenceV233?.address || state?.bitqueryMarketEvidenceV233?.targetAddress || "NONE"))} · attempted ${state?.bitqueryMarketEvidenceV233?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryMarketEvidenceV233?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryMarketEvidenceV233?.status || "UNVERIFIED"))}`,
     `Ranked-pair target: ${escapeHtml(String(state?.bitqueryRankedPairEvidenceV234?.address || state?.bitqueryRankedPairEvidenceV234?.targetAddress || "NONE"))} · attempted ${state?.bitqueryRankedPairEvidenceV234?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryRankedPairEvidenceV234?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryRankedPairEvidenceV234?.status || "UNVERIFIED"))}`,
     `Liquidity target: ${escapeHtml(String(state?.bitqueryLiquidityEvidenceV237?.address || state?.bitqueryLiquidityEvidenceV237?.targetAddress || state?.bitqueryLiquidityEvidenceV237?.poolId || "NONE"))} · attempted ${state?.bitqueryLiquidityEvidenceV237?.attempted === true ? "YES" : "NO"} · ${state?.bitqueryLiquidityEvidenceV237?.verified === true ? "VERIFIED" : escapeHtml(String(state?.bitqueryLiquidityEvidenceV237?.status || "UNVERIFIED"))}`,
@@ -169328,7 +169336,7 @@ function launchCoverageTelegramMessageV985(state, env) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V1023 removes the inaccessible Bitquery combined-holder alias from the existing shared request so a known holder-entitlement 403 cannot take down market/pair/liquidity recovery. Holders remain on Blockscout + direct-chain + retry. Scoring, risk, Telegram thresholds and request ceilings are unchanged.</i>"
+    "<i>V1024 expands only safe holder-recovery classification, keeps oversized full-history reconstruction fail-closed for an indexed provider, and removes stale combined-holder diagnostics. Scoring, risk, Telegram thresholds and request ceilings are unchanged.</i>"
   ];
   return lines.join("\n");
 }
