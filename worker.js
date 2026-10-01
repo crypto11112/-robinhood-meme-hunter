@@ -8846,7 +8846,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1028";
+const VERSION = "V1029";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -8854,7 +8854,7 @@ const VERSION = "V1028";
  * - preserves Premium/Free routing, scanner, providers, scoring, holder/risk logic,
  *   request ceilings and qualification thresholds unchanged.
  */
-/* V1028 PERSISTED DELAYED FREE-CALL DELIVERY — TELEGRAM TRANSPORT ONLY:
+/* V1029 ADMIN FREE-QUEUE DIAGNOSTIC + V1028 PERSISTED DELAYED FREE-CALL DELIVERY:
  * - successful autonomous Premium qualifying alerts are copied into a bounded KV-backed queue;
  * - the existing scheduled scan drains due Free deliveries after 30 minutes;
  * - reuses the already-rendered qualifying alert: no second analysis and zero provider requests;
@@ -79801,6 +79801,46 @@ async function processDueFreeCallsV1028(env) {
     providerRequests:0,
     scannerBudgetConsumed:false
   };
+}
+
+/* =========================================================
+   V1029 — ADMIN FREE-QUEUE DIAGNOSTIC
+   Read-only. No scanner/provider requests and no state writes.
+   ========================================================= */
+function freeQueueTelegramV1029(state) {
+  const raw = state?.freeCallQueueV1028;
+  const entries = Array.isArray(raw?.entries) ? raw.entries : [];
+  const nowMs = Date.now();
+  const pending = entries.filter(Boolean);
+  const due = pending.filter(row => Number(row?.nextAttemptAt || row?.dueAt || 0) > 0 && Number(row?.nextAttemptAt || row?.dueAt || 0) <= nowMs);
+  const next = pending
+    .map(row => ({row, at:Number(row?.nextAttemptAt || row?.dueAt || 0)}))
+    .filter(x => x.at > 0)
+    .sort((a,b) => a.at - b.at)[0] || null;
+  const lines = [
+    "🕒 <b>Free Delayed-Call Queue — V1029</b>",
+    "",
+    `Enabled/configured in state: <b>${raw ? "YES" : "NO QUEUE STATE YET"}</b>`,
+    `Delay: <b>30 minutes</b>`,
+    `Pending: <b>${pending.length}</b> · due now: <b>${due.length}</b>`,
+    `Total enqueued: <b>${safeNumber(raw?.totalEnqueued)}</b>`,
+    `Total sent to Free: <b>${safeNumber(raw?.totalSent)}</b>`,
+    `Failed attempts: <b>${safeNumber(raw?.totalFailedAttempts)}</b> · dropped: <b>${safeNumber(raw?.totalDropped)}</b>`,
+    `Last sent: <code>${raw?.lastSentAt ? escapeHtml(new Date(Number(raw.lastSentAt)).toISOString()) : "NONE"}</code>`,
+    `Next due: <code>${next?.at ? escapeHtml(new Date(next.at).toISOString()) : "NONE"}</code>`,
+    ""
+  ];
+  if (pending.length) {
+    lines.push("<b>Pending calls</b>");
+    for (const row of pending.slice(0, 10)) {
+      const at = Number(row?.nextAttemptAt || row?.dueAt || 0);
+      lines.push(`• <b>${escapeHtml(row?.symbol || "UNKNOWN")}</b> · attempts ${safeNumber(row?.attempts)} · ${at ? escapeHtml(new Date(at).toISOString()) : "NO_DUE_TIME"}`);
+    }
+    if (pending.length > 10) lines.push(`…and ${pending.length - 10} more`);
+    lines.push("");
+  }
+  lines.push("<i>Read-only. Zero scanner/provider requests and zero state writes. Shows the persisted V1028 Free-delivery queue only.</i>");
+  return lines.join("\\n");
 }
 
 /* =========================================================
@@ -171500,6 +171540,7 @@ function telegramHelpV271() {
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
+    "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
@@ -172387,6 +172428,32 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
+
+  // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
+  // branch only; Premium/Free are intercepted by the V1025 member allowlist.
+  if (parsed.command === "/freequeue") {
+    const loadedV1029 = await readState(env);
+    const stateV1029 = loadedV1029?.state || newState();
+    const replyV1029 = freeQueueTelegramV1029(stateV1029);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1029 = await sendTelegram(env, replyV1029, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1029?.success === true;
+      diagnosticV273.telegramStatus = sentV1029?.status || null;
+      diagnosticV273.telegramMode = sentV1029?.mode || null;
+      diagnosticV273.telegramError = sentV1029?.error || null;
+      diagnosticV273.result = sentV1029?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+      diagnosticV273.freeQueueV1029 = {
+        pending:Array.isArray(stateV1029?.freeCallQueueV1028?.entries) ? stateV1029.freeCallQueueV1028.entries.length : 0,
+        totalEnqueued:safeNumber(stateV1029?.freeCallQueueV1028?.totalEnqueued),
+        totalSent:safeNumber(stateV1029?.freeCallQueueV1028?.totalSent),
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0
+      };
+    }
+    return {success:sentV1029?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
 
   // V404: read-only account-wide bot-side Durable Object usage estimate.
   // Does not trigger a scanner run or external provider request.
