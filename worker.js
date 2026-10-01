@@ -1,6 +1,8 @@
 /**
- * ChainVanta / Robinhood Chain Meme Hunter — V1031
- * STRIPE ↔ TELEGRAM SUBSCRIBER MAPPING FOUNDATION
+ * ChainVanta / Robinhood Chain Meme Hunter — V1031A
+ * STRIPE CHECKOUT NAME-COLLECTION PATCH
+ * Builds directly from confirmed-working V1031 subscriber-mapping baseline.
+ * Adds Stripe Checkout customer full-name collection only; no access-control, scanner, scoring, provider, holder, qualification, or delayed-Free queue changes.
  * Builds directly from confirmed-working V1030 Stripe webhook baseline.
  * No automatic Premium grant/revoke in this version.
  */
@@ -181256,6 +181258,7 @@ async function createStripeCheckoutV1031(env, telegramUserId, telegramUsername, 
     ["mode", "subscription"],
     ["line_items[0][price]", priceId],
     ["line_items[0][quantity]", "1"],
+    ["name_collection[enabled]", "true"],
     ["client_reference_id", telegramUserId],
     ["metadata[telegram_user_id]", telegramUserId],
     ["metadata[telegram_username]", telegramUsername || ""],
