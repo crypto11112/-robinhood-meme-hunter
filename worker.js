@@ -8846,7 +8846,14 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1026";
+const VERSION = "V1027";
+/* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
+ * - routes Admin /help and /start through the existing proven V292 chunked sender;
+ * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
+ * - records Telegram API response descriptions when a reply is rejected;
+ * - preserves Premium/Free routing, scanner, providers, scoring, holder/risk logic,
+ *   request ceilings and qualification thresholds unchanged.
+ */
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -172086,6 +172093,20 @@ async function telegramCommandReplyV271(
     diagnosticV273.chatUsername =
       message?.chat?.username ||
       null;
+
+    // V1027: diagnostic only. Channel posts commonly identify sender_chat rather
+    // than exposing the human administrator in from.id; record both truthfully.
+    diagnosticV273.fromUserId =
+      message?.from?.id !== undefined && message?.from?.id !== null
+        ? String(message.from.id)
+        : null;
+    diagnosticV273.fromUsername = message?.from?.username || null;
+    diagnosticV273.senderChatId =
+      message?.sender_chat?.id !== undefined && message?.sender_chat?.id !== null
+        ? String(message.sender_chat.id)
+        : null;
+    diagnosticV273.senderChatType = message?.sender_chat?.type || null;
+    diagnosticV273.senderChatTitle = message?.sender_chat?.title || null;
   }
 
   const chatId =
@@ -174024,6 +174045,8 @@ async function telegramCommandReplyV271(
   const needsChunkedReplyV316 =
     parsed.command === "/analyse" ||
     parsed.command === "/analyze" ||
+    parsed.command === "/help" ||
+    parsed.command === "/start" ||
     parsed.command === "/learning" ||
     parsed.command === "/signallearn" ||
     parsed.command === "/launchcoverage" ||
@@ -174113,6 +174136,13 @@ async function telegramCommandReplyV271(
 
     diagnosticV273.telegramError =
       result?.error ||
+      result?.data?.description ||
+      result?.results?.find?.(row => row?.data?.description)?.data?.description ||
+      null;
+
+    diagnosticV273.telegramDescriptionV1027 =
+      result?.data?.description ||
+      result?.results?.find?.(row => row?.data?.description)?.data?.description ||
       null;
 
     diagnosticV273.result =
@@ -174195,6 +174225,18 @@ async function telegramWebhookV271(
       null,
     telegramError:
       null,
+    telegramDescriptionV1027:
+      null,
+    fromUserId:
+      null,
+    fromUsername:
+      null,
+    senderChatId:
+      null,
+    senderChatType:
+      null,
+    senderChatTitle:
+      null,
     result:
       null
   };
@@ -174232,6 +174274,19 @@ async function telegramWebhookV271(
             message.chat.id
           )
         : null;
+
+    // V1027 sender identity snapshot for Admin security decisions.
+    diagnosticV273.fromUserId =
+      message?.from?.id !== undefined && message?.from?.id !== null
+        ? String(message.from.id)
+        : null;
+    diagnosticV273.fromUsername = message?.from?.username || null;
+    diagnosticV273.senderChatId =
+      message?.sender_chat?.id !== undefined && message?.sender_chat?.id !== null
+        ? String(message.sender_chat.id)
+        : null;
+    diagnosticV273.senderChatType = message?.sender_chat?.type || null;
+    diagnosticV273.senderChatTitle = message?.sender_chat?.title || null;
 
     const result =
       await telegramCommandReplyV271(
