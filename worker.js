@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1035";
+const VERSION = "V1036";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171549,7 +171549,8 @@ function telegramHelpV271() {
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
-    "<code>/subscribers</code> — V1031 Stripe↔Telegram subscriber mappings (read-only)",
+    "<code>/subscribers</code> — Stripe↔Telegram subscriber mappings (read-only)",
+    "<code>/accessexpiry</code> — V1036 cancellation/paid-through removal diagnostic (read-only)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -172500,6 +172501,18 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
+
+  // V1036: read-only cancellation/access-expiry diagnostic.
+  if (parsed.command === "/accessexpiry") {
+    const replyV1036 = await accessExpiryAdminMessageV1036(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1036 = await sendTelegram(env, replyV1036, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1036?.success === true;
+      diagnosticV273.result = sentV1036?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1036?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
 
   // V1031: read-only subscriber mapping diagnostic. Admin-only because member
   // chats are intercepted above by the V1025 allowlist.
@@ -181421,7 +181434,7 @@ async function subscribersAdminMessageV1031(env) {
       "SELECT telegram_user_id, telegram_username, status, stripe_customer_id, stripe_subscription_id, updated_at FROM subscribers ORDER BY updated_at DESC LIMIT 10"
     ).all();
     const lines = [
-      "🧾 <b>ChainVanta Subscribers — V1032</b>", "",
+      "🧾 <b>ChainVanta Subscribers — V1036</b>", "",
       `Total mapped: ${Number(countRow?.n || 0)}`, ""
     ];
     for (const row of (rows?.results || [])) {
@@ -181431,7 +181444,7 @@ async function subscribersAdminMessageV1031(env) {
       lines.push(`${user} · ${escapeHtml(String(row.status || "UNKNOWN"))} · customer ${c} · sub ${sub}`);
     }
     if (!(rows?.results || []).length) lines.push("No mapped subscribers yet.");
-    lines.push("", "<i>Read-only. V1032 can grant personal Premium invites; automatic removal/revocation remains disabled.</i>");
+    lines.push("", "<i>Read-only. V1036 records cancellation/expiry state; Telegram removal remains disabled.</i>");
     return lines.join("\n");
   } catch (error) {
     return `🧾 <b>ChainVanta Subscribers — V1035</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
@@ -181510,6 +181523,98 @@ async function grantPremiumInviteV1032(env, telegramUserId) {
   }
 }
 
+
+/* V1036 — Stripe cancellation/access-expiry diagnostic only.
+   Records subscription lifecycle fields in the existing subscribers table.
+   It NEVER calls Telegram ban/kick/revoke methods. */
+async function recordStripeLifecycleV1036(env, event) {
+  if (!env?.CHAINVANTA_DB) return {ok:false,reason:"CHAINVANTA_DB_NOT_BOUND_V1036"};
+  const type=String(event?.type||"");
+  const obj=event?.data?.object||{};
+  const subscriptionId=String(
+    type.startsWith("customer.subscription.") ? (obj?.id||"") :
+    (typeof obj?.subscription==="string" ? obj.subscription : (obj?.subscription?.id||""))
+  ).trim();
+  const customerId=String(typeof obj?.customer==="string" ? obj.customer : (obj?.customer?.id||"")).trim();
+
+  if (!subscriptionId && !customerId) return {ok:false,reason:"STRIPE_SUBSCRIPTION_OR_CUSTOMER_MISSING_V1036"};
+
+  const stripeStatus=String(obj?.status||"").toLowerCase();
+  const cancelAtPeriodEnd=obj?.cancel_at_period_end===true ? 1 : 0;
+  const currentPeriodEnd=Number.isFinite(Number(obj?.current_period_end)) ? Math.trunc(Number(obj.current_period_end)) : null;
+  const endedAt=Number.isFinite(Number(obj?.ended_at)) ? Math.trunc(Number(obj.ended_at)) : null;
+  const canceledAt=Number.isFinite(Number(obj?.canceled_at)) ? Math.trunc(Number(obj.canceled_at)) : null;
+  const ts=Math.floor(Date.now()/1000);
+
+  let localStatus=null;
+  if (type==="customer.subscription.deleted" || stripeStatus==="canceled") localStatus="ENDED";
+  else if (stripeStatus==="active" || stripeStatus==="trialing") localStatus=cancelAtPeriodEnd ? "CANCEL_SCHEDULED" : "ACTIVE";
+  else if (stripeStatus==="past_due" || stripeStatus==="unpaid") localStatus="PAYMENT_ATTENTION";
+
+  try {
+    const where=subscriptionId ? "stripe_subscription_id = ?" : "stripe_customer_id = ?";
+    const key=subscriptionId || customerId;
+    const row=await env.CHAINVANTA_DB.prepare(
+      `SELECT telegram_user_id,status,current_period_end,cancel_at_period_end
+       FROM subscribers WHERE ${where} LIMIT 1`
+    ).bind(key).first();
+    if (!row) return {ok:false,reason:"SUBSCRIBER_MAPPING_NOT_FOUND_V1036",subscriptionId:Boolean(subscriptionId),customerId:Boolean(customerId)};
+
+    const effectiveEnd=currentPeriodEnd || endedAt || canceledAt || row.current_period_end || null;
+    const nextStatus=localStatus || String(row.status||"ACTIVE");
+    await env.CHAINVANTA_DB.prepare(
+      `UPDATE subscribers
+       SET status=?, current_period_end=?, cancel_at_period_end=?, updated_at=?
+       WHERE telegram_user_id=?`
+    ).bind(nextStatus,effectiveEnd,cancelAtPeriodEnd,ts,String(row.telegram_user_id)).run();
+
+    const nowSec=Math.floor(Date.now()/1000);
+    const wouldRemove = nextStatus==="ENDED" || (
+      nextStatus==="CANCEL_SCHEDULED" &&
+      effectiveEnd!==null &&
+      Number(effectiveEnd)<=nowSec
+    );
+
+    return {
+      ok:true,
+      telegramUserId:String(row.telegram_user_id),
+      stripeStatus:stripeStatus||null,
+      localStatus:nextStatus,
+      cancelAtPeriodEnd:cancelAtPeriodEnd===1,
+      currentPeriodEnd:effectiveEnd,
+      wouldRemovePremiumNow:wouldRemove,
+      action:"DIAGNOSTIC_ONLY_NO_TELEGRAM_REMOVAL_V1036"
+    };
+  } catch(error) {
+    return {ok:false,reason:"D1_LIFECYCLE_UPDATE_FAILED_V1036",error:errorString(error)};
+  }
+}
+
+async function accessExpiryAdminMessageV1036(env) {
+  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1036</b>\n\nD1 binding: MISSING";
+  try {
+    const nowSec=Math.floor(Date.now()/1000);
+    const rows=await env.CHAINVANTA_DB.prepare(
+      `SELECT telegram_user_id,telegram_username,status,current_period_end,cancel_at_period_end
+       FROM subscribers
+       ORDER BY updated_at DESC LIMIT 25`
+    ).all();
+    const lines=["🧪 <b>Premium Access Expiry — V1036</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1036.`,""];
+    for(const row of (rows?.results||[])){
+      const user=row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
+      const end=Number(row.current_period_end);
+      const endText=Number.isFinite(end)&&end>0 ? new Date(end*1000).toISOString() : "UNVERIFIED";
+      const would=String(row.status)==="ENDED" || (String(row.status)==="CANCEL_SCHEDULED" && Number.isFinite(end) && end<=nowSec);
+      lines.push(`${user} · <b>${escapeHtml(String(row.status||"UNKNOWN"))}</b> · cancel at period end ${Number(row.cancel_at_period_end)===1?"YES":"NO"}`);
+      lines.push(`↳ paid-through/end: <code>${escapeHtml(endText)}</code> · would remove now: <b>${would?"YES":"NO"}</b>`);
+    }
+    if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
+    return lines.join("\n");
+  } catch(error){
+    return `🧪 <b>Premium Access Expiry — V1036</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+  }
+}
+
 async function stripeWebhookV1030(request, env) {
   const secret = String(env?.STRIPE_WEBHOOK_SECRET || "").trim();
   if (!secret) {
@@ -181578,7 +181683,18 @@ async function stripeWebhookV1030(request, env) {
     }
   }
 
-  // V1032 is grant-only. It never removes, bans, kicks or revokes Premium access.
+  let lifecycleV1036 = null;
+  if (
+    selected &&
+    (
+      eventType === "customer.subscription.updated" ||
+      eventType === "customer.subscription.deleted"
+    )
+  ) {
+    lifecycleV1036 = await recordStripeLifecycleV1036(env, event);
+  }
+
+  // V1036 remains diagnostic-only: no Telegram removal/revocation calls.
   return jsonResponse(
     {
       ok: true,
@@ -181590,6 +181706,7 @@ async function stripeWebhookV1030(request, env) {
       eventType,
       subscriberMappingV1031,
       premiumInviteV1032,
+      lifecycleV1036,
       timestamp: now()
     },
     200
