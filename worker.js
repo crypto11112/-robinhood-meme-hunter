@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1031";
+const VERSION = "V1032";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -181338,7 +181338,7 @@ async function subscribersAdminMessageV1031(env) {
       "SELECT telegram_user_id, telegram_username, status, stripe_customer_id, stripe_subscription_id, updated_at FROM subscribers ORDER BY updated_at DESC LIMIT 10"
     ).all();
     const lines = [
-      "🧾 <b>ChainVanta Subscribers — V1031</b>", "",
+      "🧾 <b>ChainVanta Subscribers — V1032</b>", "",
       `Total mapped: ${Number(countRow?.n || 0)}`, ""
     ];
     for (const row of (rows?.results || [])) {
@@ -181348,10 +181348,82 @@ async function subscribersAdminMessageV1031(env) {
       lines.push(`${user} · ${escapeHtml(String(row.status || "UNKNOWN"))} · customer ${c} · sub ${sub}`);
     }
     if (!(rows?.results || []).length) lines.push("No mapped subscribers yet.");
-    lines.push("", "<i>Read-only. Premium access automation is not enabled in V1031.</i>");
+    lines.push("", "<i>Read-only. V1032 can grant personal Premium invites; automatic removal/revocation remains disabled.</i>");
     return lines.join("\n");
   } catch (error) {
     return `🧾 <b>ChainVanta Subscribers — V1031</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+  }
+}
+
+
+/* ============================================================
+   V1032 — PREMIUM ACCESS GRANT-ONLY FOUNDATION
+   - successful mapped Checkout creates a short-lived, one-member
+     invite for the configured ChainVanta Premium chat;
+   - sends that personal invite to the paying Telegram user in DM;
+   - NO ban, kick, revoke, cancellation removal or failed-payment
+     removal logic exists in V1032;
+   - no scanner/scoring/provider/holder/qualification changes.
+   ============================================================ */
+
+async function grantPremiumInviteV1032(env, telegramUserId) {
+  const botToken = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+  const premiumChatId = String(env?.TELEGRAM_PREMIUM_CHAT_ID || "").trim();
+  const userId = String(telegramUserId || "").trim();
+
+  if (!botToken) return { ok:false, reason:"TELEGRAM_BOT_TOKEN_NOT_CONFIGURED_V1032" };
+  if (!premiumChatId) return { ok:false, reason:"TELEGRAM_PREMIUM_CHAT_ID_NOT_CONFIGURED_V1032" };
+  if (!/^\d+$/.test(userId)) return { ok:false, reason:"TELEGRAM_USER_ID_INVALID_V1032" };
+
+  const telegramBase = `https://api.telegram.org/bot${botToken}`;
+  const expireDate = Math.floor(Date.now() / 1000) + (24 * 60 * 60);
+
+  try {
+    const inviteResponse = await fetch(`${telegramBase}/createChatInviteLink`, {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        chat_id: premiumChatId,
+        name: `ChainVanta Premium ${userId}`.slice(0, 32),
+        expire_date: expireDate,
+        member_limit: 1
+      })
+    });
+    const inviteData = await inviteResponse.json().catch(() => ({}));
+    const inviteLink = String(inviteData?.result?.invite_link || "").trim();
+
+    if (!inviteResponse.ok || inviteData?.ok !== true || !inviteLink) {
+      return {
+        ok:false,
+        reason:"PREMIUM_INVITE_CREATE_FAILED_V1032",
+        httpStatus:inviteResponse.status,
+        telegramDescription:String(inviteData?.description || "").slice(0,300)
+      };
+    }
+
+    const message = [
+      "⚡ <b>Welcome to ChainVanta Premium</b>",
+      "",
+      "Your subscription is active.",
+      "",
+      "Tap your personal invite below to join the private ChainVanta Premium channel:",
+      "",
+      escapeHtml(inviteLink),
+      "",
+      "This invite is limited to one member and expires in 24 hours. Please do not share it.",
+      "",
+      "<i>Research only. Not financial advice.</i>"
+    ].join("\n");
+
+    const delivery = await sendTelegram(env, message, null, null, userId);
+    return {
+      ok: delivery?.success === true,
+      reason: delivery?.success === true ? "PREMIUM_INVITE_SENT_V1032" : "PREMIUM_INVITE_DM_FAILED_V1032",
+      inviteCreated:true,
+      dmSent:delivery?.success === true
+    };
+  } catch (error) {
+    return { ok:false, reason:"PREMIUM_INVITE_EXCEPTION_V1032", error:errorString(error) };
   }
 }
 
@@ -181408,11 +181480,22 @@ async function stripeWebhookV1030(request, env) {
   });
 
   let subscriberMappingV1031 = null;
+  let premiumInviteV1032 = null;
   if (selected && eventType === "checkout.session.completed") {
     subscriberMappingV1031 = await saveStripeCheckoutMappingV1031(env, event);
+    if (
+      subscriberMappingV1031?.ok === true &&
+      subscriberMappingV1031?.status === "ACTIVE" &&
+      subscriberMappingV1031?.telegramUserId
+    ) {
+      premiumInviteV1032 = await grantPremiumInviteV1032(
+        env,
+        subscriberMappingV1031.telegramUserId
+      );
+    }
   }
 
-  // V1031 maps identity only. Premium Telegram access mutation remains intentionally disabled.
+  // V1032 is grant-only. It never removes, bans, kicks or revokes Premium access.
   return jsonResponse(
     {
       ok: true,
@@ -181423,6 +181506,7 @@ async function stripeWebhookV1030(request, env) {
       eventId,
       eventType,
       subscriberMappingV1031,
+      premiumInviteV1032,
       timestamp: now()
     },
     200
@@ -181484,9 +181568,39 @@ async function handleRequest(
   }
 
   if (path === "/subscription-success" && request.method === "GET") {
+    const htmlV1032 = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ChainVanta Premium</title>
+<style>
+body{margin:0;background:#070909;color:#f4f7f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.wrap{max-width:620px;margin:0 auto;padding:48px 24px}
+.card{border:1px solid #1f3432;border-radius:20px;padding:30px;background:#0c1111}
+h1{margin:0 0 14px;font-size:30px} h2{font-size:19px;margin-top:28px}
+p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
+.ok{font-size:18px;color:#8ef0d7;font-weight:700}
+.note{font-size:14px;color:#93a5a3;margin-top:26px}
+</style>
+</head>
+<body><main class="wrap"><section class="card">
+<div class="ok">✓ Subscription active</div>
+<h1>Welcome to ChainVanta Premium ⚡</h1>
+<p>Your payment was successful and your ChainVanta Premium subscription is active.</p>
+<h2>How to enter the Premium channel</h2>
+<ol>
+<li>Return to your private Telegram conversation with the ChainVanta bot.</li>
+<li>Your personal Premium invite will be waiting in that chat.</li>
+<li>Tap the invite to join the private <b>ChainVanta Premium</b> channel.</li>
+</ol>
+<p>Your invite is for one member and expires after 24 hours. Please do not share it.</p>
+<p><b>You can now close this page and return to Telegram.</b></p>
+<div class="note">ChainVanta provides research and on-chain intelligence only. Not financial advice.</div>
+</section></main></body></html>`;
     return new Response(
-      "ChainVanta Premium test checkout completed. You can return to Telegram.",
-      { status:200, headers:{"content-type":"text/plain; charset=utf-8"} }
+      htmlV1032,
+      { status:200, headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store"} }
     );
   }
 
