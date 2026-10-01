@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1033";
+const VERSION = "V1034";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -172376,7 +172376,7 @@ async function telegramCommandReplyV271(
         "https://robinhood-meme-hunter.johnd1987.workers.dev/telegram-webhook"
       );
       const replyV1033 = portalV1033.ok
-        ? `⚙️ <b>Manage ChainVanta Premium</b>\n\nUse your secure Stripe customer portal to manage your subscription, payment method or cancellation:\n\n${escapeHtml(portalV1033.url)}\n\n<i>V1033 does not automatically remove Premium access.</i>`
+        ? `⚙️ <b>Manage ChainVanta Premium</b>\n\nUse your secure Stripe Customer Portal to manage your subscription, update your payment method or cancel your membership.\n\n<b>Cancelling?</b>\nIf you cancel, your Premium access continues until the end of your current paid billing period. You won't be charged for another billing period.\n\n🔒 <b>Your locked-in membership price</b>\nIf you joined at a special or earlier price, that price stays locked in while your subscription remains active. If you cancel and later rejoin, your previous price is not guaranteed and you'll rejoin at the membership price available at that time.\n\n<b>Manage subscription:</b>\n${escapeHtml(portalV1033.url)}\n\n<i>V1034 does not automatically remove Premium access.</i>`
         : `⚠️ <b>Subscription management unavailable</b>\n\n${escapeHtml(String(portalV1033.reason || "UNKNOWN"))}${portalV1033.stripeMessage ? `\n${escapeHtml(portalV1033.stripeMessage)}` : ""}`;
       const sentV1033 = await sendTelegram(env, replyV1033, null, null, chatId);
       return { success:sentV1033?.success===true, ignored:false, command:"/manage", scannerBudgetConsumed:false, externalProviderRequests:portalV1033.ok ? 1 : 0 };
@@ -181414,7 +181414,7 @@ async function saveStripeCheckoutMappingV1031(env, event) {
 }
 
 async function subscribersAdminMessageV1031(env) {
-  if (!env?.CHAINVANTA_DB) return "🧾 <b>ChainVanta Subscribers — V1033</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧾 <b>ChainVanta Subscribers — V1034</b>\n\nD1 binding: MISSING";
   try {
     const countRow = await env.CHAINVANTA_DB.prepare("SELECT COUNT(*) AS n FROM subscribers").first();
     const rows = await env.CHAINVANTA_DB.prepare(
@@ -181434,7 +181434,7 @@ async function subscribersAdminMessageV1031(env) {
     lines.push("", "<i>Read-only. V1032 can grant personal Premium invites; automatic removal/revocation remains disabled.</i>");
     return lines.join("\n");
   } catch (error) {
-    return `🧾 <b>ChainVanta Subscribers — V1033</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧾 <b>ChainVanta Subscribers — V1034</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
@@ -181683,6 +181683,11 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 <li>Tap the invite to join the private <b>ChainVanta Premium</b> channel.</li>
 </ol>
 <p>Your invite is for one member and expires after 24 hours. Please do not share it.</p>
+<h2>Managing your membership</h2>
+<p>Need to update your payment method or cancel your subscription? Send <b>/manage</b> in your private ChainVanta bot chat at any time to open your secure Stripe Customer Portal.</p>
+<p>If you cancel, your Premium access continues until the end of your current paid billing period. You won't be charged for another billing period.</p>
+<h2>🔒 Your locked-in membership price</h2>
+<p>If you joined at a special or earlier price, that price stays locked in while your subscription remains active. If you cancel and later rejoin, your previous price is not guaranteed and you'll rejoin at the membership price available at that time.</p>
 <p><b>You can now close this page and return to Telegram.</b></p>
 <div class="note">ChainVanta provides research and on-chain intelligence only. Not financial advice.</div>
 </section></main></body></html>`;
