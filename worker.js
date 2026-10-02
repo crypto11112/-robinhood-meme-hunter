@@ -1,11 +1,12 @@
 /**
- * ChainVanta — V1061
- * BITQUERY ROBINHOOD TOKEN-SWAP DIAGNOSTIC
- * Builds directly from confirmed-working V1060.
- * Preserves /bitquery-usage and /bitquery-oauth-test unchanged.
- * Adds GET /bitquery-swaps?token=0x...&limit=10 for one manual/read-only
- * Robinhood Chain DEXTradeByTokens diagnostic through Bitquery V2.
- * Returns recent swap rows plus a diagnostic-only BUY/SELL USD summary.
+ * ChainVanta — V1062
+ * BITQUERY SWAP NORMALIZATION / DEDUPLICATION DIAGNOSTIC
+ * Builds directly from confirmed-working V1061.
+ * Preserves /bitquery-usage, /bitquery-oauth-test and /bitquery-swaps unchanged.
+ * Adds GET /bitquery-swaps-normalized?token=0x...&limit=25 for a manual/read-only
+ * transaction-level normalization view over the same Bitquery Robinhood trade rows.
+ * Groups repeated trade legs by transaction hash, flags mixed-direction transactions,
+ * and reports raw totals versus a conservative transaction-level USD proxy.
  * Uses BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET and never returns/logs credentials.
  * Makes no scanner, scoring, provider-routing, Telegram-call, Stripe, D1, KV or Durable Object changes.
  */
@@ -8867,7 +8868,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1061"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1062"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -183508,6 +183509,141 @@ async function bitqueryRobinhoodSwapsDiagnosticV1061(env, url) {
   };
 }
 
+
+/* ============================================================
+   V1062 — BITQUERY SWAP NORMALIZATION / DEDUP DIAGNOSTIC
+   ============================================================
+   - GET /bitquery-swaps-normalized?token=0x...&limit=25 only.
+   - Reuses the proven V1061 Bitquery query exactly once.
+   - Groups rows by transaction hash so routed/multi-leg trades are visible.
+   - Reports raw row-level totals and a conservative transaction-level proxy.
+   - The proxy uses the largest target-token USD leg within a same-direction tx;
+     this avoids obvious route-leg double counting but is deliberately NOT claimed
+     to be authoritative end-to-end economic flow for every possible router/arbitrage tx.
+   - Mixed BUY/SELL transactions are retained and excluded from directional proxy totals.
+   - Read-only. No scanner state, scoring, D1, KV, DO, Stripe or Telegram mutation.
+*/
+function round6V1062(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Number(n.toFixed(6)) : 0;
+}
+
+function normalizeBitqueryRowsV1062(rows) {
+  const groups = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const key = String(row?.txHash || `NO_HASH_${groups.size}`).toLowerCase();
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  let normalizedBuyCount = 0, normalizedSellCount = 0, mixedCount = 0, unknownCount = 0;
+  let normalizedBuyUsd = 0, normalizedSellUsd = 0;
+  let multiLegTransactions = 0, rawUsdAcrossRows = 0, proxyUsdAcrossTransactions = 0;
+
+  const transactions = [];
+  for (const [txHash, txRows] of groups.entries()) {
+    if (txRows.length > 1) multiLegTransactions += 1;
+    const actions = [...new Set(txRows.map(r => String(r?.action || 'UNKNOWN').toUpperCase()))];
+    const known = actions.filter(a => a === 'BUY' || a === 'SELL');
+    let action = 'UNKNOWN';
+    if (known.length === 1 && actions.every(a => a === known[0] || a === 'UNKNOWN')) action = known[0];
+    else if (new Set(known).size > 1) action = 'MIXED';
+
+    const usdLegs = txRows
+      .map(r => Number(r?.token?.amountUsd))
+      .filter(Number.isFinite);
+    const rawUsd = usdLegs.reduce((a,b) => a+b, 0);
+    // Conservative route-normalization proxy: largest target-token USD leg in the tx.
+    const proxyUsd = usdLegs.length ? Math.max(...usdLegs) : 0;
+    rawUsdAcrossRows += rawUsd;
+    proxyUsdAcrossTransactions += proxyUsd;
+
+    if (action === 'BUY') { normalizedBuyCount += 1; normalizedBuyUsd += proxyUsd; }
+    else if (action === 'SELL') { normalizedSellCount += 1; normalizedSellUsd += proxyUsd; }
+    else if (action === 'MIXED') mixedCount += 1;
+    else unknownCount += 1;
+
+    const protocols = [...new Set(txRows.map(r => r?.dex?.protocolName).filter(Boolean))];
+    const pools = [...new Set(txRows.map(r => r?.dex?.smartContract).filter(Boolean))];
+    const counterparties = [...new Set(txRows.map(r => r?.counterSide?.symbol).filter(Boolean))];
+    const wallets = [...new Set(txRows.flatMap(r => [r?.txFrom, r?.token?.buyer, r?.token?.seller]).filter(Boolean))];
+
+    transactions.push({
+      txHash: txRows[0]?.txHash || txHash,
+      block: txRows[0]?.block ?? null,
+      time: txRows[0]?.time ?? null,
+      action,
+      rawLegCount: txRows.length,
+      rawUsd: round6V1062(rawUsd),
+      normalizedUsdProxy: round6V1062(proxyUsd),
+      possibleRouteDuplication: txRows.length > 1,
+      protocols, pools, counterTokens: counterparties, wallets,
+      legs: txRows.map(r => ({
+        action:r?.action || 'UNKNOWN',
+        tokenAmount:r?.token?.amount ?? null,
+        tokenAmountUsd:r?.token?.amountUsd ?? null,
+        priceUsd:r?.token?.priceUsd ?? null,
+        counterSymbol:r?.counterSide?.symbol || null,
+        counterAmount:r?.counterSide?.amount ?? null,
+        counterAmountUsd:r?.counterSide?.amountUsd ?? null,
+        protocol:r?.dex?.protocolName || null,
+        pool:r?.dex?.smartContract || null
+      }))
+    });
+  }
+
+  const rawCount = Array.isArray(rows) ? rows.length : 0;
+  const txCount = transactions.length;
+  return {
+    rawRowCount: rawCount,
+    uniqueTransactionCount: txCount,
+    duplicateOrExtraLegRows: Math.max(0, rawCount - txCount),
+    multiLegTransactions,
+    directionalTransactions:{
+      buyCount:normalizedBuyCount, sellCount:normalizedSellCount, mixedCount, unknownCount,
+      buyUsdProxy:round6V1062(normalizedBuyUsd),
+      sellUsdProxy:round6V1062(normalizedSellUsd),
+      netBuyMinusSellUsdProxy:round6V1062(normalizedBuyUsd-normalizedSellUsd)
+    },
+    usdComparison:{
+      rawRowUsdTotal:round6V1062(rawUsdAcrossRows),
+      conservativeTxUsdProxyTotal:round6V1062(proxyUsdAcrossTransactions),
+      rawMinusProxy:round6V1062(rawUsdAcrossRows-proxyUsdAcrossTransactions),
+      note:'Proxy uses the largest target-token USD leg per same transaction to reduce obvious multi-leg route double counting. It is diagnostic, not yet an authoritative economic-flow figure.'
+    },
+    transactions
+  };
+}
+
+async function bitqueryRobinhoodSwapsNormalizedDiagnosticV1062(env, url) {
+  const raw = await bitqueryRobinhoodSwapsDiagnosticV1061(env, url);
+  if (!raw?.success) {
+    return {
+      ...raw,
+      version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:'BITQUERY_ROBINHOOD_SWAP_NORMALIZATION_V1062',
+      status:String(raw?.status || 'BITQUERY_BASE_DIAGNOSTIC_FAILED_V1062').replace(/V1061/g,'V1062'),
+      normalized:false,
+      note:'V1062 normalization did not run because the underlying V1061 Bitquery diagnostic did not succeed.'
+    };
+  }
+
+  const normalized = normalizeBitqueryRowsV1062(raw.rows);
+  return {
+    agent:'ChainVanta', version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'BITQUERY_ROBINHOOD_SWAP_NORMALIZATION_V1062',
+    success:true, readOnly:true, configured:true,
+    status:raw.rows?.length ? 'BITQUERY_SWAP_NORMALIZATION_OK_V1062' : 'BITQUERY_SWAP_NORMALIZATION_NO_ROWS_V1062',
+    request:raw.request, oauth:raw.oauth, graphql:raw.graphql,
+    rawSummary:raw.summary,
+    normalization:normalized,
+    externalRequestsUsed:raw.externalRequestsUsed || 2,
+    scannerMutated:false,
+    note:'Diagnostic only. No normalized Bitquery result is used by the live scanner or scoring.',
+    elapsedMs:raw.elapsedMs, timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -183713,6 +183849,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryRobinhoodSwapsDiagnosticV1061(env, url)
+    );
+  }
+
+
+  if (
+    path ===
+      "/bitquery-swaps-normalized"
+  ) {
+    return jsonResponse(
+      await bitqueryRobinhoodSwapsNormalizedDiagnosticV1062(env, url)
     );
   }
 
