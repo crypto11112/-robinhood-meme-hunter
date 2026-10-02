@@ -79715,8 +79715,8 @@ async function sendTelegramPrivateActionNoticeV1054(env, targetChatId, mode = "s
   const isManage = mode === "manage";
   const text = needsStart
     ? (isManage
-        ? "📩 To manage your ChainVanta Premium subscription privately, tap below to start @Robinhood_Hunter_Bot."
-        : "📩 To continue with ChainVanta Premium privately, tap below to start @Robinhood_Hunter_Bot.")
+        ? "📩 To manage your ChainVanta Premium subscription privately, tap below to start @ChainVantaBot."
+        : "📩 To continue with ChainVanta Premium privately, tap below to start @ChainVantaBot.")
     : (isManage
         ? "📩 Check your private messages — I’ve sent you the secure ChainVanta subscription management option."
         : "📩 Check your private messages — I’ve sent you the ChainVanta Premium details.");
@@ -79731,7 +79731,7 @@ async function sendTelegramPrivateActionNoticeV1054(env, targetChatId, mode = "s
       inline_keyboard:[[
         {
           text:isManage ? "⚙️ Manage Premium" : "🚀 Start ChainVanta Premium",
-          url:`https://t.me/Robinhood_Hunter_Bot?start=${isManage ? "manage" : "subscribe"}`
+          url:`https://t.me/ChainVantaBot?start=${isManage ? "manage" : "subscribe"}`
         }
       ]]
     };
@@ -79784,7 +79784,7 @@ async function sendTelegramManageEntryV1052(env, targetChatId) {
   const message = [
     "⚙️ <b>Manage ChainVanta Premium</b>",
     "",
-    "Manage your subscription, payment method or cancellation securely in a private chat with @Robinhood_Hunter_Bot.",
+    "Manage your subscription, payment method or cancellation securely in a private chat with @ChainVantaBot.",
     "",
     "<i>Your Stripe Customer Portal link will only be created privately and linked to your Telegram account.</i>"
   ].join("\\n");
@@ -79804,7 +79804,7 @@ async function sendTelegramManageEntryV1052(env, targetChatId) {
             inline_keyboard:[[
               {
                 text:"⚙️ Manage Premium",
-                url:"https://t.me/Robinhood_Hunter_Bot?start=manage"
+                url:"https://t.me/ChainVantaBot?start=manage"
               }
             ]]
           }
@@ -79838,7 +79838,7 @@ async function sendTelegramPremiumEntryV1052(env, targetChatId) {
     "",
     "<b>£49/month</b>",
     "",
-    "Tap below to continue securely in a private chat with @Robinhood_Hunter_Bot.",
+    "Tap below to continue securely in a private chat with @ChainVantaBot.",
     "",
     "<i>Your Stripe checkout will only be created privately so it can be securely linked to your Telegram account.</i>"
   ].join("\\n");
@@ -79858,7 +79858,7 @@ async function sendTelegramPremiumEntryV1052(env, targetChatId) {
             inline_keyboard:[[
               {
                 text:"🚀 Start ChainVanta Premium",
-                url:"https://t.me/Robinhood_Hunter_Bot?start=subscribe"
+                url:"https://t.me/ChainVantaBot?start=subscribe"
               }
             ]]
           }
@@ -172657,7 +172657,7 @@ async function telegramCommandReplyV271(
 
 
   // V1052: /manage never exposes a Stripe portal URL in a group.
-  // It routes to @Robinhood_Hunter_Bot, where the existing V1033 portal is created privately.
+  // It routes to @ChainVantaBot, where the existing V1033 portal is created privately.
   if (["FREE", "PREMIUM"].includes(chatRoleV1025) && parsed?.command === "/manage") {
     const userIdV1054 = Number(message?.from?.id || 0);
     let privateResultV1054 = { success:false };
@@ -172689,7 +172689,7 @@ async function telegramCommandReplyV271(
   }
 
   // V1052: /subscribe and /premium in the Free destination show a one-tap private Premium entry.
-  // The button opens @Robinhood_Hunter_Bot with /start subscribe; Stripe checkout remains private-DM-only.
+  // The button opens @ChainVantaBot with /start subscribe; Stripe checkout remains private-DM-only.
   if (chatRoleV1025 === "FREE" && ["/subscribe", "/premium"].includes(parsed?.command)) {
     const userIdV1054 = Number(message?.from?.id || 0);
     const usernameV1054 = String(message?.from?.username || "").trim();
