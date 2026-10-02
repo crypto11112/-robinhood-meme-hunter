@@ -8856,7 +8856,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1057"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1058"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -79683,29 +79683,30 @@ async function sendTelegram(
    Telegram-only addition. Preserves V1051 scanner, Stripe,
    D1 subscriber mapping, payment grace and access enforcement.
    ========================================================= */
-function scheduleTelegramCommandCleanupV1053(env, ctx, chatId, commandMessageId, botReplyMessageId, delayMs = 60000) {
-  const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+async function scheduleTelegramCommandCleanupV1058(env, chatId, commandMessageId, botReplyMessageId, delayMs = 60000) {
   const targetChatId = String(chatId || "").trim();
   const ids = [commandMessageId, botReplyMessageId]
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value > 0);
-  if (!token || !targetChatId || ids.length === 0) return;
+  if (!targetChatId || ids.length === 0) return { success:false, skipped:true, reason:"NO_MESSAGES_V1058" };
+  if (!env?.TELEGRAM_CLEANUP_V1058) return { success:false, skipped:true, reason:"TELEGRAM_CLEANUP_BINDING_MISSING_V1058" };
 
-  const task = (async () => {
-    await new Promise((resolve) => setTimeout(resolve, Math.max(1000, Number(delayMs) || 60000)));
-    for (const messageId of ids) {
-      try {
-        await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
-          method:"POST",
-          headers:{"content-type":"application/json"},
-          body:JSON.stringify({ chat_id:targetChatId, message_id:messageId })
-        });
-      } catch (_) {}
-    }
-  })();
-
-  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(task);
-  else task.catch(() => {});
+  try {
+    const id = env.TELEGRAM_CLEANUP_V1058.idFromName("chainvanta-telegram-cleanup");
+    const stub = env.TELEGRAM_CLEANUP_V1058.get(id);
+    const response = await stub.fetch("https://telegram-cleanup.internal/enqueue", {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        chatId:targetChatId,
+        messageIds:ids,
+        deleteAt:Date.now()+Math.max(1000, Number(delayMs)||60000)
+      })
+    });
+    return { success:response.ok, status:response.status };
+  } catch (error) {
+    return { success:false, error:errorString(error) };
+  }
 }
 
 async function sendTelegramPrivateActionNoticeV1054(env, targetChatId, mode = "subscribe", needsStart = false) {
@@ -172676,8 +172677,8 @@ async function telegramCommandReplyV271(
     const noticeV1054 = await sendTelegramPrivateActionNoticeV1054(
       env, chatId, "manage", privateResultV1054?.success !== true
     );
-    scheduleTelegramCommandCleanupV1053(
-      env, null, chatId, message?.message_id, noticeV1054?.messageId, 60000
+    await scheduleTelegramCommandCleanupV1058(
+      env, chatId, message?.message_id, noticeV1054?.messageId, 60000
     );
     return {
       success:noticeV1054?.success===true,
@@ -172719,9 +172720,8 @@ async function telegramCommandReplyV271(
       "subscribe",
       privateResultV1054?.success !== true
     );
-    scheduleTelegramCommandCleanupV1053(
+    await scheduleTelegramCommandCleanupV1058(
       env,
-      null,
       chatId,
       message?.message_id,
       noticeV1054?.messageId,
@@ -193007,6 +193007,80 @@ async function relayScheduledScanV670() {
   };
 }
 
+
+/* =========================================================
+   V1058 — RELIABLE TELEGRAM PUBLIC-MESSAGE CLEANUP
+   Durable Object alarm deletes temporary public command/reply
+   pairs after ~60 seconds. Scanner/Stripe logic is unchanged.
+   ========================================================= */
+export class TelegramCleanupV1058 {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname !== "/enqueue" || request.method !== "POST") {
+      return new Response("Not found", { status:404 });
+    }
+
+    let payload = null;
+    try { payload = await request.json(); } catch (_) {}
+    const chatId = String(payload?.chatId || "").trim();
+    const messageIds = Array.isArray(payload?.messageIds)
+      ? payload.messageIds.map(Number).filter((v) => Number.isFinite(v) && v > 0)
+      : [];
+    const deleteAt = Math.max(Date.now()+1000, Number(payload?.deleteAt) || (Date.now()+60000));
+    if (!chatId || messageIds.length === 0) {
+      return Response.json({ success:false, reason:"INVALID_CLEANUP_PAYLOAD_V1058" }, { status:400 });
+    }
+
+    const queue = Array.isArray(await this.state.storage.get("queue"))
+      ? await this.state.storage.get("queue")
+      : [];
+    queue.push({ chatId, messageIds, deleteAt });
+    queue.sort((a,b) => Number(a.deleteAt)-Number(b.deleteAt));
+    await this.state.storage.put("queue", queue.slice(-200));
+
+    const currentAlarm = await this.state.storage.getAlarm();
+    const earliest = Number(queue[0]?.deleteAt) || deleteAt;
+    if (currentAlarm === null || earliest < Number(currentAlarm)) {
+      await this.state.storage.setAlarm(earliest);
+    }
+    return Response.json({ success:true, scheduledFor:deleteAt, messages:messageIds.length });
+  }
+
+  async alarm() {
+    const nowMs = Date.now();
+    const token = String(this.env?.TELEGRAM_BOT_TOKEN || "").trim();
+    const queue = Array.isArray(await this.state.storage.get("queue"))
+      ? await this.state.storage.get("queue")
+      : [];
+    const due = queue.filter((item) => Number(item?.deleteAt) <= nowMs + 1000);
+    const pending = queue.filter((item) => Number(item?.deleteAt) > nowMs + 1000);
+
+    if (token) {
+      for (const item of due) {
+        for (const messageId of (item.messageIds || [])) {
+          try {
+            await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+              method:"POST",
+              headers:{"content-type":"application/json"},
+              body:JSON.stringify({ chat_id:item.chatId, message_id:messageId })
+            });
+          } catch (_) {}
+        }
+      }
+    }
+
+    await this.state.storage.put("queue", pending);
+    if (pending.length > 0) {
+      pending.sort((a,b) => Number(a.deleteAt)-Number(b.deleteAt));
+      await this.state.storage.setAlarm(Math.max(Date.now()+1000, Number(pending[0].deleteAt)));
+    }
+  }
+}
 
 /* =========================================================
    CLOUDFLARE EXPORT
