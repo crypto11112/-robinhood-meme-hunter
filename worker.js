@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1045";
+const VERSION = "V1046";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171555,6 +171555,7 @@ function telegramHelpV271() {
     "<code>/expirycheck</code> — V1042 Premium expiry dry run; add 'simulate' to test after-expiry decision",
     "<code>/expiryenforce</code> — V1044 enforce genuinely expired Premium memberships; owner permanently exempt",
     "<code>/ownerprotection</code> — V1045 prove owner NEVER_REMOVE guards without Telegram action",
+    "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -172505,6 +172506,18 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
 
+
+  // V1046: inspect fixed per-invoice failed-payment grace state. Admin only.
+  if (parsed.command === "/paymentgrace") {
+    const replyV1046 = await paymentGraceAdminMessageV1046(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1046 = await sendTelegram(env, replyV1046, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1046?.success === true;
+      diagnosticV273.result = sentV1046?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1046?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
 
   // V1045: prove the owner exemption and defense-in-depth guard without Telegram mutation.
   if (parsed.command === "/ownerprotection") {
@@ -181744,7 +181757,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
     }
   } catch (_) {}
   if (!raw) return [
-    "🔬 <b>Stripe Lifecycle Trace — V1045</b>",
+    "🔬 <b>Stripe Lifecycle Trace — V1046</b>",
     "",
     "No V1040 subscription lifecycle event has been recorded yet.",
     "",
@@ -181758,7 +181771,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       return Number.isFinite(n)&&n>0 ? `${escapeHtml(new Date(n*1000).toISOString())} (${Math.trunc(n)})` : fmt(v);
     };
     return [
-      "🔬 <b>Stripe Lifecycle Trace — V1045</b>","",
+      "🔬 <b>Stripe Lifecycle Trace — V1046</b>","",
       `Recorded: <code>${fmt(t.recordedAt)}</code>`,
       `Event: <code>${fmt(t.eventType)}</code>`,
       `Stripe status: <b>${fmt(t.stripeStatus)}</b>`,
@@ -181776,7 +181789,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       "<i>Diagnostic only. No Telegram membership action is enabled.</i>"
     ].join("\n");
   } catch(error) {
-    return `🔬 <b>Stripe Lifecycle Trace — V1045</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
+    return `🔬 <b>Stripe Lifecycle Trace — V1046</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
   }
 }
 
@@ -181829,7 +181842,7 @@ async function ownerProtectionDiagnosticV1045(env) {
       ? "BLOCKED_BEFORE_TELEGRAM_API"
       : "NOT_BLOCKED";
   const lines=[
-    "🛡 <b>Owner Protection Diagnostic — V1045</b>","",
+    "🛡 <b>Owner Protection Diagnostic — V1046</b>","",
     `Owner Telegram ID: <code>${escapeHtml(ownerId)}</code>`,
     `Premium target: <code>${escapeHtml(premiumChatId||"UNCONFIGURED")}</code>`,
     `Enforcement decision: <b>${escapeHtml(enforcementDecision)}</b>`,
@@ -181843,10 +181856,10 @@ async function ownerProtectionDiagnosticV1045(env) {
 }
 
 async function enforceExpiredPremiumAdminV1043(env) {
-  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Enforcement — V1045</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Enforcement — V1046</b>\n\nD1 binding: MISSING";
   const nowSec=Math.floor(Date.now()/1000);
   const premiumChatId=String(env.TELEGRAM_PREMIUM_CHAT_ID||"").trim();
-  if(!premiumChatId) return "🧯 <b>Premium Expiry Enforcement — V1045</b>\n\nPremium chat binding: MISSING";
+  if(!premiumChatId) return "🧯 <b>Premium Expiry Enforcement — V1046</b>\n\nPremium chat binding: MISSING";
   try {
     await env.CHAINVANTA_DB.prepare(
       `CREATE TABLE IF NOT EXISTS premium_expiry_actions_v1043 (
@@ -181867,7 +181880,7 @@ async function enforceExpiredPremiumAdminV1043(env) {
          AND current_period_end <= ?
        ORDER BY current_period_end ASC LIMIT 20`
     ).bind(nowSec).all();
-    const lines=["🧯 <b>Premium Expiry Enforcement — V1045</b>","",
+    const lines=["🧯 <b>Premium Expiry Enforcement — V1046</b>","",
       `Real time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`,
       `Premium target: <code>${escapeHtml(premiumChatId)}</code>`,""];
     let removed=0, skipped=0, failed=0;
@@ -181932,12 +181945,12 @@ async function enforceExpiredPremiumAdminV1043(env) {
       "<i>Simulation mode is never accepted by this enforcement path.</i>");
     return lines.join("\n");
   } catch(error){
-    return `🧯 <b>Premium Expiry Enforcement — V1045</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
+    return `🧯 <b>Premium Expiry Enforcement — V1046</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
   }
 }
 
 async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry=false) {
-  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Dry Run — V1045</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Dry Run — V1046</b>\n\nD1 binding: MISSING";
   try {
     const realNowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181955,7 +181968,7 @@ async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry
         : realNowSec;
     const nowSec=simulatedNowSec;
     const lines=[
-      "🧯 <b>Premium Expiry Dry Run — V1045</b>","",
+      "🧯 <b>Premium Expiry Dry Run — V1046</b>","",
       `Mode: <b>${simulateAfterExpiry ? "SIMULATED AFTER-EXPIRY DRY RUN" : "DRY RUN ONLY"}</b> — no Telegram removal call can be made.`,"",
       `Real time: <code>${escapeHtml(new Date(realNowSec*1000).toISOString())}</code>`,
       ...(simulateAfterExpiry ? [`Simulated evaluation time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`] : []),""
@@ -181978,12 +181991,12 @@ async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry
     lines.push("",`Would remove now: <b>${wouldRemoveCount}</b>`,"<i>Telegram membership is unchanged.</i>");
     return lines.join("\n");
   } catch(error){
-    return `🧯 <b>Premium Expiry Dry Run — V1045</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧯 <b>Premium Expiry Dry Run — V1046</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
 async function accessExpiryAdminMessageV1036(env) {
-  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1045</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1046</b>\n\nD1 binding: MISSING";
   try {
     const nowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181991,7 +182004,7 @@ async function accessExpiryAdminMessageV1036(env) {
        FROM subscribers
        ORDER BY updated_at DESC LIMIT 25`
     ).all();
-    const lines=["🧪 <b>Premium Access Expiry — V1045</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1045.`,""];
+    const lines=["🧪 <b>Premium Access Expiry — V1046</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1046.`,""];
     for(const row of (rows?.results||[])){
       const user=row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
       const end=Number(row.current_period_end);
@@ -182003,7 +182016,148 @@ async function accessExpiryAdminMessageV1036(env) {
     if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
     return lines.join("\n");
   } catch(error){
-    return `🧪 <b>Premium Access Expiry — V1045</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧪 <b>Premium Access Expiry — V1046</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+  }
+}
+
+
+function stripeInvoiceSubscriptionIdV1046(invoice) {
+  return String(
+    invoice?.subscription ||
+    invoice?.parent?.subscription_details?.subscription ||
+    invoice?.lines?.data?.find?.((line)=>line?.parent?.subscription_item_details?.subscription)
+      ?.parent?.subscription_item_details?.subscription ||
+    ""
+  ).trim();
+}
+
+async function recordInvoicePaymentLifecycleV1046(env, event) {
+  if (!env?.CHAINVANTA_DB) return {ok:false,reason:"D1_NOT_CONFIGURED_V1046"};
+  const type=String(event?.type||"");
+  const invoice=event?.data?.object||{};
+  const invoiceId=String(invoice?.id||"").trim();
+  const customerId=String(invoice?.customer||"").trim();
+  const subscriptionId=stripeInvoiceSubscriptionIdV1046(invoice);
+  const nowSec=Math.floor(Date.now()/1000);
+  if(!invoiceId) return {ok:false,reason:"INVOICE_ID_MISSING_V1046"};
+
+  await env.CHAINVANTA_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS failed_payment_grace_v1046 (
+      invoice_id TEXT PRIMARY KEY,
+      telegram_user_id TEXT NOT NULL,
+      stripe_customer_id TEXT,
+      stripe_subscription_id TEXT,
+      grace_started_at INTEGER NOT NULL,
+      grace_until INTEGER NOT NULL,
+      resolved_at INTEGER,
+      status TEXT NOT NULL,
+      failure_events INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL
+    )
+  `).run();
+
+  let subscriber=null;
+  if(subscriptionId){
+    subscriber=await env.CHAINVANTA_DB.prepare(
+      `SELECT * FROM subscribers WHERE stripe_subscription_id=? LIMIT 1`
+    ).bind(subscriptionId).first();
+  }
+  if(!subscriber && customerId){
+    subscriber=await env.CHAINVANTA_DB.prepare(
+      `SELECT * FROM subscribers WHERE stripe_customer_id=? LIMIT 1`
+    ).bind(customerId).first();
+  }
+  if(!subscriber) return {ok:false,reason:"SUBSCRIBER_NOT_MAPPED_V1046",invoiceId,customerId,subscriptionId};
+
+  const uid=String(subscriber.telegram_user_id);
+  if(type==="invoice.payment_failed"){
+    const existing=await env.CHAINVANTA_DB.prepare(
+      `SELECT * FROM failed_payment_grace_v1046 WHERE invoice_id=? LIMIT 1`
+    ).bind(invoiceId).first();
+
+    // One invoice gets one fixed seven-day grace clock. Stripe retries cannot extend it.
+    const graceStarted=existing ? Number(existing.grace_started_at) : nowSec;
+    const graceUntil=existing ? Number(existing.grace_until) : nowSec + (7*24*60*60);
+    const failureEvents=existing ? Number(existing.failure_events||1)+1 : 1;
+
+    await env.CHAINVANTA_DB.prepare(`
+      INSERT INTO failed_payment_grace_v1046
+      (invoice_id,telegram_user_id,stripe_customer_id,stripe_subscription_id,
+       grace_started_at,grace_until,resolved_at,status,failure_events,updated_at)
+      VALUES (?,?,?,?,?,?,NULL,'OPEN',?,?)
+      ON CONFLICT(invoice_id) DO UPDATE SET
+        failure_events=excluded.failure_events,
+        updated_at=excluded.updated_at
+    `).bind(invoiceId,uid,customerId||null,subscriptionId||null,
+      graceStarted,graceUntil,failureEvents,nowSec).run();
+
+    // Preserve a scheduled cancellation if one already exists; otherwise enter payment grace.
+    if(String(subscriber.status)!=="CANCEL_SCHEDULED"){
+      await env.CHAINVANTA_DB.prepare(
+        `UPDATE subscribers SET status='PAYMENT_GRACE',grace_until=?,updated_at=? WHERE telegram_user_id=?`
+      ).bind(graceUntil,nowSec,uid).run();
+    }
+
+    return {
+      ok:true,action:existing?"GRACE_RETRY_NO_EXTENSION":"GRACE_STARTED",
+      invoiceId,telegramUserId:uid,graceStartedAt:graceStarted,graceUntil,
+      failureEvents,ownerExempt:uid===CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044
+    };
+  }
+
+  if(type==="invoice.paid"){
+    const grace=await env.CHAINVANTA_DB.prepare(
+      `SELECT * FROM failed_payment_grace_v1046 WHERE invoice_id=? LIMIT 1`
+    ).bind(invoiceId).first();
+
+    if(grace){
+      await env.CHAINVANTA_DB.prepare(
+        `UPDATE failed_payment_grace_v1046 SET status='RESOLVED',resolved_at=?,updated_at=? WHERE invoice_id=?`
+      ).bind(nowSec,nowSec,invoiceId).run();
+    }
+
+    // Successful payment restores ACTIVE unless a separate cancellation remains scheduled.
+    if(String(subscriber.status)==="PAYMENT_GRACE"){
+      await env.CHAINVANTA_DB.prepare(
+        `UPDATE subscribers SET status='ACTIVE',grace_until=NULL,updated_at=? WHERE telegram_user_id=?`
+      ).bind(nowSec,uid).run();
+    }
+    return {ok:true,action:grace?"GRACE_RESOLVED_PAID":"PAID_NO_OPEN_GRACE",invoiceId,telegramUserId:uid};
+  }
+
+  return {ok:false,reason:"UNSUPPORTED_INVOICE_EVENT_V1046"};
+}
+
+async function paymentGraceAdminMessageV1046(env) {
+  if(!env?.CHAINVANTA_DB) return "💳 <b>Payment Grace — V1046</b>\n\nD1 binding: MISSING";
+  try{
+    await env.CHAINVANTA_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS failed_payment_grace_v1046 (
+        invoice_id TEXT PRIMARY KEY, telegram_user_id TEXT NOT NULL,
+        stripe_customer_id TEXT, stripe_subscription_id TEXT,
+        grace_started_at INTEGER NOT NULL, grace_until INTEGER NOT NULL,
+        resolved_at INTEGER, status TEXT NOT NULL,
+        failure_events INTEGER NOT NULL DEFAULT 1, updated_at INTEGER NOT NULL
+      )
+    `).run();
+    const rows=await env.CHAINVANTA_DB.prepare(
+      `SELECT * FROM failed_payment_grace_v1046 ORDER BY updated_at DESC LIMIT 25`
+    ).all();
+    const nowSec=Math.floor(Date.now()/1000);
+    const lines=["💳 <b>Payment Grace — V1046</b>","",
+      "One failed invoice = one fixed 7-day grace period. Retry failures cannot extend it.",""];
+    for(const row of (rows?.results||[])){
+      const expired=Number(row.grace_until)<=nowSec;
+      const owner=String(row.telegram_user_id)===CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044;
+      lines.push(`<code>${escapeHtml(String(row.invoice_id))}</code> · <b>${escapeHtml(String(row.status))}</b>`);
+      lines.push(`↳ Telegram: <code>${escapeHtml(String(row.telegram_user_id))}</code>${owner?" · OWNER_EXEMPT":""}`);
+      lines.push(`↳ grace until: <code>${escapeHtml(new Date(Number(row.grace_until)*1000).toISOString())}</code> · expired: <b>${expired?"YES":"NO"}</b> · failure events: ${Number(row.failure_events||0)}`);
+    }
+    if(!(rows?.results||[]).length) lines.push("No failed-payment grace records yet.");
+    lines.push("","<i>V1046 records grace only. It does not remove Telegram members.</i>");
+    return lines.join("\n");
+  }catch(error){
+    return `💳 <b>Payment Grace — V1046</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,600))}`;
   }
 }
 
@@ -182075,6 +182229,14 @@ async function stripeWebhookV1030(request, env) {
     }
   }
 
+  let paymentGraceV1046 = null;
+  if (
+    selected &&
+    (eventType === "invoice.payment_failed" || eventType === "invoice.paid")
+  ) {
+    paymentGraceV1046 = await recordInvoicePaymentLifecycleV1046(env, event);
+  }
+
   let lifecycleV1036 = null;
   if (
     selected &&
@@ -182098,6 +182260,7 @@ async function stripeWebhookV1030(request, env) {
       eventType,
       subscriberMappingV1031,
       premiumInviteV1032,
+      paymentGraceV1046,
       lifecycleV1036,
       timestamp: now()
     },
