@@ -79682,6 +79682,98 @@ async function sendTelegram(
    Telegram-only addition. Preserves V1051 scanner, Stripe,
    D1 subscriber mapping, payment grace and access enforcement.
    ========================================================= */
+function scheduleTelegramCommandCleanupV1053(env, ctx, chatId, commandMessageId, botReplyMessageId, delayMs = 60000) {
+  const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+  const targetChatId = String(chatId || "").trim();
+  const ids = [commandMessageId, botReplyMessageId]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (!token || !targetChatId || ids.length === 0) return;
+
+  const task = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, Math.max(1000, Number(delayMs) || 60000)));
+    for (const messageId of ids) {
+      try {
+        await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({ chat_id:targetChatId, message_id:messageId })
+        });
+      } catch (_) {}
+    }
+  })();
+
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(task);
+  else task.catch(() => {});
+}
+
+async function sendTelegramPrivateActionNoticeV1054(env, targetChatId, mode = "subscribe", needsStart = false) {
+  const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+  const chatId = String(targetChatId || "").trim();
+  if (!token || !chatId) return { success:false, skipped:true, reason:"TELEGRAM_NOT_CONFIGURED_V1054" };
+
+  const isManage = mode === "manage";
+  const text = needsStart
+    ? (isManage
+        ? "📩 To manage your ChainVanta Premium subscription privately, tap below to start @ChainVantaBot."
+        : "📩 To continue with ChainVanta Premium privately, tap below to start @ChainVantaBot.")
+    : (isManage
+        ? "📩 Check your private messages — I’ve sent you the secure ChainVanta subscription management option."
+        : "📩 Check your private messages — I’ve sent you the ChainVanta Premium details.");
+
+  const payload = {
+    chat_id:chatId,
+    text,
+    disable_web_page_preview:true
+  };
+  if (needsStart) {
+    payload.reply_markup = {
+      inline_keyboard:[[
+        {
+          text:isManage ? "⚙️ Manage Premium" : "🚀 Start ChainVanta Premium",
+          url:`https://t.me/ChainVantaBot?start=${isManage ? "manage" : "subscribe"}`
+        }
+      ]]
+    };
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    return {
+      success:response.ok && data?.ok === true,
+      status:response.status,
+      messageId:Number(data?.result?.message_id || 0) || null,
+      data
+    };
+  } catch (error) {
+    return { success:false, reason:"TELEGRAM_PRIVATE_ACTION_NOTICE_FAILED_V1054", error:errorString(error) };
+  }
+}
+
+async function sendTelegramDirectTextV1054(env, targetChatId, text, replyMarkup = null) {
+  const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+  const chatId = String(targetChatId || "").trim();
+  if (!token || !chatId) return { success:false, skipped:true, reason:"TELEGRAM_NOT_CONFIGURED_V1054" };
+  const payload = { chat_id:chatId, text, parse_mode:"HTML", disable_web_page_preview:true };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    const data = await response.json().catch(() => ({}));
+    return { success:response.ok && data?.ok === true, status:response.status, messageId:Number(data?.result?.message_id || 0) || null, data };
+  } catch (error) {
+    return { success:false, reason:"TELEGRAM_DIRECT_SEND_FAILED_V1054", error:errorString(error) };
+  }
+}
+
 async function sendTelegramManageEntryV1052(env, targetChatId) {
   const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
   const chatId = String(targetChatId || "").trim();
@@ -79724,6 +79816,7 @@ async function sendTelegramManageEntryV1052(env, targetChatId) {
       success:response.ok && data?.ok === true,
       status:response.status,
       mode:"V1052_MANAGE_ENTRY_BUTTON",
+      messageId:Number(data?.result?.message_id || 0) || null,
       data
     };
   } catch (error) {
@@ -79777,6 +79870,7 @@ async function sendTelegramPremiumEntryV1052(env, targetChatId) {
       success:response.ok && data?.ok === true,
       status:response.status,
       mode:"V1052_PREMIUM_ENTRY_BUTTON",
+      messageId:Number(data?.result?.message_id || 0) || null,
       data
     };
   } catch (error) {
@@ -172565,20 +172659,31 @@ async function telegramCommandReplyV271(
   // V1052: /manage never exposes a Stripe portal URL in a group.
   // It routes to @ChainVantaBot, where the existing V1033 portal is created privately.
   if (["FREE", "PREMIUM"].includes(chatRoleV1025) && parsed?.command === "/manage") {
-    const sentManageV1052 = await sendTelegramManageEntryV1052(env, chatId);
-    if (diagnosticV273) {
-      diagnosticV273.replyAttempted = true;
-      diagnosticV273.replySuccess = sentManageV1052?.success === true;
-      diagnosticV273.result = sentManageV1052?.success === true
-        ? "PUBLIC_MANAGE_ENTRY_SENT_V1052"
-        : (sentManageV1052?.reason || "PUBLIC_MANAGE_ENTRY_FAILED_V1052");
+    const userIdV1054 = Number(message?.from?.id || 0);
+    let privateResultV1054 = { success:false };
+    if (userIdV1054 > 0) {
+      const portalV1054 = await createStripeCustomerPortalForTelegramV1033(env, userIdV1054);
+      if (portalV1054?.ok && portalV1054?.url) {
+        privateResultV1054 = await sendTelegramDirectTextV1054(
+          env,
+          userIdV1054,
+          "⚙️ <b>Manage ChainVanta Premium</b>\n\nUse the secure button below to manage your subscription, payment method or cancellation.",
+          { inline_keyboard:[[ { text:"⚙️ Manage Premium", url:portalV1054.url } ]] }
+        );
+      }
     }
+    const noticeV1054 = await sendTelegramPrivateActionNoticeV1054(
+      env, chatId, "manage", privateResultV1054?.success !== true
+    );
+    scheduleTelegramCommandCleanupV1053(
+      env, null, chatId, message?.message_id, noticeV1054?.messageId, 60000
+    );
     return {
-      success:sentManageV1052?.success===true,
+      success:noticeV1054?.success===true,
       ignored:false,
       command:"/manage",
       scannerBudgetConsumed:false,
-      externalProviderRequests:0,
+      externalProviderRequests:privateResultV1054?.success===true ? 1 : 0,
       stateWrites:0
     };
   }
@@ -172586,20 +172691,47 @@ async function telegramCommandReplyV271(
   // V1052: /subscribe and /premium in the Free destination show a one-tap private Premium entry.
   // The button opens @ChainVantaBot with /start subscribe; Stripe checkout remains private-DM-only.
   if (chatRoleV1025 === "FREE" && ["/subscribe", "/premium"].includes(parsed?.command)) {
-    const sentV1052 = await sendTelegramPremiumEntryV1052(env, chatId);
-    if (diagnosticV273) {
-      diagnosticV273.replyAttempted = true;
-      diagnosticV273.replySuccess = sentV1052?.success === true;
-      diagnosticV273.result = sentV1052?.success === true
-        ? "PUBLIC_PREMIUM_ENTRY_SENT_V1052"
-        : (sentV1052?.reason || "PUBLIC_PREMIUM_ENTRY_FAILED_V1052");
+    const userIdV1054 = Number(message?.from?.id || 0);
+    const usernameV1054 = String(message?.from?.username || "").trim();
+    let privateResultV1054 = { success:false };
+
+    if (userIdV1054 > 0) {
+      const checkoutV1054 = await createStripeCheckoutV1031(
+        env,
+        userIdV1054,
+        usernameV1054,
+        "https://robinhood-meme-hunter.johnd1987.workers.dev/telegram-webhook"
+      );
+      if (checkoutV1054?.ok && checkoutV1054?.url) {
+        privateResultV1054 = await sendTelegramDirectTextV1054(
+          env,
+          userIdV1054,
+          `⚡ <b>ChainVanta Premium</b>\n\n£49/month.\n\nTap below to subscribe securely. After successful payment, your personal ChainVanta Premium invite will be sent here automatically.`,
+          { inline_keyboard:[[ { text:"🚀 Subscribe — £49/month", url:checkoutV1054.url } ]] }
+        );
+      }
     }
+
+    const noticeV1054 = await sendTelegramPrivateActionNoticeV1054(
+      env,
+      chatId,
+      "subscribe",
+      privateResultV1054?.success !== true
+    );
+    scheduleTelegramCommandCleanupV1053(
+      env,
+      null,
+      chatId,
+      message?.message_id,
+      noticeV1054?.messageId,
+      60000
+    );
     return {
-      success:sentV1052?.success===true,
+      success:noticeV1054?.success===true,
       ignored:false,
-      command:parsed.command,
+      command:parsed?.command,
       scannerBudgetConsumed:false,
-      externalProviderRequests:0,
+      externalProviderRequests:privateResultV1054?.success===true ? 1 : 0,
       stateWrites:0
     };
   }
