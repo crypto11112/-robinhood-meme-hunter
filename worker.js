@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1047";
+const VERSION = "V1048";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -172508,6 +172508,18 @@ async function telegramCommandReplyV271(
 
 
 
+  // V1048: deterministic access-state branch simulation. Admin only; zero D1 writes and zero Telegram membership mutation.
+  if (parsed.command === "/accessstatesim") {
+    const replyV1048 = premiumAccessStateSimulationMessageV1048();
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1048 = await sendTelegram(env, replyV1048, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1048?.success === true;
+      diagnosticV273.result = sentV1048?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1048?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
   // V1047: authoritative Premium access-state diagnostic. Admin only; zero Telegram membership mutation.
   if (parsed.command === "/accessstate") {
     const replyV1047 = await premiumAccessStateAdminMessageV1047(env);
@@ -182034,6 +182046,66 @@ async function accessExpiryAdminMessageV1036(env) {
 }
 
 
+function premiumAccessStateDecisionV1048({uid,status,currentPeriodEnd,graceUntil}, nowSec) {
+  const normalizedStatus=String(status||"UNKNOWN").toUpperCase();
+  const owner=String(uid||"").trim()===CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044;
+  const end=Number(currentPeriodEnd);
+  const validEnd=Number.isFinite(end)&&end>0;
+  const paidThroughFuture=validEnd&&end>nowSec;
+  const grace=Number(graceUntil);
+  const validGrace=Number.isFinite(grace)&&grace>0;
+  const graceActive=validGrace&&grace>nowSec;
+  const graceExpired=validGrace&&grace<=nowSec;
+
+  if(owner) return {decision:"OWNER_EXEMPT_NEVER_REMOVE",reason:"Absolute owner exemption overrides every subscription/payment state."};
+  if((normalizedStatus==="PAYMENT_GRACE" || normalizedStatus==="PAYMENT_ATTENTION") && graceActive)
+    return {decision:"KEEP_PAYMENT_GRACE",reason:"Failed-payment grace is still inside its fixed seven-day window."};
+  if((normalizedStatus==="PAYMENT_GRACE" || normalizedStatus==="PAYMENT_ATTENTION") && graceExpired)
+    return {decision:"REMOVE_ELIGIBLE_GRACE_EXPIRED",reason:"The fixed failed-payment grace deadline has passed."};
+  if(normalizedStatus==="CANCEL_SCHEDULED" && paidThroughFuture)
+    return {decision:"KEEP_PAID_THROUGH",reason:"Cancellation is scheduled, but paid Premium access has not expired."};
+  if(normalizedStatus==="CANCEL_SCHEDULED" && validEnd && end<=nowSec)
+    return {decision:"REMOVE_ELIGIBLE_EXPIRED",reason:"Scheduled cancellation has reached its paid-through/end time."};
+  if(normalizedStatus==="ENDED")
+    return {decision:"REMOVE_ELIGIBLE_EXPIRED",reason:"Subscription lifecycle is ended."};
+  if(normalizedStatus==="ACTIVE" || normalizedStatus==="TRIALING")
+    return {decision:"KEEP_ACTIVE",reason:"Subscription is active."};
+  return {decision:"ACCESS_REVIEW_REQUIRED",reason:"No automatic removal decision is proven by the stored state."};
+}
+
+function premiumAccessStateSimulationMessageV1048() {
+  const nowSec=Math.floor(Date.now()/1000);
+  const day=24*60*60;
+  const cases=[
+    {name:"Active subscriber",uid:"104800001",status:"ACTIVE",currentPeriodEnd:nowSec+30*day,graceUntil:null,expected:"KEEP_ACTIVE"},
+    {name:"Cancelled but paid through",uid:"104800002",status:"CANCEL_SCHEDULED",currentPeriodEnd:nowSec+30*day,graceUntil:null,expected:"KEEP_PAID_THROUGH"},
+    {name:"Failed payment inside grace",uid:"104800003",status:"PAYMENT_GRACE",currentPeriodEnd:nowSec+30*day,graceUntil:nowSec+3*day,expected:"KEEP_PAYMENT_GRACE"},
+    {name:"Failed payment grace expired",uid:"104800004",status:"PAYMENT_GRACE",currentPeriodEnd:nowSec-1,graceUntil:nowSec-1,expected:"REMOVE_ELIGIBLE_GRACE_EXPIRED"},
+    {name:"Subscription expired",uid:"104800005",status:"CANCEL_SCHEDULED",currentPeriodEnd:nowSec-1,graceUntil:null,expected:"REMOVE_ELIGIBLE_EXPIRED"},
+    {name:"Owner override",uid:CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044,status:"ENDED",currentPeriodEnd:nowSec-30*day,graceUntil:nowSec-20*day,expected:"OWNER_EXEMPT_NEVER_REMOVE"}
+  ];
+  const lines=[
+    "🧪 <b>Premium Access State Simulation — V1048</b>","",
+    "Mode: <b>PURE SIMULATION</b> — no Stripe changes, no D1 writes and no Telegram membership calls.",
+    `Evaluation time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`,""
+  ];
+  let passed=0;
+  for(const c of cases){
+    const result=premiumAccessStateDecisionV1048(c,nowSec);
+    const ok=result.decision===c.expected;
+    if(ok) passed++;
+    lines.push(`${ok?"✅":"❌"} ${escapeHtml(c.name)}`);
+    lines.push(`↳ expected: <b>${escapeHtml(c.expected)}</b>`);
+    lines.push(`↳ actual: <b>${escapeHtml(result.decision)}</b>`);
+  }
+  lines.push("",`Branch tests passed: <b>${passed}/${cases.length}</b>`,
+    `<b>Overall: ${passed===cases.length?"PASS":"FAIL"}</b>`,
+    "D1 writes: <b>0</b>",
+    "Telegram membership API calls: <b>0</b>",
+    "<i>V1048 does not enforce removal.</i>");
+  return lines.join("\n");
+}
+
 async function premiumAccessStateAdminMessageV1047(env) {
   if (!env?.CHAINVANTA_DB) return "🔐 <b>Premium Access State — V1047</b>\n\nD1 binding: MISSING";
   const nowSec=Math.floor(Date.now()/1000);
@@ -182081,30 +182153,11 @@ async function premiumAccessStateAdminMessageV1047(env) {
       const graceActive=validGrace&&graceUntil>nowSec;
       const graceExpired=validGrace&&graceUntil<=nowSec;
 
-      let decision="ACCESS_REVIEW_REQUIRED";
-      let reason="No automatic removal decision is proven by the stored state.";
-      if(owner){
-        decision="OWNER_EXEMPT_NEVER_REMOVE";
-        reason="Absolute owner exemption overrides every subscription/payment state.";
-      } else if((status==="PAYMENT_GRACE" || status==="PAYMENT_ATTENTION") && graceActive){
-        decision="KEEP_PAYMENT_GRACE";
-        reason="Failed-payment grace is still inside its fixed seven-day window.";
-      } else if((status==="PAYMENT_GRACE" || status==="PAYMENT_ATTENTION") && graceExpired){
-        decision="REMOVE_ELIGIBLE_GRACE_EXPIRED";
-        reason="The fixed failed-payment grace deadline has passed.";
-      } else if(status==="CANCEL_SCHEDULED" && paidThroughFuture){
-        decision="KEEP_PAID_THROUGH";
-        reason="Cancellation is scheduled, but paid Premium access has not expired.";
-      } else if(status==="CANCEL_SCHEDULED" && validEnd && end<=nowSec){
-        decision="REMOVE_ELIGIBLE_EXPIRED";
-        reason="Scheduled cancellation has reached its paid-through/end time.";
-      } else if(status==="ENDED"){
-        decision="REMOVE_ELIGIBLE_EXPIRED";
-        reason="Subscription lifecycle is ended.";
-      } else if(status==="ACTIVE" || status==="TRIALING"){
-        decision="KEEP_ACTIVE";
-        reason="Subscription is active.";
-      }
+      const evaluatedV1048=premiumAccessStateDecisionV1048({
+        uid,status,currentPeriodEnd:end,graceUntil:validGrace?graceUntil:null
+      },nowSec);
+      const decision=evaluatedV1048.decision;
+      const reason=evaluatedV1048.reason;
 
       counts[decision]=(counts[decision]||0)+1;
       const user=row.telegram_username?`@${escapeHtml(String(row.telegram_username))}`:escapeHtml(uid||"UNKNOWN");
