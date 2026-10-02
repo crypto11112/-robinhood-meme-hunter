@@ -1,7 +1,7 @@
 /**
- * ChainVanta — V1059
- * BITQUERY USAGE METER DIAGNOSTIC
- * Builds directly from confirmed-working V1058.
+ * ChainVanta — V1060
+ * BITQUERY OAUTH + ROBINHOOD CHAIN DIAGNOSTIC
+ * Builds directly from confirmed-working V1059.
  * Adds a manual/read-only GET /bitquery-usage endpoint backed by Bitquery's account usage API.
  * Uses a dedicated BITQUERY_USAGE_TOKEN secret; never returns or logs credentials.
  * Reports trial status, limits, usage, percentages and budget-health warnings.
@@ -8865,7 +8865,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1059"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1060"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -183169,6 +183169,123 @@ async function bitqueryUsageMeterV1059(env) {
   };
 }
 
+
+/* ============================================================
+   V1060 — BITQUERY OAUTH + ROBINHOOD CHAIN DIAGNOSTIC
+   ============================================================
+   - GET /bitquery-oauth-test only.
+   - Uses BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET.
+   - Exchanges credentials for a short-lived OAuth bearer token.
+   - Runs one tiny realtime Robinhood Chain GraphQL query.
+   - Never returns/logs credentials or the bearer token.
+   - Read-only: no scanner, scoring, provider-routing, Telegram, Stripe,
+     D1, KV or Durable Object mutation.
+*/
+const BITQUERY_OAUTH_TOKEN_URL_V1060 = "https://oauth2.bitquery.io/oauth2/token";
+const BITQUERY_GRAPHQL_URL_V1060 = "https://streaming.bitquery.io/graphql";
+
+async function bitqueryOAuthRobinhoodDiagnosticV1060(env) {
+  const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
+  const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
+  const configured = Boolean(clientId && clientSecret);
+  if (!configured) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:"BITQUERY_OAUTH_ROBINHOOD_V1060", success:false, readOnly:true,
+      configured:false, status:"BITQUERY_OAUTH_SECRETS_NOT_CONFIGURED_V1060",
+      requiredSecrets:["BITQUERY_CLIENT_ID","BITQUERY_CLIENT_SECRET"],
+      externalRequestsUsed:0, scannerMutated:false, timestamp:now()
+    };
+  }
+
+  const startedAt = Date.now();
+  let oauthResponse, oauthPayload;
+  try {
+    const body = new URLSearchParams({
+      grant_type:"client_credentials", client_id:clientId,
+      client_secret:clientSecret, scope:"api"
+    });
+    oauthResponse = await fetch(BITQUERY_OAUTH_TOKEN_URL_V1060, {
+      method:"POST",
+      headers:{"content-type":"application/x-www-form-urlencoded","accept":"application/json"},
+      body:body.toString()
+    });
+    const txt = await oauthResponse.text();
+    try { oauthPayload = txt ? JSON.parse(txt) : null; } catch (_) { oauthPayload = null; }
+  } catch (error) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_OAUTH_ROBINHOOD_V1060",
+      success:false, readOnly:true, configured:true, status:"BITQUERY_OAUTH_FETCH_FAILED_V1060",
+      error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240),
+      externalRequestsUsed:1, scannerMutated:false, elapsedMs:Date.now()-startedAt, timestamp:now()
+    };
+  }
+
+  const accessToken = String(oauthPayload?.access_token || "").trim();
+  if (!oauthResponse.ok || !accessToken) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_OAUTH_ROBINHOOD_V1060",
+      success:false, readOnly:true, configured:true,
+      status:`BITQUERY_OAUTH_HTTP_${oauthResponse.status}_V1060`,
+      oauthHttpStatus:oauthResponse.status,
+      providerMessage:oauthPayload?.error_description || oauthPayload?.error || null,
+      tokenReturned:false, externalRequestsUsed:1, scannerMutated:false,
+      elapsedMs:Date.now()-startedAt, timestamp:now()
+    };
+  }
+
+  const query = `
+    {
+      EVM(network: robinhood, dataset: realtime) {
+        Blocks(limit: {count: 1}, orderBy: {descending: Block_Time}) {
+          Block { Number Time TxCount }
+        }
+      }
+    }
+  `;
+
+  let gqlResponse, gqlPayload;
+  try {
+    gqlResponse = await fetch(BITQUERY_GRAPHQL_URL_V1060, {
+      method:"POST",
+      headers:{
+        "content-type":"application/json", "accept":"application/json",
+        "authorization":`Bearer ${accessToken}`
+      },
+      body:JSON.stringify({query})
+    });
+    const txt = await gqlResponse.text();
+    try { gqlPayload = txt ? JSON.parse(txt) : null; } catch (_) { gqlPayload = null; }
+  } catch (error) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_OAUTH_ROBINHOOD_V1060",
+      success:false, readOnly:true, configured:true, status:"BITQUERY_GRAPHQL_FETCH_FAILED_V1060",
+      oauthHttpStatus:oauthResponse.status, tokenReturned:true,
+      oauthExpiresInSeconds:Number(oauthPayload?.expires_in || 0),
+      error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240),
+      externalRequestsUsed:2, scannerMutated:false, elapsedMs:Date.now()-startedAt, timestamp:now()
+    };
+  }
+
+  const errors = Array.isArray(gqlPayload?.errors)
+    ? gqlPayload.errors.map(x => String(x?.message || "GRAPHQL_ERROR")).slice(0,5) : [];
+  const rows = Array.isArray(gqlPayload?.data?.EVM?.Blocks) ? gqlPayload.data.EVM.Blocks : [];
+  const block = rows[0]?.Block || null;
+  const success = gqlResponse.ok && errors.length === 0 && Boolean(block);
+
+  return {
+    agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_OAUTH_ROBINHOOD_V1060",
+    success, readOnly:true, configured:true,
+    status:success ? "BITQUERY_ROBINHOOD_OK_V1060" : (errors.length ? "BITQUERY_GRAPHQL_ERROR_V1060" : `BITQUERY_GRAPHQL_HTTP_${gqlResponse.status}_V1060`),
+    oauth:{httpStatus:oauthResponse.status, tokenReturned:true, expiresInSeconds:Number(oauthPayload?.expires_in || 0), scope:oauthPayload?.scope || null},
+    graphql:{httpStatus:gqlResponse.status, errors, rowCount:rows.length},
+    robinhood:{network:"robinhood", dataset:"realtime", latestBlock:block?.Number ?? null, latestTime:block?.Time ?? null, txCount:block?.TxCount ?? null},
+    externalRequestsUsed:2, scannerMutated:false,
+    note:"Diagnostic only. No Bitquery result is used by the live scanner.",
+    elapsedMs:Date.now()-startedAt, timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -183355,6 +183472,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryUsageMeterV1059(env)
+    );
+  }
+
+
+  if (
+    path ===
+      "/bitquery-oauth-test"
+  ) {
+    return jsonResponse(
+      await bitqueryOAuthRobinhoodDiagnosticV1060(env)
     );
   }
 
@@ -184921,6 +185048,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         "/stripe-webhook",
         "/health",
         "/bitquery-usage",
+        "/bitquery-oauth-test",
         "/bitquery-http-test",
         "/bitquery-http-result",
         "/rpc-test",
