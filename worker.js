@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1049";
+const VERSION = "V1050";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -172520,6 +172520,18 @@ async function telegramCommandReplyV271(
     return {success:sentV1049?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
   }
 
+  // V1050: read-only diagnostic for the last automatic Premium access enforcement run.
+  if (parsed.command === "/accessautorun") {
+    const replyV1050 = await premiumAccessAutoRunStatusV1050(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1050 = await sendTelegram(env, replyV1050, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1050?.success === true;
+      diagnosticV273.result = sentV1050?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1050?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
   // V1048: deterministic access-state branch simulation. Admin only; zero D1 writes and zero Telegram membership mutation.
   if (parsed.command === "/accessstatesim") {
     const replyV1048 = premiumAccessStateSimulationMessageV1048();
@@ -182329,6 +182341,66 @@ async function premiumAccessEnforcementAdminMessageV1049(env) {
   } catch(error){
     return `🔒 <b>Premium Access Enforcement — V1049</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
   }
+}
+
+
+async function premiumAccessAutoRunEnsureV1050(env) {
+  if(!env?.CHAINVANTA_DB) return {ok:false,reason:"D1_BINDING_MISSING"};
+  await env.CHAINVANTA_DB.prepare(`
+    CREATE TABLE IF NOT EXISTS premium_access_auto_runs_v1050 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      status TEXT NOT NULL,
+      summary TEXT
+    )
+  `).run();
+  return {ok:true};
+}
+
+async function premiumAccessScheduledV1050(env) {
+  const nowSec=Math.floor(Date.now()/1000);
+  try {
+    const ready=await premiumAccessAutoRunEnsureV1050(env);
+    if(!ready.ok) return ready;
+    const last=await env.CHAINVANTA_DB.prepare(
+      `SELECT started_at,status FROM premium_access_auto_runs_v1050 ORDER BY id DESC LIMIT 1`
+    ).first();
+    const lastStarted=Number(last?.started_at||0);
+    if(lastStarted>0 && (nowSec-lastStarted)<3600) return {ok:true,skipped:true,reason:"HOURLY_THROTTLE_ACTIVE",lastStarted};
+
+    const started=await env.CHAINVANTA_DB.prepare(
+      `INSERT INTO premium_access_auto_runs_v1050 (started_at,status,summary) VALUES (?,?,?)`
+    ).bind(nowSec,"RUNNING","V1050 automatic enforcement started").run();
+    const runId=Number(started?.meta?.last_row_id||0);
+    const summary=await premiumAccessEnforcementAdminMessageV1049(env);
+    const completed=Math.floor(Date.now()/1000);
+    if(runId>0) await env.CHAINVANTA_DB.prepare(
+      `UPDATE premium_access_auto_runs_v1050 SET completed_at=?,status=?,summary=? WHERE id=?`
+    ).bind(completed,"COMPLETED",String(summary||"").slice(0,7000),runId).run();
+    return {ok:true,runId,completedAt:completed};
+  } catch(error) {
+    try {
+      await premiumAccessAutoRunEnsureV1050(env);
+      await env.CHAINVANTA_DB.prepare(
+        `INSERT INTO premium_access_auto_runs_v1050 (started_at,completed_at,status,summary) VALUES (?,?,?,?)`
+      ).bind(nowSec,Math.floor(Date.now()/1000),"FAILED",errorString(error).slice(0,1500)).run();
+    } catch(_) {}
+    return {ok:false,reason:"AUTO_ENFORCEMENT_FAILED",error:errorString(error)};
+  }
+}
+
+async function premiumAccessAutoRunStatusV1050(env) {
+  if(!env?.CHAINVANTA_DB) return "⏱ <b>Premium Auto Enforcement — V1050</b>\n\nD1 binding: MISSING";
+  try {
+    await premiumAccessAutoRunEnsureV1050(env);
+    const row=await env.CHAINVANTA_DB.prepare(
+      `SELECT id,started_at,completed_at,status,summary FROM premium_access_auto_runs_v1050 ORDER BY id DESC LIMIT 1`
+    ).first();
+    if(!row) return "⏱ <b>Premium Auto Enforcement — V1050</b>\n\nNo automatic enforcement run recorded yet.\n\n<i>V1050 uses the existing Worker scheduled event and throttles Premium enforcement to at most once per hour.</i>";
+    const started=Number(row.started_at||0), completed=Number(row.completed_at||0);
+    return ["⏱ <b>Premium Auto Enforcement — V1050</b>","",`Run ID: <b>${escapeHtml(String(row.id||"?"))}</b>`,`Status: <b>${escapeHtml(String(row.status||"UNKNOWN"))}</b>`,`Started: <code>${escapeHtml(started?new Date(started*1000).toISOString():"UNKNOWN")}</code>`,`Completed: <code>${escapeHtml(completed?new Date(completed*1000).toISOString():"NOT YET")}</code>`,"","Last enforcement summary:",String(row.summary||"No summary recorded."),"","<i>Automatic enforcement reuses the proven V1049 enforcement path and V1048 decision engine.</i>"].join("\n");
+  } catch(error) { return `⏱ <b>Premium Auto Enforcement — V1050</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`; }
 }
 
 function stripeInvoiceSubscriptionIdV1046(invoice) {
@@ -192650,6 +192722,11 @@ export default {
         "/ensure",
         "POST"
       )
+    );
+
+    // V1050: independent Premium enforcement; D1 throttles it to at most one run per hour.
+    ctx.waitUntil(
+      premiumAccessScheduledV1050(env)
     );
   }
 };
