@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1046";
+const VERSION = "V1047";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -172507,6 +172507,19 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyze";
 
 
+
+  // V1047: authoritative Premium access-state diagnostic. Admin only; zero Telegram membership mutation.
+  if (parsed.command === "/accessstate") {
+    const replyV1047 = await premiumAccessStateAdminMessageV1047(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1047 = await sendTelegram(env, replyV1047, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1047?.success === true;
+      diagnosticV273.result = sentV1047?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1047?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
   // V1046: inspect fixed per-invoice failed-payment grace state. Admin only.
   if (parsed.command === "/paymentgrace") {
     const replyV1046 = await paymentGraceAdminMessageV1046(env);
@@ -182020,6 +182033,101 @@ async function accessExpiryAdminMessageV1036(env) {
   }
 }
 
+
+async function premiumAccessStateAdminMessageV1047(env) {
+  if (!env?.CHAINVANTA_DB) return "🔐 <b>Premium Access State — V1047</b>\n\nD1 binding: MISSING";
+  const nowSec=Math.floor(Date.now()/1000);
+  try {
+    const rows=await env.CHAINVANTA_DB.prepare(
+      `SELECT telegram_user_id,telegram_username,status,current_period_end,cancel_at_period_end,grace_until,updated_at
+       FROM subscribers ORDER BY updated_at DESC LIMIT 50`
+    ).all();
+
+    let graceTableAvailable=true;
+    try {
+      await env.CHAINVANTA_DB.prepare(`SELECT invoice_id FROM failed_payment_grace_v1046 LIMIT 1`).all();
+    } catch (_) {
+      graceTableAvailable=false;
+    }
+
+    const lines=[
+      "🔐 <b>Premium Access State — V1047</b>","",
+      "Mode: <b>DIAGNOSTIC ONLY</b> — this command cannot remove, ban or unban anyone.",
+      `Evaluation time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`,""
+    ];
+    const counts={};
+
+    for(const row of (rows?.results||[])){
+      const uid=String(row.telegram_user_id||"").trim();
+      const status=String(row.status||"UNKNOWN").toUpperCase();
+      const owner=uid===CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044;
+      const end=Number(row.current_period_end);
+      const validEnd=Number.isFinite(end)&&end>0;
+      const paidThroughFuture=validEnd&&end>nowSec;
+
+      let grace=null;
+      if(graceTableAvailable && uid){
+        try {
+          grace=await env.CHAINVANTA_DB.prepare(
+            `SELECT invoice_id,grace_started_at,grace_until,status,failure_events
+             FROM failed_payment_grace_v1046
+             WHERE telegram_user_id=? AND status='OPEN'
+             ORDER BY grace_started_at ASC LIMIT 1`
+          ).bind(uid).first();
+        } catch (_) {}
+      }
+      const graceUntil=Number(grace?.grace_until ?? row.grace_until);
+      const validGrace=Number.isFinite(graceUntil)&&graceUntil>0;
+      const graceActive=validGrace&&graceUntil>nowSec;
+      const graceExpired=validGrace&&graceUntil<=nowSec;
+
+      let decision="ACCESS_REVIEW_REQUIRED";
+      let reason="No automatic removal decision is proven by the stored state.";
+      if(owner){
+        decision="OWNER_EXEMPT_NEVER_REMOVE";
+        reason="Absolute owner exemption overrides every subscription/payment state.";
+      } else if((status==="PAYMENT_GRACE" || status==="PAYMENT_ATTENTION") && graceActive){
+        decision="KEEP_PAYMENT_GRACE";
+        reason="Failed-payment grace is still inside its fixed seven-day window.";
+      } else if((status==="PAYMENT_GRACE" || status==="PAYMENT_ATTENTION") && graceExpired){
+        decision="REMOVE_ELIGIBLE_GRACE_EXPIRED";
+        reason="The fixed failed-payment grace deadline has passed.";
+      } else if(status==="CANCEL_SCHEDULED" && paidThroughFuture){
+        decision="KEEP_PAID_THROUGH";
+        reason="Cancellation is scheduled, but paid Premium access has not expired.";
+      } else if(status==="CANCEL_SCHEDULED" && validEnd && end<=nowSec){
+        decision="REMOVE_ELIGIBLE_EXPIRED";
+        reason="Scheduled cancellation has reached its paid-through/end time.";
+      } else if(status==="ENDED"){
+        decision="REMOVE_ELIGIBLE_EXPIRED";
+        reason="Subscription lifecycle is ended.";
+      } else if(status==="ACTIVE" || status==="TRIALING"){
+        decision="KEEP_ACTIVE";
+        reason="Subscription is active.";
+      }
+
+      counts[decision]=(counts[decision]||0)+1;
+      const user=row.telegram_username?`@${escapeHtml(String(row.telegram_username))}`:escapeHtml(uid||"UNKNOWN");
+      lines.push(`${user} · <b>${escapeHtml(status)}</b>`);
+      lines.push(`↳ decision: <b>${escapeHtml(decision)}</b>`);
+      lines.push(`↳ paid-through/end: <code>${validEnd?escapeHtml(new Date(end*1000).toISOString()):"UNVERIFIED"}</code>`);
+      if(validGrace){
+        lines.push(`↳ payment grace until: <code>${escapeHtml(new Date(graceUntil*1000).toISOString())}</code> · ${graceActive?"ACTIVE":"EXPIRED"}`);
+      }
+      lines.push(`↳ ${escapeHtml(reason)}`);
+    }
+
+    if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
+    lines.push("","<b>Decision totals</b>");
+    for(const [decision,count] of Object.entries(counts)) lines.push(`${escapeHtml(decision)}: <b>${count}</b>`);
+    lines.push("",`Grace table readable: <b>${graceTableAvailable?"YES":"NO"}</b>`,
+      "<b>Telegram membership API calls: 0</b>",
+      "<i>V1047 only evaluates access state. It does not enforce removal.</i>");
+    return lines.join("\n");
+  } catch(error){
+    return `🔐 <b>Premium Access State — V1047</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
+  }
+}
 
 function stripeInvoiceSubscriptionIdV1046(invoice) {
   return String(
