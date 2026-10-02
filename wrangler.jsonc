@@ -16,6 +16,10 @@
       {
         "name": "SCAN_SCHEDULER_V673",
         "class_name": "ScanSchedulerV673"
+      },
+      {
+        "name": "TELEGRAM_CLEANUP_V1058",
+        "class_name": "TelegramCleanupV1058"
       }
     ]
   },
@@ -30,6 +34,12 @@
       "tag": "v673-scan-scheduler-1",
       "new_sqlite_classes": [
         "ScanSchedulerV673"
+      ]
+    },
+    {
+      "tag": "v1058-telegram-cleanup-1",
+      "new_sqlite_classes": [
+        "TelegramCleanupV1058"
       ]
     }
   ]
