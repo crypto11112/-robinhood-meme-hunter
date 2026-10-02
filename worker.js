@@ -1,14 +1,15 @@
 /**
- * ChainVanta — V1063
- * BITQUERY TRANSACTION-LEVEL ECONOMIC FLOW RECONSTRUCTION DIAGNOSTIC
- * Builds directly from confirmed-working V1062.
- * Preserves /bitquery-usage, /bitquery-oauth-test, /bitquery-swaps and
- * /bitquery-swaps-normalized unchanged.
- * Adds GET /bitquery-swaps-economic?token=0x...&limit=25 for a manual/read-only
- * transaction-level economic-flow reconstruction over Bitquery Robinhood trade rows.
- * Same-direction multi-pool legs are aggregated as one routed economic transaction;
- * near-balanced opposite-direction cycles are classified as ARBITRAGE and excluded
- * from directional BUY/SELL flow. Ambiguous mixed-direction transactions remain UNKNOWN.
+ * ChainVanta — V1064
+ * BITQUERY BOUNDARY-SAFE TRANSACTION COMPLETION DIAGNOSTIC
+ * Builds directly from confirmed-working V1063.
+ * Preserves V1059-V1063 Bitquery diagnostics unchanged.
+ * Adds GET /bitquery-swaps-complete?token=0x...&limit=25.
+ * The route first takes the proven V1061 recent-row sample, identifies the oldest/boundary
+ * block represented in that sample, then makes one completion query for every transaction
+ * hash from that boundary block so a row-limit cut cannot silently leave a partial routed tx.
+ * It replaces boundary rows with the completed rows before running the V1063 economic-flow
+ * reconstruction. Completion is explicitly NOT authoritative when the completion query hits
+ * its safety cap or fails to return every requested boundary hash. Diagnostic/read-only only.
  * Uses BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET and never returns/logs credentials.
  * Makes no scanner, scoring, provider-routing, Telegram-call, Stripe, D1, KV or Durable Object changes.
  */
@@ -8870,7 +8871,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1063"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1064"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -183878,6 +183879,226 @@ async function bitqueryRobinhoodEconomicFlowDiagnosticV1063(env, url) {
   };
 }
 
+
+/* ============================================================
+   V1064 — BITQUERY BOUNDARY-SAFE TRANSACTION COMPLETION
+   ============================================================
+   - GET /bitquery-swaps-complete?token=0x...&limit=25 only.
+   - Uses the proven V1061 sample first.
+   - Identifies every transaction hash represented in the oldest sampled block.
+   - Fetches all token-centric trade rows for those boundary transaction hashes in
+     one bounded completion query, then replaces the partial boundary rows.
+   - Only claims boundaryComplete=true when every requested hash is returned and
+     the completion safety cap was not hit.
+   - Runs the unchanged V1063 reconstruction on the completed row set.
+   - Diagnostic only. No live scanner/scoring/provider-routing mutation.
+*/
+function bitqueryMapSourceRowV1064(row, token) {
+  const trade = row?.Trade || {};
+  const side = trade?.Side || {};
+  const action = bitqueryTokenActionV1061(side?.Type);
+  return {
+    block:Number(row?.Block?.Number || 0) || row?.Block?.Number || null,
+    time:row?.Block?.Time || null,
+    txHash:row?.Transaction?.Hash || null,
+    txFrom:row?.Transaction?.From || null,
+    action,
+    sideType:side?.Type || null,
+    token:{
+      symbol:trade?.Currency?.Symbol || null,
+      name:trade?.Currency?.Name || null,
+      address:trade?.Currency?.SmartContract || token,
+      amount:finiteNumberOrNullV1061(trade?.Amount),
+      amountUsd:finiteNumberOrNullV1061(trade?.AmountInUSD),
+      priceUsd:finiteNumberOrNullV1061(trade?.PriceInUSD),
+      buyer:trade?.Buyer || null,
+      seller:trade?.Seller || null
+    },
+    counterSide:{
+      symbol:side?.Currency?.Symbol || null,
+      name:side?.Currency?.Name || null,
+      address:side?.Currency?.SmartContract || null,
+      amount:finiteNumberOrNullV1061(side?.Amount),
+      amountUsd:finiteNumberOrNullV1061(side?.AmountInUSD)
+    },
+    dex:{
+      protocolName:trade?.Dex?.ProtocolName || null,
+      protocolFamily:trade?.Dex?.ProtocolFamily || null,
+      smartContract:trade?.Dex?.SmartContract || null
+    }
+  };
+}
+
+function bitqueryRawSummaryV1064(rows) {
+  let buyCount=0, sellCount=0, unknownCount=0, buyUsd=0, sellUsd=0, usdValuedRows=0;
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const action=String(r?.action||'').toUpperCase();
+    const usd=Number(r?.token?.amountUsd);
+    if (action==='BUY') {
+      buyCount++;
+      if (Number.isFinite(usd)) { buyUsd+=usd; usdValuedRows++; }
+    } else if (action==='SELL') {
+      sellCount++;
+      if (Number.isFinite(usd)) { sellUsd+=usd; usdValuedRows++; }
+    } else unknownCount++;
+  }
+  return {
+    buyCount,sellCount,unknownCount,
+    buyUsd:round6V1063(buyUsd), sellUsd:round6V1063(sellUsd),
+    netBuyMinusSellUsd:round6V1063(buyUsd-sellUsd), usdValuedRows,
+    note:'V1064 summary is calculated after boundary transaction completion and before V1063 economic reconstruction.'
+  };
+}
+
+async function bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, url) {
+  const startedAt=Date.now();
+  const seed=await bitqueryRobinhoodSwapsDiagnosticV1061(env,url);
+  if (!seed?.success) {
+    return {
+      ...seed, version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',
+      status:String(seed?.status||'BITQUERY_BASE_DIAGNOSTIC_FAILED_V1064').replace(/V1061/g,'V1064'),
+      boundaryComplete:false,
+      note:'V1064 completion did not run because the underlying V1061 sample failed.'
+    };
+  }
+
+  const seedRows=Array.isArray(seed.rows)?seed.rows:[];
+  if (!seedRows.length) {
+    return {
+      agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',success:true,readOnly:true,configured:true,
+      status:'BITQUERY_BOUNDARY_COMPLETION_NO_ROWS_V1064',request:seed.request,oauth:seed.oauth,graphql:seed.graphql,
+      seed:{rowCount:0,boundaryBlock:null,boundaryHashes:[]},completion:{attempted:false,boundaryComplete:true},
+      completedSummary:bitqueryRawSummaryV1064([]),reconstruction:economicReconstructBitqueryRowsV1063([]),
+      externalRequestsUsed:seed.externalRequestsUsed||2,scannerMutated:false,
+      note:'Diagnostic only. No V1064 result is used by live scanner or scoring.',elapsedMs:Date.now()-startedAt,timestamp:now()
+    };
+  }
+
+  const last=seedRows[seedRows.length-1]||{};
+  const boundaryBlock=Number(last?.block||0)||last?.block||null;
+  const boundarySeedRows=seedRows.filter(r=>String(r?.block??'')===String(boundaryBlock??''));
+  const boundaryHashes=[...new Set(boundarySeedRows.map(r=>safeLowerV1063(r?.txHash)).filter(Boolean))];
+
+  if (!boundaryHashes.length) {
+    return {
+      agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',success:false,readOnly:true,configured:true,
+      status:'BOUNDARY_HASHES_UNAVAILABLE_V1064',request:seed.request,
+      seed:{rowCount:seedRows.length,boundaryBlock,boundaryHashes:[]},externalRequestsUsed:seed.externalRequestsUsed||2,
+      scannerMutated:false,note:'Could not identify boundary transaction hashes; no live scanner changes.',elapsedMs:Date.now()-startedAt,timestamp:now()
+    };
+  }
+
+  const clientId=String(env?.BITQUERY_CLIENT_ID||'').trim();
+  const clientSecret=String(env?.BITQUERY_CLIENT_SECRET||'').trim();
+  let oauthResponse,oauthPayload;
+  try {
+    const body=new URLSearchParams({grant_type:'client_credentials',client_id:clientId,client_secret:clientSecret,scope:'api'});
+    oauthResponse=await fetch(BITQUERY_OAUTH_TOKEN_URL_V1060,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded','accept':'application/json'},body:body.toString()});
+    const txt=await oauthResponse.text();
+    try{oauthPayload=txt?JSON.parse(txt):null;}catch(_){oauthPayload=null;}
+  } catch(error) {
+    return {
+      agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',
+      success:false,readOnly:true,configured:true,status:'BITQUERY_COMPLETION_OAUTH_FETCH_FAILED_V1064',request:seed.request,
+      seed:{rowCount:seedRows.length,boundaryBlock,boundaryHashes},error:String(error?.message||error||'UNKNOWN_ERROR').slice(0,240),
+      externalRequestsUsed:(seed.externalRequestsUsed||2)+1,scannerMutated:false,elapsedMs:Date.now()-startedAt,timestamp:now()
+    };
+  }
+  const accessToken=String(oauthPayload?.access_token||'').trim();
+  if (!oauthResponse?.ok||!accessToken) {
+    return {
+      agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',
+      success:false,readOnly:true,configured:true,status:`BITQUERY_COMPLETION_OAUTH_HTTP_${oauthResponse?.status||0}_V1064`,request:seed.request,
+      seed:{rowCount:seedRows.length,boundaryBlock,boundaryHashes},tokenReturned:false,
+      externalRequestsUsed:(seed.externalRequestsUsed||2)+1,scannerMutated:false,elapsedMs:Date.now()-startedAt,timestamp:now()
+    };
+  }
+
+  const token=String(seed?.request?.token||'').toLowerCase();
+  const completionCap=100;
+  const hashList=JSON.stringify(boundaryHashes);
+  const query=`
+    {
+      EVM(network: robinhood, dataset: realtime) {
+        DEXTradeByTokens(
+          limit: {count: ${completionCap}}
+          orderBy: {descending: Block_Time}
+          where: {
+            TransactionStatus: {Success: true}
+            Transaction: {Hash: {in: ${hashList}}}
+            Trade: {Currency: {SmartContract: {is: "${token}"}}}
+          }
+        ) {
+          Block { Number Time }
+          Transaction { Hash From }
+          Trade {
+            Buyer Seller Amount AmountInUSD PriceInUSD
+            Currency { Symbol Name SmartContract }
+            Side { Type Amount AmountInUSD Currency { Symbol Name SmartContract } }
+            Dex { ProtocolName ProtocolFamily SmartContract }
+          }
+        }
+      }
+    }
+  `;
+
+  let gqlResponse,gqlPayload;
+  try {
+    gqlResponse=await fetch(BITQUERY_GRAPHQL_URL_V1060,{method:'POST',headers:{'content-type':'application/json','accept':'application/json','authorization':`Bearer ${accessToken}`},body:JSON.stringify({query})});
+    const txt=await gqlResponse.text();
+    try{gqlPayload=txt?JSON.parse(txt):null;}catch(_){gqlPayload=null;}
+  } catch(error) {
+    return {
+      agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',
+      success:false,readOnly:true,configured:true,status:'BITQUERY_COMPLETION_GRAPHQL_FETCH_FAILED_V1064',request:seed.request,
+      seed:{rowCount:seedRows.length,boundaryBlock,boundaryHashes},error:String(error?.message||error||'UNKNOWN_ERROR').slice(0,240),
+      externalRequestsUsed:(seed.externalRequestsUsed||2)+2,scannerMutated:false,elapsedMs:Date.now()-startedAt,timestamp:now()
+    };
+  }
+
+  const errors=Array.isArray(gqlPayload?.errors)?gqlPayload.errors.map(x=>String(x?.message||'GRAPHQL_ERROR')).slice(0,8):[];
+  const sourceRows=Array.isArray(gqlPayload?.data?.EVM?.DEXTradeByTokens)?gqlPayload.data.EVM.DEXTradeByTokens:[];
+  const completionRows=sourceRows.map(r=>bitqueryMapSourceRowV1064(r,token));
+  const returnedHashes=[...new Set(completionRows.map(r=>safeLowerV1063(r?.txHash)).filter(Boolean))];
+  const missingHashes=boundaryHashes.filter(h=>!returnedHashes.includes(h));
+  const capHit=completionRows.length>=completionCap;
+  const boundaryComplete=gqlResponse.ok&&errors.length===0&&!capHit&&missingHashes.length===0;
+
+  const boundarySet=new Set(boundaryHashes);
+  const nonBoundaryRows=seedRows.filter(r=>!boundarySet.has(safeLowerV1063(r?.txHash)));
+  const completedRows=boundaryComplete ? [...nonBoundaryRows,...completionRows] : seedRows;
+  completedRows.sort((a,b)=>{
+    const bn=Number(b?.block||0)-Number(a?.block||0);
+    if (bn) return bn;
+    return String(b?.time||'').localeCompare(String(a?.time||''));
+  });
+
+  const reconstruction=economicReconstructBitqueryRowsV1063(completedRows);
+  const success=gqlResponse.ok&&errors.length===0;
+  return {
+    agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'BITQUERY_ROBINHOOD_BOUNDARY_COMPLETION_V1064',success,readOnly:true,configured:true,
+    status:!success?'BITQUERY_COMPLETION_GRAPHQL_ERROR_V1064':(boundaryComplete?'BITQUERY_BOUNDARY_COMPLETE_OK_V1064':'BITQUERY_BOUNDARY_COMPLETION_UNCERTAIN_V1064'),
+    request:seed.request,
+    seed:{rowCount:seedRows.length,boundaryBlock,boundarySeedRowCount:boundarySeedRows.length,boundaryHashes},
+    completion:{
+      attempted:true,httpStatus:gqlResponse.status,errors,rowCount:completionRows.length,completionCap,capHit,
+      returnedHashes,missingHashes,boundaryComplete,
+      replacementApplied:boundaryComplete,
+      completedRowCount:completedRows.length,
+      note:boundaryComplete?'Boundary-block transaction rows were replaced with the completed query result before reconstruction.':'Completion was not proven; V1064 kept the original seed rows and does not claim complete economic flow.'
+    },
+    completedSummary:bitqueryRawSummaryV1064(completedRows),
+    reconstruction,
+    externalRequestsUsed:(seed.externalRequestsUsed||2)+2,scannerMutated:false,
+    note:'Diagnostic only. V1064 does not feed Bitquery data into live scanner, scoring, Telegram, D1, KV, Stripe or provider routing.',
+    elapsedMs:Date.now()-startedAt,timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -184102,6 +184323,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryRobinhoodEconomicFlowDiagnosticV1063(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-swaps-complete"
+  ) {
+    return jsonResponse(
+      await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, url)
     );
   }
 
