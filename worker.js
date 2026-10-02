@@ -79676,6 +79676,114 @@ async function sendTelegram(
 }
 
 
+
+/* =========================================================
+   V1052 — PUBLIC PREMIUM CONVERSION ENTRY
+   Telegram-only addition. Preserves V1051 scanner, Stripe,
+   D1 subscriber mapping, payment grace and access enforcement.
+   ========================================================= */
+async function sendTelegramManageEntryV1052(env, targetChatId) {
+  const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+  const chatId = String(targetChatId || "").trim();
+  if (!token || !chatId) {
+    return { success:false, skipped:true, reason:"TELEGRAM_NOT_CONFIGURED_V1052" };
+  }
+
+  const message = [
+    "⚙️ <b>Manage ChainVanta Premium</b>",
+    "",
+    "Manage your subscription, payment method or cancellation securely in a private chat with @ChainVantaBot.",
+    "",
+    "<i>Your Stripe Customer Portal link will only be created privately and linked to your Telegram account.</i>"
+  ].join("\\n");
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({
+          chat_id:chatId,
+          text:message,
+          parse_mode:"HTML",
+          disable_web_page_preview:true,
+          reply_markup:{
+            inline_keyboard:[[
+              {
+                text:"⚙️ Manage Premium",
+                url:"https://t.me/ChainVantaBot?start=manage"
+              }
+            ]]
+          }
+        })
+      }
+    );
+    const data = await response.json().catch(() => ({}));
+    return {
+      success:response.ok && data?.ok === true,
+      status:response.status,
+      mode:"V1052_MANAGE_ENTRY_BUTTON",
+      data
+    };
+  } catch (error) {
+    return { success:false, reason:"TELEGRAM_MANAGE_ENTRY_FAILED_V1052", error:errorString(error) };
+  }
+}
+
+async function sendTelegramPremiumEntryV1052(env, targetChatId) {
+  const token = String(env?.TELEGRAM_BOT_TOKEN || "").trim();
+  const chatId = String(targetChatId || "").trim();
+  if (!token || !chatId) {
+    return { success:false, skipped:true, reason:"TELEGRAM_NOT_CONFIGURED_V1052" };
+  }
+
+  const message = [
+    "⚡ <b>ChainVanta Premium</b>",
+    "",
+    "Get qualifying ChainVanta alerts in real time.",
+    "",
+    "<b>£49/month</b>",
+    "",
+    "Tap below to continue securely in a private chat with @ChainVantaBot.",
+    "",
+    "<i>Your Stripe checkout will only be created privately so it can be securely linked to your Telegram account.</i>"
+  ].join("\\n");
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({
+          chat_id:chatId,
+          text:message,
+          parse_mode:"HTML",
+          disable_web_page_preview:true,
+          reply_markup:{
+            inline_keyboard:[[
+              {
+                text:"🚀 Start ChainVanta Premium",
+                url:"https://t.me/ChainVantaBot?start=subscribe"
+              }
+            ]]
+          }
+        })
+      }
+    );
+    const data = await response.json().catch(() => ({}));
+    return {
+      success:response.ok && data?.ok === true,
+      status:response.status,
+      mode:"V1052_PREMIUM_ENTRY_BUTTON",
+      data
+    };
+  } catch (error) {
+    return { success:false, reason:"TELEGRAM_PREMIUM_ENTRY_FAILED_V1052", error:errorString(error) };
+  }
+}
+
 /* =========================================================
    V1028 — PERSISTED 30-MINUTE FREE-CALL DELIVERY
    Telegram transport only. No provider/scanner requests.
@@ -172244,7 +172352,7 @@ function telegramMemberHelpV1025(role) {
 }
 
 async function telegramMemberCommandV1025(env, parsed, role, chatId) {
-  const allowed = new Set(["/performance", "/best", "/calls", "/help", "/start"]);
+  const allowed = new Set(["/performance", "/best", "/calls", "/help", "/start", "/subscribe", "/premium"]);
   if (!allowed.has(parsed?.command)) {
     return await sendTelegram(
       env,
@@ -172261,6 +172369,9 @@ async function telegramMemberCommandV1025(env, parsed, role, chatId) {
   if (parsed.command === "/performance") reply = performanceSummaryV271(state);
   else if (parsed.command === "/best") reply = bestCallsMessageV271(state);
   else if (parsed.command === "/calls") reply = callsListMessageV271(state);
+  else if (["/subscribe", "/premium"].includes(parsed.command)) {
+    return await sendTelegramPremiumEntryV1052(env, chatId);
+  }
 
   return await sendTelegram(env, reply, null, null, chatId);
 }
@@ -172366,7 +172477,10 @@ async function telegramCommandReplyV271(
     chatId &&
     chatRoleV1025 === "UNAUTHORIZED" &&
     message?.chat?.type === "private" &&
-    ["/subscribe", "/manage"].includes(privateParsedV1031?.command) &&
+    (
+      ["/subscribe", "/premium", "/manage"].includes(privateParsedV1031?.command) ||
+      (privateParsedV1031?.command === "/start" && ["subscribe","manage"].includes(String(privateParsedV1031?.argument || "").toLowerCase()))
+    ) &&
     message?.from?.id !== undefined &&
     message?.from?.id !== null &&
     String(message.from.id) === String(chatId)
@@ -172376,7 +172490,9 @@ async function telegramCommandReplyV271(
     const telegramUserIdV1031 = String(message.from.id);
     const telegramUsernameV1031 = message?.from?.username ? String(message.from.username) : "";
 
-    if (privateParsedV1031?.command === "/manage") {
+    // V1052: /subscribe, /premium and /start subscribe all reuse the proven V1031 checkout.
+    // /manage continues to use the existing V1033 Stripe Customer Portal.
+    if (privateParsedV1031?.command === "/manage" || (privateParsedV1031?.command === "/start" && String(privateParsedV1031?.argument || "").toLowerCase() === "manage")) {
       const portalV1033 = await createStripePortalV1033(
         env, telegramUserIdV1031,
         "https://robinhood-meme-hunter.johnd1987.workers.dev/telegram-webhook"
@@ -172446,16 +172562,46 @@ async function telegramCommandReplyV271(
   }
 
 
-  // V1033: /subscribe in the Free destination is useful rather than Admin-only.
-  // Checkout remains private-DM-only so the payer is securely tied to message.from.id.
-  if (chatRoleV1025 === "FREE" && parsed?.command === "/subscribe") {
-    const replyV1033 =
-      `⚡ <b>ChainVanta Premium</b>\n\n` +
-      `Premium is £49/month and qualifying alerts are delivered in real time.\n\n` +
-      `To subscribe securely, open a private chat with this ChainVanta bot and send <code>/subscribe</code>.\n\n` +
-      `<i>Payment checkout is only created in private chat so it can be securely linked to your Telegram account.</i>`;
-    const sentV1033 = await sendTelegram(env, replyV1033, null, null, chatId);
-    return { success:sentV1033?.success===true, ignored:false, command:"/subscribe", scannerBudgetConsumed:false, externalProviderRequests:0 };
+  // V1052: /manage never exposes a Stripe portal URL in a group.
+  // It routes to @ChainVantaBot, where the existing V1033 portal is created privately.
+  if (["FREE", "PREMIUM"].includes(chatRoleV1025) && parsed?.command === "/manage") {
+    const sentManageV1052 = await sendTelegramManageEntryV1052(env, chatId);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.replySuccess = sentManageV1052?.success === true;
+      diagnosticV273.result = sentManageV1052?.success === true
+        ? "PUBLIC_MANAGE_ENTRY_SENT_V1052"
+        : (sentManageV1052?.reason || "PUBLIC_MANAGE_ENTRY_FAILED_V1052");
+    }
+    return {
+      success:sentManageV1052?.success===true,
+      ignored:false,
+      command:"/manage",
+      scannerBudgetConsumed:false,
+      externalProviderRequests:0,
+      stateWrites:0
+    };
+  }
+
+  // V1052: /subscribe and /premium in the Free destination show a one-tap private Premium entry.
+  // The button opens @ChainVantaBot with /start subscribe; Stripe checkout remains private-DM-only.
+  if (chatRoleV1025 === "FREE" && ["/subscribe", "/premium"].includes(parsed?.command)) {
+    const sentV1052 = await sendTelegramPremiumEntryV1052(env, chatId);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.replySuccess = sentV1052?.success === true;
+      diagnosticV273.result = sentV1052?.success === true
+        ? "PUBLIC_PREMIUM_ENTRY_SENT_V1052"
+        : (sentV1052?.reason || "PUBLIC_PREMIUM_ENTRY_FAILED_V1052");
+    }
+    return {
+      success:sentV1052?.success===true,
+      ignored:false,
+      command:parsed.command,
+      scannerBudgetConsumed:false,
+      externalProviderRequests:0,
+      stateWrites:0
+    };
   }
 
   if (!parsed) {
@@ -182397,7 +182543,7 @@ async function premiumBusinessDashboardV1051(env) {
     }
 
     return [
-      "📊 <b>ChainVanta Premium Dashboard — V1051</b>","",
+      "📊 <b>ChainVanta Premium Dashboard — V1052</b>","",
       `<b>Subscribers</b>`,
       `Total mapped: <b>${total}</b>`,
       `Active / trialing: <b>${active}</b>`,
