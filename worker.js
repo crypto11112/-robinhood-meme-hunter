@@ -8856,6 +8856,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
+const CHAINVANTA_DISPLAY_VERSION = "V1057"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -28034,7 +28035,7 @@ async function lastAlertScanV264(
   if (!kv) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -28059,7 +28060,7 @@ async function lastAlertScanV264(
     if (!raw) {
       return {
         agent:
-          "Robinhood Chain Meme Hunter",
+          "ChainVanta",
         version:
           VERSION,
         status:
@@ -28087,7 +28088,7 @@ async function lastAlertScanV264(
     catch (parseError) {
       return {
         agent:
-          "Robinhood Chain Meme Hunter",
+          "ChainVanta",
         version:
           VERSION,
         status:
@@ -28108,7 +28109,7 @@ async function lastAlertScanV264(
 
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -28125,7 +28126,7 @@ async function lastAlertScanV264(
   catch (error) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -28415,7 +28416,7 @@ async function alertHistoryV268(
   if (!kv) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -28442,7 +28443,7 @@ async function alertHistoryV268(
     if (!raw) {
       return {
         agent:
-          "Robinhood Chain Meme Hunter",
+          "ChainVanta",
         version:
           VERSION,
         status:
@@ -28474,7 +28475,7 @@ async function alertHistoryV268(
     catch (parseError) {
       return {
         agent:
-          "Robinhood Chain Meme Hunter",
+          "ChainVanta",
         version:
           VERSION,
         status:
@@ -28497,7 +28498,7 @@ async function alertHistoryV268(
 
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -28523,7 +28524,7 @@ async function alertHistoryV268(
   catch (error) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -97609,7 +97610,7 @@ function telegramMessage(
         : "UNVERIFIED";
 
   const lines = [
-    `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
+    `🚨 <b>ChainVanta ${VERSION}</b>`,
     `📣 <b>${escapeHtml(alertClass.title)}</b>`,
     "",
     `🪙 <b>${escapeHtml(candidate.name || "Unknown Token")} (${escapeHtml(candidate.symbol || "UNKNOWN")})</b>`,
@@ -104247,7 +104248,7 @@ function callPerformanceReportV270(state) {
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
     version:
       VERSION,
     status:
@@ -121377,7 +121378,7 @@ for (
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
 
     version:
       VERSION,
@@ -128863,7 +128864,7 @@ async function health(
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
 
     version:
       VERSION,
@@ -129138,7 +129139,7 @@ async function rpcTest(
 
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
 
       version:
         VERSION,
@@ -129187,7 +129188,7 @@ async function rpcTest(
   catch (error) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
 
       version:
         VERSION,
@@ -129233,7 +129234,7 @@ async function stateStatus(
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
 
     version:
       VERSION,
@@ -129532,7 +129533,7 @@ async function erc20RpcDiagnosticV652(env) {
       : {};
 
   return {
-    agent: "Robinhood Chain Meme Hunter",
+    agent: "ChainVanta",
     version: VERSION,
     status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V655",
     scannerBudgetConsumed: false,
@@ -129606,7 +129607,7 @@ async function diagnostics(
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
 
     version:
       VERSION,
@@ -129815,7 +129816,7 @@ async function telegramWebhookStatusV273(
   ) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -129835,7 +129836,7 @@ async function telegramWebhookStatusV273(
   if (!raw) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -129850,7 +129851,7 @@ async function telegramWebhookStatusV273(
   try {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -129865,7 +129866,7 @@ async function telegramWebhookStatusV273(
   } catch (error) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       status:
@@ -135346,7 +135347,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   if (out.length >= 2) {
-    out[0] = `🔎 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`;
+    out[0] = `🔎 <b>ChainVanta ${VERSION}</b>`;
     out[1] = "🧪 <b>Fresh Manual Analysis</b>";
   }
 
@@ -172398,7 +172399,7 @@ function telegramRoleStatusV1026(env) {
   };
 
   return {
-    agent: "Robinhood Chain Meme Hunter",
+    agent: "ChainVanta",
     version: VERSION,
     status: "TELEGRAM_ROLE_BINDINGS_V1026",
     bindings: {
@@ -176258,7 +176259,7 @@ async function telegramWebhookInfoV274(
   if (!env.TELEGRAM_BOT_TOKEN) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       success:
@@ -176298,7 +176299,7 @@ async function telegramWebhookInfoV274(
 
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
 
@@ -176473,7 +176474,7 @@ async function telegramWebhookInfoV274(
   } catch (error) {
     return {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
       version:
         VERSION,
       success:
@@ -176504,7 +176505,7 @@ async function telegramTest(
     await sendTelegram(
       env,
 
-`✅ <b>Robinhood Chain Meme Hunter ${VERSION}</b>
+`✅ <b>ChainVanta ${CHAINVANTA_DISPLAY_VERSION}</b>
 
 Telegram connection test successful.
 
@@ -176524,10 +176525,10 @@ No fake token call was generated by this test.`
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
 
     version:
-      VERSION,
+      CHAINVANTA_DISPLAY_VERSION,
 
     success:
       result.success,
@@ -176571,7 +176572,7 @@ async function runAll(
 
   return {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
 
     version:
       VERSION,
@@ -178607,7 +178608,7 @@ async function goldRushHolderDiagnosticV702(
   const apiKey = String(env?.GOLDRUSH_API_KEY || "").trim();
 
   const base = {
-    agent: "Robinhood Chain Meme Hunter",
+    agent: "ChainVanta",
     version: VERSION,
     diagnostic: "GOLDRUSH_ROBINHOOD_TOKEN_HOLDERS_V704",
     safe: true,
@@ -178867,7 +178868,7 @@ async function goldRushMarketUsdDiagnosticV705(
 
   const base = {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
     version:
       VERSION,
     diagnostic:
@@ -179642,7 +179643,7 @@ async function goldRushV3SwapDiagnosticV710(
 
   const base = {
     agent:
-      "Robinhood Chain Meme Hunter",
+      "ChainVanta",
     version:
       VERSION,
     diagnostic:
@@ -181130,7 +181131,7 @@ async function diagnosticsReadV897(request, env) {
   return jsonResponse(
     {
       ok: true,
-      agent: "Robinhood Chain Meme Hunter",
+      agent: "ChainVanta",
       version: VERSION,
       timestamp: now(),
 
@@ -182636,7 +182637,7 @@ async function premiumAccessEnforcementAdminMessageV1049(env) {
 
 
 async function premiumBusinessDashboardV1051(env) {
-  if(!env?.CHAINVANTA_DB) return "📊 <b>ChainVanta Premium — V1051</b>\n\nD1 binding: MISSING";
+  if(!env?.CHAINVANTA_DB) return "📊 <b>ChainVanta Premium</b>\n\nD1 binding: MISSING";
   try {
     const nowSec=Math.floor(Date.now()/1000);
     const counts=await env.CHAINVANTA_DB.prepare(`
@@ -182692,7 +182693,7 @@ async function premiumBusinessDashboardV1051(env) {
       `<i>Read-only dashboard. D1 writes: 0 · Telegram membership calls: 0 · scanner changes: 0.</i>`
     ].join("\n");
   } catch(error) {
-    return `📊 <b>ChainVanta Premium Dashboard — V1051</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
+    return `📊 <b>ChainVanta Premium Dashboard</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
   }
 }
 
@@ -183163,7 +183164,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     return jsonResponse(
       {
         agent:
-          "Robinhood Chain Meme Hunter",
+          "ChainVanta",
 
         version:
           VERSION,
@@ -184730,7 +184731,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   return jsonResponse(
     {
       agent:
-        "Robinhood Chain Meme Hunter",
+        "ChainVanta",
 
       version:
         VERSION,
@@ -185303,7 +185304,7 @@ async function maybeSendDiagnosticEmailV898(env) {
   }
 
   const lines = [
-    "Robinhood Chain Meme Hunter diagnostic event",
+    "ChainVanta diagnostic event",
     `Version: ${VERSION}`,
     `Time: ${new Date().toISOString()}`,
     "",
@@ -187110,7 +187111,7 @@ function compactManualScanResultV719(result) {
     : [];
 
   return {
-    agent: result?.agent || "Robinhood Chain Meme Hunter",
+    agent: result?.agent || "ChainVanta",
     version: VERSION,
     status: result?.status || null,
     scanMode: result?.scanMode || null,
@@ -193034,7 +193035,7 @@ export default {
       return jsonResponse(
         {
           agent:
-            "Robinhood Chain Meme Hunter",
+            "ChainVanta",
 
           version:
             VERSION,
