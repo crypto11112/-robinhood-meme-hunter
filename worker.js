@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1048";
+const VERSION = "V1049";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -172508,6 +172508,18 @@ async function telegramCommandReplyV271(
 
 
 
+  // V1049: controlled real Premium access enforcement. Admin only; uses the proven V1048 decision engine.
+  if (parsed.command === "/accessenforce") {
+    const replyV1049 = await premiumAccessEnforcementAdminMessageV1049(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1049 = await sendTelegram(env, replyV1049, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1049?.success === true;
+      diagnosticV273.result = sentV1049?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1049?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
   // V1048: deterministic access-state branch simulation. Admin only; zero D1 writes and zero Telegram membership mutation.
   if (parsed.command === "/accessstatesim") {
     const replyV1048 = premiumAccessStateSimulationMessageV1048();
@@ -182179,6 +182191,143 @@ async function premiumAccessStateAdminMessageV1047(env) {
     return lines.join("\n");
   } catch(error){
     return `🔐 <b>Premium Access State — V1047</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
+  }
+}
+
+async function premiumAccessEnforcementAdminMessageV1049(env) {
+  if (!env?.CHAINVANTA_DB) return "🔒 <b>Premium Access Enforcement — V1049</b>\n\nD1 binding: MISSING";
+  const nowSec=Math.floor(Date.now()/1000);
+  const premiumChatId=String(env?.TELEGRAM_PREMIUM_CHAT_ID||"").trim();
+  if(!premiumChatId) return "🔒 <b>Premium Access Enforcement — V1049</b>\n\nPremium chat binding: MISSING";
+
+  try {
+    const rows=await env.CHAINVANTA_DB.prepare(
+      `SELECT telegram_user_id,telegram_username,status,current_period_end,cancel_at_period_end,grace_until,updated_at
+       FROM subscribers ORDER BY updated_at DESC LIMIT 100`
+    ).all();
+
+    let graceTableAvailable=true;
+    try {
+      await env.CHAINVANTA_DB.prepare(`SELECT invoice_id FROM failed_payment_grace_v1046 LIMIT 1`).all();
+    } catch (_) { graceTableAvailable=false; }
+
+    await env.CHAINVANTA_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS premium_access_actions_v1049 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_user_id TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        action TEXT NOT NULL,
+        evaluated_at INTEGER NOT NULL,
+        paid_through INTEGER,
+        grace_until INTEGER,
+        details TEXT
+      )
+    `).run();
+
+    const lines=[
+      "🔒 <b>Premium Access Enforcement — V1049</b>","",
+      "Mode: <b>CONTROLLED REAL ENFORCEMENT</b> — only proven removal-eligible states can be removed.",
+      `Evaluation time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`,""
+    ];
+    let kept=0,removed=0,failed=0,ownerProtected=0,review=0;
+
+    for(const row of (rows?.results||[])){
+      const uid=String(row.telegram_user_id||"").trim();
+      const status=String(row.status||"UNKNOWN").toUpperCase();
+      const end=Number(row.current_period_end);
+      const validEnd=Number.isFinite(end)&&end>0;
+      let graceUntil=Number(row.grace_until);
+      let validGrace=Number.isFinite(graceUntil)&&graceUntil>0;
+
+      if(graceTableAvailable && uid){
+        try {
+          const grace=await env.CHAINVANTA_DB.prepare(
+            `SELECT grace_until FROM failed_payment_grace_v1046
+             WHERE telegram_user_id=? AND status='OPEN'
+             ORDER BY grace_started_at ASC LIMIT 1`
+          ).bind(uid).first();
+          const tableGrace=Number(grace?.grace_until);
+          if(Number.isFinite(tableGrace)&&tableGrace>0){ graceUntil=tableGrace; validGrace=true; }
+        } catch (_) {}
+      }
+
+      const evaluated=premiumAccessStateDecisionV1048({
+        uid,status,currentPeriodEnd:validEnd?end:null,graceUntil:validGrace?graceUntil:null
+      },nowSec);
+      const decision=evaluated.decision;
+      const label=row.telegram_username?`@${escapeHtml(String(row.telegram_username))}`:escapeHtml(uid||"UNKNOWN");
+
+      if(decision==="OWNER_EXEMPT_NEVER_REMOVE"){
+        ownerProtected++; kept++;
+        lines.push(`${label} · <b>OWNER_EXEMPT_NEVER_REMOVE</b> · NO ACTION`);
+        continue;
+      }
+      if(decision.startsWith("KEEP_")){
+        kept++;
+        lines.push(`${label} · <b>${escapeHtml(decision)}</b> · KEPT`);
+        continue;
+      }
+      if(decision!=="REMOVE_ELIGIBLE_GRACE_EXPIRED" && decision!=="REMOVE_ELIGIBLE_EXPIRED"){
+        review++;
+        lines.push(`${label} · <b>${escapeHtml(decision)}</b> · NO ACTION / REVIEW`);
+        continue;
+      }
+      if(!/^\d+$/.test(uid)){
+        failed++;
+        lines.push(`${label} · <b>${escapeHtml(decision)}</b> · INVALID TELEGRAM USER ID`);
+        continue;
+      }
+
+      // Defense in depth: repeat the absolute owner guard immediately before the Telegram helper.
+      if(uid===CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044){
+        ownerProtected++; kept++;
+        lines.push(`${label} · <b>OWNER_EXEMPT_NEVER_REMOVE</b> · BLOCKED BEFORE TELEGRAM API`);
+        continue;
+      }
+
+      const banned=await telegramPremiumMembershipV1043(env,"banChatMember",uid);
+      if(!banned.ok){
+        failed++;
+        await env.CHAINVANTA_DB.prepare(
+          `INSERT INTO premium_access_actions_v1049
+           (telegram_user_id,decision,action,evaluated_at,paid_through,grace_until,details)
+           VALUES (?,?,?,?,?,?,?)`
+        ).bind(uid,decision,"BAN_FAILED",nowSec,validEnd?end:null,validGrace?graceUntil:null,JSON.stringify(banned).slice(0,1500)).run();
+        lines.push(`${label} · <b>${escapeHtml(decision)}</b> · REMOVAL FAILED AT BAN STEP`);
+        continue;
+      }
+
+      const unbanned=await telegramPremiumMembershipV1043(env,"unbanChatMember",uid);
+      if(!unbanned.ok){
+        failed++;
+        await env.CHAINVANTA_DB.prepare(
+          `INSERT INTO premium_access_actions_v1049
+           (telegram_user_id,decision,action,evaluated_at,paid_through,grace_until,details)
+           VALUES (?,?,?,?,?,?,?)`
+        ).bind(uid,decision,"BANNED_NEEDS_UNBAN",nowSec,validEnd?end:null,validGrace?graceUntil:null,JSON.stringify(unbanned).slice(0,1500)).run();
+        lines.push(`${label} · <b>${escapeHtml(decision)}</b> · REMOVED, BUT UNBAN FAILED`);
+        continue;
+      }
+
+      removed++;
+      await env.CHAINVANTA_DB.prepare(
+        `INSERT INTO premium_access_actions_v1049
+         (telegram_user_id,decision,action,evaluated_at,paid_through,grace_until,details)
+         VALUES (?,?,?,?,?,?,?)`
+      ).bind(uid,decision,"REMOVED",nowSec,validEnd?end:null,validGrace?graceUntil:null,"V1049_PROVEN_ACCESS_STATE").run();
+      lines.push(`${label} · <b>${escapeHtml(decision)}</b> · <b>REMOVED FROM PREMIUM</b>`);
+    }
+
+    if(!(rows?.results||[]).length) lines.push("No mapped subscribers. No Telegram action taken.");
+    lines.push("",
+      `Kept: <b>${kept}</b> · removed: <b>${removed}</b> · failed: <b>${failed}</b> · review: <b>${review}</b>`,
+      `Owner protected: <b>${ownerProtected}</b>`,
+      `Grace table readable: <b>${graceTableAvailable?"YES":"NO"}</b>`,
+      "<i>V1049 uses the exact V1048 access-state decision engine before any membership removal.</i>"
+    );
+    return lines.join("\n");
+  } catch(error){
+    return `🔒 <b>Premium Access Enforcement — V1049</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
   }
 }
 
