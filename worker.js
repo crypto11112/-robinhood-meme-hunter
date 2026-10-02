@@ -1,10 +1,19 @@
 /**
- * ChainVanta / Robinhood Chain Meme Hunter — V1033
- * STRIPE CHECKOUT NAME-COLLECTION PATCH
- * Builds directly from confirmed-working V1033 subscriber-mapping baseline.
- * Adds Stripe Checkout customer full-name collection only; no access-control, scanner, scoring, provider, holder, qualification, or delayed-Free queue changes.
- * Builds directly from confirmed-working V1030 Stripe webhook baseline.
- * No automatic Premium grant/revoke in this version.
+ * ChainVanta — V1059
+ * BITQUERY USAGE METER DIAGNOSTIC
+ * Builds directly from confirmed-working V1058.
+ * Adds a manual/read-only GET /bitquery-usage endpoint backed by Bitquery's account usage API.
+ * Uses a dedicated BITQUERY_USAGE_TOKEN secret; never returns or logs credentials.
+ * Reports trial status, limits, usage, percentages and budget-health warnings.
+ * Makes no scanner, scoring, provider-routing, Telegram-call, Stripe, D1 or Durable Object changes.
+ */
+
+/**
+ * ChainVanta — V1058
+ * TELEGRAM PUBLIC-MESSAGE CLEANUP PATCH
+ * Builds directly from confirmed-working V1057.
+ * Adds reliable delayed cleanup for temporary public Telegram command/reply messages.
+ * Preserves existing scanner, scoring, provider, Stripe, D1, subscription and Telegram delivery logic.
  */
 
 /**
@@ -8856,7 +8865,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1058"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1059"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -183003,6 +183012,163 @@ async function stripeWebhookV1030(request, env) {
   );
 }
 
+
+/* ============================================================
+   V1059 — BITQUERY USAGE METER (MANUAL / READ-ONLY)
+   ============================================================
+   - GET /bitquery-usage only.
+   - Uses the account Usage API token in BITQUERY_USAGE_TOKEN.
+   - One account-usage HTTP request per manual invocation.
+   - Does not call the blockchain GraphQL endpoint.
+   - Does not mutate scanner state, provider routing, scoring, Telegram,
+     Stripe, D1, KV or Durable Objects.
+*/
+const BITQUERY_USAGE_API_V1059 = "https://account.bitquery.io/api/usage";
+
+function bitqueryUsagePercentV1059(used, limit) {
+  const u = Number(used || 0);
+  const l = Number(limit || 0);
+  if (!Number.isFinite(u) || !Number.isFinite(l) || l <= 0) return null;
+  return Math.round((u / l) * 10000) / 100;
+}
+
+function bitqueryUsageHealthV1059(percentages) {
+  const vals = Object.values(percentages || {}).filter(v => Number.isFinite(v));
+  const highest = vals.length ? Math.max(...vals) : 0;
+  if (highest >= 100) return { level:"EXHAUSTED", highestPercent:highest };
+  if (highest >= 90) return { level:"CRITICAL", highestPercent:highest };
+  if (highest >= 70) return { level:"WARNING", highestPercent:highest };
+  return { level:"HEALTHY", highestPercent:highest };
+}
+
+async function bitqueryUsageMeterV1059(env) {
+  const token = String(env?.BITQUERY_USAGE_TOKEN || "").trim();
+  if (!token) {
+    return {
+      agent:"ChainVanta",
+      version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:"BITQUERY_USAGE_METER_V1059",
+      success:false,
+      readOnly:true,
+      configured:false,
+      status:"BITQUERY_USAGE_TOKEN_NOT_CONFIGURED_V1059",
+      requiredSecret:"BITQUERY_USAGE_TOKEN",
+      externalRequestsUsed:0,
+      scannerMutated:false,
+      timestamp:now()
+    };
+  }
+
+  let response;
+  let bodyText="";
+  try {
+    response = await fetch(BITQUERY_USAGE_API_V1059, {
+      method:"GET",
+      headers:{
+        "authorization":`Bearer ${token}`,
+        "accept":"application/json"
+      }
+    });
+    bodyText = await response.text();
+  } catch (error) {
+    return {
+      agent:"ChainVanta",
+      version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:"BITQUERY_USAGE_METER_V1059",
+      success:false,
+      readOnly:true,
+      configured:true,
+      status:"BITQUERY_USAGE_FETCH_FAILED_V1059",
+      error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240),
+      externalRequestsUsed:1,
+      scannerMutated:false,
+      timestamp:now()
+    };
+  }
+
+  let payload=null;
+  try { payload = bodyText ? JSON.parse(bodyText) : null; } catch (_) {}
+
+  if (!response.ok || !payload || typeof payload !== "object") {
+    return {
+      agent:"ChainVanta",
+      version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:"BITQUERY_USAGE_METER_V1059",
+      success:false,
+      readOnly:true,
+      configured:true,
+      httpStatus:response.status,
+      status:`BITQUERY_USAGE_HTTP_${response.status}_V1059`,
+      providerMessage:payload?.message || payload?.error || (bodyText ? bodyText.slice(0,200) : null),
+      externalRequestsUsed:1,
+      scannerMutated:false,
+      timestamp:now()
+    };
+  }
+
+  const period = payload.billing_period || {};
+  const limits = period.limits || {};
+  const usage = period.usage || {};
+
+  const percentages = {
+    points:bitqueryUsagePercentV1059(usage.points_usage, limits.points_limit),
+    mcpPoints:bitqueryUsagePercentV1059(usage.mcp_points_usage, limits.mcp_points_limit),
+    streamTime:bitqueryUsagePercentV1059(usage.time_sec_usage, limits.time_sec_limit),
+    traffic:bitqueryUsagePercentV1059(usage.traffic_bytes_usage, limits.traffic_bytes_limit)
+  };
+
+  const health = bitqueryUsageHealthV1059(percentages);
+
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"BITQUERY_USAGE_METER_V1059",
+    success:true,
+    readOnly:true,
+    configured:true,
+    providerStatus:payload.status || null,
+    plan:period.plan_name || period.product?.name || null,
+    billingPeriod:{
+      startedAt:period.started_at || null,
+      endedAt:period.ended_at || null
+    },
+    limits:{
+      points:Number(limits.points_limit || 0),
+      mcpPoints:Number(limits.mcp_points_limit || 0),
+      requestsPerMinute:Number(limits.rate_limit || 0),
+      concurrentRequests:Number(limits.session_limit || 0),
+      simultaneousStreams:Number(limits.subscription_limit || 0),
+      streamSeconds:Number(limits.time_sec_limit || 0),
+      trafficBytes:Number(limits.traffic_bytes_limit || 0),
+      teamSlots:Number(limits.team_slots_limit || 0)
+    },
+    usage:{
+      points:Number(usage.points_usage || 0),
+      mcpPoints:Number(usage.mcp_points_usage || 0),
+      requests:Number(usage.requests_usage || 0),
+      streamSeconds:Number(usage.time_sec_usage || 0),
+      trafficBytes:Number(usage.traffic_bytes_usage || 0)
+    },
+    percentages,
+    health,
+    remaining:{
+      points:Math.max(0, Number(limits.points_limit || 0) - Number(usage.points_usage || 0)),
+      mcpPoints:Math.max(0, Number(limits.mcp_points_limit || 0) - Number(usage.mcp_points_usage || 0)),
+      streamSeconds:Math.max(0, Number(limits.time_sec_limit || 0) - Number(usage.time_sec_usage || 0)),
+      trafficBytes:Math.max(0, Number(limits.traffic_bytes_limit || 0) - Number(usage.traffic_bytes_usage || 0))
+    },
+    policy:{
+      warningAtPercent:70,
+      criticalAtPercent:90,
+      note:"Manual diagnostic only; no live scanner behaviour is changed."
+    },
+    httpStatus:response.status,
+    externalRequestsUsed:1,
+    scannerMutated:false,
+    timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -183180,6 +183346,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       },
 
       405
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-usage"
+  ) {
+    return jsonResponse(
+      await bitqueryUsageMeterV1059(env)
     );
   }
 
@@ -184745,6 +184920,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       routes: [
         "/stripe-webhook",
         "/health",
+        "/bitquery-usage",
         "/bitquery-http-test",
         "/bitquery-http-result",
         "/rpc-test",
