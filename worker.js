@@ -1,12 +1,14 @@
 /**
- * ChainVanta — V1062
- * BITQUERY SWAP NORMALIZATION / DEDUPLICATION DIAGNOSTIC
- * Builds directly from confirmed-working V1061.
- * Preserves /bitquery-usage, /bitquery-oauth-test and /bitquery-swaps unchanged.
- * Adds GET /bitquery-swaps-normalized?token=0x...&limit=25 for a manual/read-only
- * transaction-level normalization view over the same Bitquery Robinhood trade rows.
- * Groups repeated trade legs by transaction hash, flags mixed-direction transactions,
- * and reports raw totals versus a conservative transaction-level USD proxy.
+ * ChainVanta — V1063
+ * BITQUERY TRANSACTION-LEVEL ECONOMIC FLOW RECONSTRUCTION DIAGNOSTIC
+ * Builds directly from confirmed-working V1062.
+ * Preserves /bitquery-usage, /bitquery-oauth-test, /bitquery-swaps and
+ * /bitquery-swaps-normalized unchanged.
+ * Adds GET /bitquery-swaps-economic?token=0x...&limit=25 for a manual/read-only
+ * transaction-level economic-flow reconstruction over Bitquery Robinhood trade rows.
+ * Same-direction multi-pool legs are aggregated as one routed economic transaction;
+ * near-balanced opposite-direction cycles are classified as ARBITRAGE and excluded
+ * from directional BUY/SELL flow. Ambiguous mixed-direction transactions remain UNKNOWN.
  * Uses BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET and never returns/logs credentials.
  * Makes no scanner, scoring, provider-routing, Telegram-call, Stripe, D1, KV or Durable Object changes.
  */
@@ -8868,7 +8870,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1062"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1063"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -183644,6 +183646,238 @@ async function bitqueryRobinhoodSwapsNormalizedDiagnosticV1062(env, url) {
   };
 }
 
+
+
+/* ============================================================
+   V1063 — BITQUERY TRANSACTION-LEVEL ECONOMIC FLOW DIAGNOSTIC
+   ============================================================
+   - GET /bitquery-swaps-economic?token=0x...&limit=25 only.
+   - Reuses the proven V1061 Bitquery query exactly once.
+   - Groups rows by transaction hash.
+   - Same-direction multi-pool legs are treated as one routed economic BUY/SELL
+     and their target-token USD values are SUMMED rather than reduced to the
+     V1062 largest-leg proxy.
+   - Mixed-direction transactions with near-zero net token movement are tagged
+     ARBITRAGE and excluded from directional flow totals.
+   - Other mixed/ambiguous transactions remain UNKNOWN and are excluded from
+     directional flow totals until stronger transfer-level evidence is added.
+   - txFrom is reported as the transaction initiator; pool/router addresses are
+     kept separate from the initiator and are not treated as the end user.
+   - Read-only. No scanner state, scoring, D1, KV, DO, Stripe or Telegram mutation.
+*/
+function round6V1063(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Number(n.toFixed(6)) : 0;
+}
+
+function safeLowerV1063(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function economicReconstructBitqueryRowsV1063(rows) {
+  const grouped = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const hash = safeLowerV1063(row?.txHash) || `no_hash_${grouped.size}`;
+    if (!grouped.has(hash)) grouped.set(hash, []);
+    grouped.get(hash).push(row);
+  }
+
+  let buyTransactions = 0, sellTransactions = 0, routedBuyTransactions = 0, routedSellTransactions = 0;
+  let arbitrageTransactions = 0, unknownTransactions = 0;
+  let buyUsd = 0, sellUsd = 0, arbitrageGrossUsd = 0, unknownGrossUsd = 0;
+  let rawUsdTotal = 0, directionalUsdTotal = 0;
+
+  const transactions = [];
+
+  for (const [key, txRows] of grouped.entries()) {
+    const first = txRows[0] || {};
+    const initiator = first?.txFrom || null;
+    const buys = txRows.filter(r => String(r?.action || '').toUpperCase() === 'BUY');
+    const sells = txRows.filter(r => String(r?.action || '').toUpperCase() === 'SELL');
+    const unknownRows = txRows.filter(r => !['BUY','SELL'].includes(String(r?.action || '').toUpperCase()));
+
+    const sum = (arr, getter) => arr.reduce((acc, r) => {
+      const n = Number(getter(r));
+      return acc + (Number.isFinite(n) ? n : 0);
+    }, 0);
+
+    const buyTokenAmount = sum(buys, r => r?.token?.amount);
+    const sellTokenAmount = sum(sells, r => r?.token?.amount);
+    const buyUsdGross = sum(buys, r => r?.token?.amountUsd);
+    const sellUsdGross = sum(sells, r => r?.token?.amountUsd);
+    const txRawUsd = buyUsdGross + sellUsdGross + sum(unknownRows, r => r?.token?.amountUsd);
+    rawUsdTotal += txRawUsd;
+
+    const pools = [...new Set(txRows.map(r => safeLowerV1063(r?.dex?.smartContract)).filter(Boolean))];
+    const protocols = [...new Set(txRows.map(r => r?.dex?.protocolName).filter(Boolean))];
+    const counterTokens = [...new Set(txRows.map(r => r?.counterSide?.symbol).filter(Boolean))];
+    const tokenBuyers = [...new Set(txRows.map(r => safeLowerV1063(r?.token?.buyer)).filter(Boolean))];
+    const tokenSellers = [...new Set(txRows.map(r => safeLowerV1063(r?.token?.seller)).filter(Boolean))];
+
+    let classification = 'UNKNOWN';
+    let direction = 'UNKNOWN';
+    let economicUsd = 0;
+    let netTokenAmount = buyTokenAmount - sellTokenAmount;
+    let balanceRatio = null;
+
+    if (buys.length > 0 && sells.length === 0 && unknownRows.length === 0) {
+      direction = 'BUY';
+      classification = txRows.length > 1 ? 'ROUTED_BUY' : 'USER_BUY';
+      economicUsd = buyUsdGross;
+      buyTransactions += 1;
+      if (classification === 'ROUTED_BUY') routedBuyTransactions += 1;
+      buyUsd += economicUsd;
+      directionalUsdTotal += economicUsd;
+    } else if (sells.length > 0 && buys.length === 0 && unknownRows.length === 0) {
+      direction = 'SELL';
+      classification = txRows.length > 1 ? 'ROUTED_SELL' : 'USER_SELL';
+      economicUsd = sellUsdGross;
+      sellTransactions += 1;
+      if (classification === 'ROUTED_SELL') routedSellTransactions += 1;
+      sellUsd += economicUsd;
+      directionalUsdTotal += economicUsd;
+    } else if (buys.length > 0 && sells.length > 0) {
+      const grossToken = buyTokenAmount + sellTokenAmount;
+      balanceRatio = grossToken > 0 ? Math.abs(netTokenAmount) / grossToken : null;
+      // A near-balanced target-token cycle across opposing legs is consistent with
+      // routing/arbitrage rather than a net user accumulation/disposal event.
+      if (balanceRatio !== null && balanceRatio <= 0.01) {
+        classification = 'ARBITRAGE';
+        direction = 'NEUTRAL';
+        economicUsd = Math.max(buyUsdGross, sellUsdGross);
+        arbitrageTransactions += 1;
+        arbitrageGrossUsd += buyUsdGross + sellUsdGross;
+      } else {
+        classification = 'UNKNOWN_MIXED';
+        direction = 'UNKNOWN';
+        economicUsd = 0;
+        unknownTransactions += 1;
+        unknownGrossUsd += buyUsdGross + sellUsdGross;
+      }
+    } else {
+      unknownTransactions += 1;
+      unknownGrossUsd += txRawUsd;
+    }
+
+    transactions.push({
+      txHash:first?.txHash || key,
+      block:first?.block ?? null,
+      time:first?.time ?? null,
+      initiator,
+      classification,
+      direction,
+      rawLegCount:txRows.length,
+      routed:txRows.length > 1,
+      buyLegs:buys.length,
+      sellLegs:sells.length,
+      unknownLegs:unknownRows.length,
+      targetToken:{
+        symbol:first?.token?.symbol || null,
+        address:first?.token?.address || null,
+        boughtAmount:round6V1063(buyTokenAmount),
+        soldAmount:round6V1063(sellTokenAmount),
+        netAmount:round6V1063(netTokenAmount)
+      },
+      usd:{
+        buyGross:round6V1063(buyUsdGross),
+        sellGross:round6V1063(sellUsdGross),
+        rawGross:round6V1063(txRawUsd),
+        economicDirectional:round6V1063(economicUsd)
+      },
+      balanceRatio:balanceRatio === null ? null : Number(balanceRatio.toFixed(6)),
+      protocols,
+      pools,
+      counterTokens,
+      participantEvidence:{
+        txFrom:initiator,
+        tokenBuyers,
+        tokenSellers,
+        note:'txFrom is treated as transaction initiator evidence only. Pool/router addresses are not assumed to be the end user.'
+      },
+      legs:txRows.map(r => ({
+        action:r?.action || 'UNKNOWN',
+        tokenAmount:r?.token?.amount ?? null,
+        tokenAmountUsd:r?.token?.amountUsd ?? null,
+        priceUsd:r?.token?.priceUsd ?? null,
+        buyer:r?.token?.buyer || null,
+        seller:r?.token?.seller || null,
+        counterSymbol:r?.counterSide?.symbol || null,
+        counterAmount:r?.counterSide?.amount ?? null,
+        counterAmountUsd:r?.counterSide?.amountUsd ?? null,
+        protocol:r?.dex?.protocolName || null,
+        pool:r?.dex?.smartContract || null
+      }))
+    });
+  }
+
+  const uniqueTransactionCount = transactions.length;
+  return {
+    rawRowCount:Array.isArray(rows) ? rows.length : 0,
+    uniqueTransactionCount,
+    duplicateOrExtraLegRows:Math.max(0, (Array.isArray(rows) ? rows.length : 0) - uniqueTransactionCount),
+    classifications:{
+      userOrRoutedBuyTransactions:buyTransactions,
+      userOrRoutedSellTransactions:sellTransactions,
+      routedBuyTransactions,
+      routedSellTransactions,
+      arbitrageTransactions,
+      unknownTransactions
+    },
+    directionalFlow:{
+      buyUsd:round6V1063(buyUsd),
+      sellUsd:round6V1063(sellUsd),
+      netBuyMinusSellUsd:round6V1063(buyUsd-sellUsd),
+      directionalUsdTotal:round6V1063(directionalUsdTotal),
+      note:'Same-direction split/routed legs are summed once at the transaction level. Near-balanced mixed BUY/SELL cycles are excluded from directional flow.'
+    },
+    excludedFlow:{
+      arbitrageGrossUsd:round6V1063(arbitrageGrossUsd),
+      unknownMixedGrossUsd:round6V1063(unknownGrossUsd)
+    },
+    comparison:{
+      rawRowUsdTotal:round6V1063(rawUsdTotal),
+      reconstructedDirectionalUsdTotal:round6V1063(directionalUsdTotal),
+      rawMinusDirectional:round6V1063(rawUsdTotal-directionalUsdTotal),
+      note:'Difference is not automatically duplication; it can include arbitrage/mixed activity intentionally excluded from directional user-flow totals.'
+    },
+    confidence:{
+      level:unknownTransactions === 0 ? 'HIGH_DIAGNOSTIC' : 'PARTIAL_DIAGNOSTIC',
+      authoritative:false,
+      note:'V1063 is transaction-level diagnostic reconstruction. It is not yet used by live scoring and does not claim transfer-level end-user attribution.'
+    },
+    transactions
+  };
+}
+
+async function bitqueryRobinhoodEconomicFlowDiagnosticV1063(env, url) {
+  const raw = await bitqueryRobinhoodSwapsDiagnosticV1061(env, url);
+  if (!raw?.success) {
+    return {
+      ...raw,
+      version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:'BITQUERY_ROBINHOOD_ECONOMIC_FLOW_V1063',
+      status:String(raw?.status || 'BITQUERY_BASE_DIAGNOSTIC_FAILED_V1063').replace(/V1061/g,'V1063'),
+      reconstructed:false,
+      note:'V1063 economic reconstruction did not run because the underlying V1061 Bitquery diagnostic did not succeed.'
+    };
+  }
+
+  const reconstruction = economicReconstructBitqueryRowsV1063(raw.rows);
+  return {
+    agent:'ChainVanta', version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'BITQUERY_ROBINHOOD_ECONOMIC_FLOW_V1063',
+    success:true, readOnly:true, configured:true,
+    status:raw.rows?.length ? 'BITQUERY_ECONOMIC_FLOW_OK_V1063' : 'BITQUERY_ECONOMIC_FLOW_NO_ROWS_V1063',
+    request:raw.request, oauth:raw.oauth, graphql:raw.graphql,
+    rawSummary:raw.summary,
+    reconstruction,
+    externalRequestsUsed:raw.externalRequestsUsed || 2,
+    scannerMutated:false,
+    note:'Diagnostic only. No V1063 Bitquery economic-flow result is used by the live scanner or scoring.',
+    elapsedMs:raw.elapsedMs, timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -183859,6 +184093,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryRobinhoodSwapsNormalizedDiagnosticV1062(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-swaps-economic"
+  ) {
+    return jsonResponse(
+      await bitqueryRobinhoodEconomicFlowDiagnosticV1063(env, url)
     );
   }
 
