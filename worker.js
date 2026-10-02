@@ -1,11 +1,13 @@
 /**
- * ChainVanta — V1060
- * BITQUERY OAUTH + ROBINHOOD CHAIN DIAGNOSTIC
- * Builds directly from confirmed-working V1059.
- * Adds a manual/read-only GET /bitquery-usage endpoint backed by Bitquery's account usage API.
- * Uses a dedicated BITQUERY_USAGE_TOKEN secret; never returns or logs credentials.
- * Reports trial status, limits, usage, percentages and budget-health warnings.
- * Makes no scanner, scoring, provider-routing, Telegram-call, Stripe, D1 or Durable Object changes.
+ * ChainVanta — V1061
+ * BITQUERY ROBINHOOD TOKEN-SWAP DIAGNOSTIC
+ * Builds directly from confirmed-working V1060.
+ * Preserves /bitquery-usage and /bitquery-oauth-test unchanged.
+ * Adds GET /bitquery-swaps?token=0x...&limit=10 for one manual/read-only
+ * Robinhood Chain DEXTradeByTokens diagnostic through Bitquery V2.
+ * Returns recent swap rows plus a diagnostic-only BUY/SELL USD summary.
+ * Uses BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET and never returns/logs credentials.
+ * Makes no scanner, scoring, provider-routing, Telegram-call, Stripe, D1, KV or Durable Object changes.
  */
 
 /**
@@ -8865,7 +8867,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1060"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1061"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -183286,6 +183288,226 @@ async function bitqueryOAuthRobinhoodDiagnosticV1060(env) {
   };
 }
 
+/* ============================================================
+   V1061 — BITQUERY ROBINHOOD TOKEN-SWAP DIAGNOSTIC
+   ============================================================
+   - GET /bitquery-swaps?token=0x...&limit=10 only.
+   - Requires a valid 20-byte EVM token contract address.
+   - Uses the ChainVanta Automatic Bitquery OAuth credentials.
+   - Makes one OAuth request + one Bitquery GraphQL request.
+   - Queries Bitquery's realtime Robinhood DEXTradeByTokens cube.
+   - Returns recent raw trade evidence and a diagnostic-only
+     BUY/SELL USD summary. Bitquery Side.Type is the counter-side:
+     token BUY when Side.Type=Sell; token SELL when Side.Type=Buy.
+   - Read-only. Nothing is written to scanner state, D1, KV or DOs.
+*/
+function bitqueryTokenActionV1061(sideType) {
+  const t = String(sideType || "").trim().toLowerCase();
+  if (t === "sell") return "BUY";
+  if (t === "buy") return "SELL";
+  return "UNKNOWN";
+}
+
+function finiteNumberOrNullV1061(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function bitqueryRobinhoodSwapsDiagnosticV1061(env, url) {
+  const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
+  const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
+  const configured = Boolean(clientId && clientSecret);
+  const token = String(url?.searchParams?.get("token") || "").trim().toLowerCase();
+  const requestedLimit = Number(url?.searchParams?.get("limit") || 10);
+  const limit = Math.min(25, Math.max(1, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 10));
+
+  if (!configured) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:"BITQUERY_ROBINHOOD_SWAPS_V1061", success:false, readOnly:true,
+      configured:false, status:"BITQUERY_OAUTH_SECRETS_NOT_CONFIGURED_V1061",
+      requiredSecrets:["BITQUERY_CLIENT_ID","BITQUERY_CLIENT_SECRET"],
+      externalRequestsUsed:0, scannerMutated:false, timestamp:now()
+    };
+  }
+
+  if (!/^0x[a-f0-9]{40}$/.test(token)) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:"BITQUERY_ROBINHOOD_SWAPS_V1061", success:false, readOnly:true,
+      configured:true, status:"VALID_TOKEN_ADDRESS_REQUIRED_V1061",
+      usage:"/bitquery-swaps?token=0xYOUR_TOKEN_ADDRESS&limit=10",
+      maxLimit:25, externalRequestsUsed:0, scannerMutated:false, timestamp:now()
+    };
+  }
+
+  const startedAt = Date.now();
+  let oauthResponse, oauthPayload;
+  try {
+    const body = new URLSearchParams({
+      grant_type:"client_credentials", client_id:clientId,
+      client_secret:clientSecret, scope:"api"
+    });
+    oauthResponse = await fetch(BITQUERY_OAUTH_TOKEN_URL_V1060, {
+      method:"POST",
+      headers:{"content-type":"application/x-www-form-urlencoded","accept":"application/json"},
+      body:body.toString()
+    });
+    const txt = await oauthResponse.text();
+    try { oauthPayload = txt ? JSON.parse(txt) : null; } catch (_) { oauthPayload = null; }
+  } catch (error) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_ROBINHOOD_SWAPS_V1061",
+      success:false, readOnly:true, configured:true, status:"BITQUERY_OAUTH_FETCH_FAILED_V1061",
+      token, error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240),
+      externalRequestsUsed:1, scannerMutated:false, elapsedMs:Date.now()-startedAt, timestamp:now()
+    };
+  }
+
+  const accessToken = String(oauthPayload?.access_token || "").trim();
+  if (!oauthResponse.ok || !accessToken) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_ROBINHOOD_SWAPS_V1061",
+      success:false, readOnly:true, configured:true, status:`BITQUERY_OAUTH_HTTP_${oauthResponse.status}_V1061`,
+      token, oauthHttpStatus:oauthResponse.status,
+      providerMessage:oauthPayload?.error_description || oauthPayload?.error || null,
+      tokenReturned:false, externalRequestsUsed:1, scannerMutated:false,
+      elapsedMs:Date.now()-startedAt, timestamp:now()
+    };
+  }
+
+  const query = `
+    {
+      EVM(network: robinhood, dataset: realtime) {
+        DEXTradeByTokens(
+          limit: {count: ${limit}}
+          orderBy: {descending: Block_Time}
+          where: {
+            TransactionStatus: {Success: true}
+            Trade: {Currency: {SmartContract: {is: "${token}"}}}
+          }
+        ) {
+          Block { Number Time }
+          Transaction { Hash From }
+          Trade {
+            Buyer
+            Seller
+            Amount
+            AmountInUSD
+            PriceInUSD
+            Currency { Symbol Name SmartContract }
+            Side {
+              Type
+              Amount
+              AmountInUSD
+              Currency { Symbol Name SmartContract }
+            }
+            Dex { ProtocolName ProtocolFamily SmartContract }
+          }
+        }
+      }
+    }
+  `;
+
+  let gqlResponse, gqlPayload;
+  try {
+    gqlResponse = await fetch(BITQUERY_GRAPHQL_URL_V1060, {
+      method:"POST",
+      headers:{
+        "content-type":"application/json", "accept":"application/json",
+        "authorization":`Bearer ${accessToken}`
+      },
+      body:JSON.stringify({query})
+    });
+    const txt = await gqlResponse.text();
+    try { gqlPayload = txt ? JSON.parse(txt) : null; } catch (_) { gqlPayload = null; }
+  } catch (error) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_ROBINHOOD_SWAPS_V1061",
+      success:false, readOnly:true, configured:true, status:"BITQUERY_GRAPHQL_FETCH_FAILED_V1061",
+      token, oauthHttpStatus:oauthResponse.status, tokenReturned:true,
+      error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240),
+      externalRequestsUsed:2, scannerMutated:false, elapsedMs:Date.now()-startedAt, timestamp:now()
+    };
+  }
+
+  const errors = Array.isArray(gqlPayload?.errors)
+    ? gqlPayload.errors.map(x => String(x?.message || "GRAPHQL_ERROR")).slice(0,8) : [];
+  const sourceRows = Array.isArray(gqlPayload?.data?.EVM?.DEXTradeByTokens)
+    ? gqlPayload.data.EVM.DEXTradeByTokens : [];
+
+  let buyCount = 0, sellCount = 0, unknownCount = 0;
+  let buyUsd = 0, sellUsd = 0, usdRows = 0;
+  const rows = sourceRows.map((row) => {
+    const trade = row?.Trade || {};
+    const side = trade?.Side || {};
+    const action = bitqueryTokenActionV1061(side?.Type);
+    const amountUsd = finiteNumberOrNullV1061(trade?.AmountInUSD);
+    if (action === "BUY") {
+      buyCount += 1;
+      if (amountUsd !== null) { buyUsd += amountUsd; usdRows += 1; }
+    } else if (action === "SELL") {
+      sellCount += 1;
+      if (amountUsd !== null) { sellUsd += amountUsd; usdRows += 1; }
+    } else {
+      unknownCount += 1;
+    }
+    return {
+      block:Number(row?.Block?.Number || 0) || row?.Block?.Number || null,
+      time:row?.Block?.Time || null,
+      txHash:row?.Transaction?.Hash || null,
+      txFrom:row?.Transaction?.From || null,
+      action,
+      sideType:side?.Type || null,
+      token:{
+        symbol:trade?.Currency?.Symbol || null,
+        name:trade?.Currency?.Name || null,
+        address:trade?.Currency?.SmartContract || token,
+        amount:finiteNumberOrNullV1061(trade?.Amount),
+        amountUsd,
+        priceUsd:finiteNumberOrNullV1061(trade?.PriceInUSD),
+        buyer:trade?.Buyer || null,
+        seller:trade?.Seller || null
+      },
+      counterSide:{
+        symbol:side?.Currency?.Symbol || null,
+        name:side?.Currency?.Name || null,
+        address:side?.Currency?.SmartContract || null,
+        amount:finiteNumberOrNullV1061(side?.Amount),
+        amountUsd:finiteNumberOrNullV1061(side?.AmountInUSD)
+      },
+      dex:{
+        protocolName:trade?.Dex?.ProtocolName || null,
+        protocolFamily:trade?.Dex?.ProtocolFamily || null,
+        smartContract:trade?.Dex?.SmartContract || null
+      }
+    };
+  });
+
+  const success = gqlResponse.ok && errors.length === 0;
+  return {
+    agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION, diagnostic:"BITQUERY_ROBINHOOD_SWAPS_V1061",
+    success, readOnly:true, configured:true,
+    status:success ? (rows.length ? "BITQUERY_ROBINHOOD_SWAPS_OK_V1061" : "BITQUERY_ROBINHOOD_NO_RECENT_SWAPS_V1061")
+      : (errors.length ? "BITQUERY_GRAPHQL_ERROR_V1061" : `BITQUERY_GRAPHQL_HTTP_${gqlResponse.status}_V1061`),
+    request:{network:"robinhood", dataset:"realtime", token, limit},
+    oauth:{httpStatus:oauthResponse.status, tokenReturned:true, expiresInSeconds:Number(oauthPayload?.expires_in || 0), scope:oauthPayload?.scope || null},
+    graphql:{httpStatus:gqlResponse.status, errors, rowCount:rows.length},
+    summary:{
+      buyCount, sellCount, unknownCount,
+      buyUsd:Number(buyUsd.toFixed(6)),
+      sellUsd:Number(sellUsd.toFixed(6)),
+      netBuyMinusSellUsd:Number((buyUsd-sellUsd).toFixed(6)),
+      usdValuedRows:usdRows,
+      note:"Diagnostic classification only. Bitquery Side.Type is the counter-side: Side Sell => token BUY; Side Buy => token SELL."
+    },
+    rows,
+    externalRequestsUsed:2, scannerMutated:false,
+    note:"Diagnostic only. No Bitquery result is used by the live scanner.",
+    elapsedMs:Date.now()-startedAt, timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -183482,6 +183704,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryOAuthRobinhoodDiagnosticV1060(env)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-swaps"
+  ) {
+    return jsonResponse(
+      await bitqueryRobinhoodSwapsDiagnosticV1061(env, url)
     );
   }
 
