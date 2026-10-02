@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1043";
+const VERSION = "V1044";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -171553,7 +171553,7 @@ function telegramHelpV271() {
      "<code>/accessexpiry</code> — cancellation/paid-through removal diagnostic (read-only)",
     "<code>/stripetrace</code> — V1040 latest Stripe subscription lifecycle event trace (read-only)",
     "<code>/expirycheck</code> — V1042 Premium expiry dry run; add 'simulate' to test after-expiry decision",
-    "<code>/expiryenforce</code> — V1043 enforce genuinely expired Premium memberships (real clock only)",
+    "<code>/expiryenforce</code> — V1044 enforce genuinely expired Premium memberships; owner permanently exempt",
     "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -181731,7 +181731,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
     }
   } catch (_) {}
   if (!raw) return [
-    "🔬 <b>Stripe Lifecycle Trace — V1043</b>",
+    "🔬 <b>Stripe Lifecycle Trace — V1044</b>",
     "",
     "No V1040 subscription lifecycle event has been recorded yet.",
     "",
@@ -181745,7 +181745,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       return Number.isFinite(n)&&n>0 ? `${escapeHtml(new Date(n*1000).toISOString())} (${Math.trunc(n)})` : fmt(v);
     };
     return [
-      "🔬 <b>Stripe Lifecycle Trace — V1043</b>","",
+      "🔬 <b>Stripe Lifecycle Trace — V1044</b>","",
       `Recorded: <code>${fmt(t.recordedAt)}</code>`,
       `Event: <code>${fmt(t.eventType)}</code>`,
       `Stripe status: <b>${fmt(t.stripeStatus)}</b>`,
@@ -181763,7 +181763,7 @@ async function stripeLifecycleTraceAdminMessageV1038(env) {
       "<i>Diagnostic only. No Telegram membership action is enabled.</i>"
     ].join("\n");
   } catch(error) {
-    return `🔬 <b>Stripe Lifecycle Trace — V1043</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
+    return `🔬 <b>Stripe Lifecycle Trace — V1044</b>\n\nTrace parse failed: ${escapeHtml(errorString(error).slice(0,300))}`;
   }
 }
 
@@ -181773,6 +181773,10 @@ async function telegramPremiumMembershipV1043(env, method, telegramUserId) {
   const token=String(env?.TELEGRAM_BOT_TOKEN||"").trim();
   const premiumChatId=String(env?.TELEGRAM_PREMIUM_CHAT_ID||"").trim();
   const userId=String(telegramUserId||"").trim();
+  // V1044 defense in depth: owner can never be targeted by this membership-removal helper.
+  if(userId === "6836231712") {
+    return {ok:false,skipped:true,reason:"OWNER_EXEMPT_NEVER_REMOVE_V1044"};
+  }
   if(!token || !premiumChatId || !/^\d+$/.test(userId)) {
     return {ok:false,reason:"TELEGRAM_PREMIUM_TARGET_NOT_CONFIGURED"};
   }
@@ -181786,11 +181790,13 @@ async function telegramPremiumMembershipV1043(env, method, telegramUserId) {
   return {ok:response.ok && data?.ok===true,status:response.status,data};
 }
 
+const CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044 = "6836231712";
+
 async function enforceExpiredPremiumAdminV1043(env) {
-  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Enforcement — V1043</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Enforcement — V1044</b>\n\nD1 binding: MISSING";
   const nowSec=Math.floor(Date.now()/1000);
   const premiumChatId=String(env.TELEGRAM_PREMIUM_CHAT_ID||"").trim();
-  if(!premiumChatId) return "🧯 <b>Premium Expiry Enforcement — V1043</b>\n\nPremium chat binding: MISSING";
+  if(!premiumChatId) return "🧯 <b>Premium Expiry Enforcement — V1044</b>\n\nPremium chat binding: MISSING";
   try {
     await env.CHAINVANTA_DB.prepare(
       `CREATE TABLE IF NOT EXISTS premium_expiry_actions_v1043 (
@@ -181811,13 +181817,19 @@ async function enforceExpiredPremiumAdminV1043(env) {
          AND current_period_end <= ?
        ORDER BY current_period_end ASC LIMIT 20`
     ).bind(nowSec).all();
-    const lines=["🧯 <b>Premium Expiry Enforcement — V1043</b>","",
+    const lines=["🧯 <b>Premium Expiry Enforcement — V1044</b>","",
       `Real time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`,
       `Premium target: <code>${escapeHtml(premiumChatId)}</code>`,""];
     let removed=0, skipped=0, failed=0;
     for(const row of (rows?.results||[])){
       const uid=String(row.telegram_user_id||"").trim();
       const label=row.telegram_username?`@${escapeHtml(String(row.telegram_username))}`:escapeHtml(uid);
+      // V1044 absolute owner safety: this check occurs before any Telegram membership API call.
+      if(uid === CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044){
+        skipped++;
+        lines.push(`${label} · <b>OWNER_EXEMPT — NEVER_REMOVE</b>`);
+        continue;
+      }
       if(!/^\d+$/.test(uid)){ failed++; lines.push(`${label} · INVALID TELEGRAM USER ID`); continue; }
       const prior=await env.CHAINVANTA_DB.prepare(
         `SELECT paid_through,action FROM premium_expiry_actions_v1043 WHERE telegram_user_id=?`
@@ -181870,12 +181882,12 @@ async function enforceExpiredPremiumAdminV1043(env) {
       "<i>Simulation mode is never accepted by this enforcement path.</i>");
     return lines.join("\n");
   } catch(error){
-    return `🧯 <b>Premium Expiry Enforcement — V1043</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
+    return `🧯 <b>Premium Expiry Enforcement — V1044</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
   }
 }
 
 async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry=false) {
-  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Dry Run — V1043</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧯 <b>Premium Expiry Dry Run — V1044</b>\n\nD1 binding: MISSING";
   try {
     const realNowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181893,7 +181905,7 @@ async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry
         : realNowSec;
     const nowSec=simulatedNowSec;
     const lines=[
-      "🧯 <b>Premium Expiry Dry Run — V1043</b>","",
+      "🧯 <b>Premium Expiry Dry Run — V1044</b>","",
       `Mode: <b>${simulateAfterExpiry ? "SIMULATED AFTER-EXPIRY DRY RUN" : "DRY RUN ONLY"}</b> — no Telegram removal call can be made.`,"",
       `Real time: <code>${escapeHtml(new Date(realNowSec*1000).toISOString())}</code>`,
       ...(simulateAfterExpiry ? [`Simulated evaluation time: <code>${escapeHtml(new Date(nowSec*1000).toISOString())}</code>`] : []),""
@@ -181916,12 +181928,12 @@ async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry
     lines.push("",`Would remove now: <b>${wouldRemoveCount}</b>`,"<i>Telegram membership is unchanged.</i>");
     return lines.join("\n");
   } catch(error){
-    return `🧯 <b>Premium Expiry Dry Run — V1043</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧯 <b>Premium Expiry Dry Run — V1044</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
 async function accessExpiryAdminMessageV1036(env) {
-  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1043</b>\n\nD1 binding: MISSING";
+  if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1044</b>\n\nD1 binding: MISSING";
   try {
     const nowSec=Math.floor(Date.now()/1000);
     const rows=await env.CHAINVANTA_DB.prepare(
@@ -181929,7 +181941,7 @@ async function accessExpiryAdminMessageV1036(env) {
        FROM subscribers
        ORDER BY updated_at DESC LIMIT 25`
     ).all();
-    const lines=["🧪 <b>Premium Access Expiry — V1043</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1043.`,""];
+    const lines=["🧪 <b>Premium Access Expiry — V1044</b>","",`Mode: <b>DIAGNOSTIC ONLY</b> — nobody can be removed by V1044.`,""];
     for(const row of (rows?.results||[])){
       const user=row.telegram_username ? `@${escapeHtml(String(row.telegram_username))}` : escapeHtml(String(row.telegram_user_id));
       const end=Number(row.current_period_end);
@@ -181941,7 +181953,7 @@ async function accessExpiryAdminMessageV1036(env) {
     if(!(rows?.results||[]).length) lines.push("No mapped subscribers.");
     return lines.join("\n");
   } catch(error){
-    return `🧪 <b>Premium Access Expiry — V1043</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
+    return `🧪 <b>Premium Access Expiry — V1044</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
 
