@@ -8855,7 +8855,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1050";
+const VERSION = "V1051";
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -172520,6 +172520,18 @@ async function telegramCommandReplyV271(
     return {success:sentV1049?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
   }
 
+  // V1051: read-only Premium business/admin dashboard. No scanner or enforcement mutation.
+  if (parsed.command === "/premiumstatus") {
+    const replyV1051 = await premiumBusinessDashboardV1051(env);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1051 = await sendTelegram(env, replyV1051, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1051?.success === true;
+      diagnosticV273.result = sentV1051?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1051?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
   // V1050: read-only diagnostic for the last automatic Premium access enforcement run.
   if (parsed.command === "/accessautorun") {
     const replyV1050 = await premiumAccessAutoRunStatusV1050(env);
@@ -182343,6 +182355,68 @@ async function premiumAccessEnforcementAdminMessageV1049(env) {
   }
 }
 
+
+
+async function premiumBusinessDashboardV1051(env) {
+  if(!env?.CHAINVANTA_DB) return "📊 <b>ChainVanta Premium — V1051</b>\n\nD1 binding: MISSING";
+  try {
+    const nowSec=Math.floor(Date.now()/1000);
+    const counts=await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN UPPER(COALESCE(status,'')) IN ('ACTIVE','TRIALING') THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN UPPER(COALESCE(status,''))='CANCEL_SCHEDULED' AND current_period_end>? THEN 1 ELSE 0 END) AS cancelling_paid,
+        SUM(CASE WHEN UPPER(COALESCE(status,'')) IN ('PAYMENT_GRACE','PAYMENT_ATTENTION') AND grace_until>? THEN 1 ELSE 0 END) AS grace_active,
+        SUM(CASE WHEN UPPER(COALESCE(status,'')) IN ('PAYMENT_GRACE','PAYMENT_ATTENTION') AND grace_until IS NOT NULL AND grace_until<=? THEN 1 ELSE 0 END) AS grace_expired,
+        SUM(CASE WHEN (UPPER(COALESCE(status,''))='ENDED') OR (UPPER(COALESCE(status,''))='CANCEL_SCHEDULED' AND current_period_end IS NOT NULL AND current_period_end<=?) THEN 1 ELSE 0 END) AS expired
+      FROM subscribers
+    `).bind(nowSec,nowSec,nowSec,nowSec).first();
+
+    let lastRun=null;
+    try {
+      await premiumAccessAutoRunEnsureV1050(env);
+      lastRun=await env.CHAINVANTA_DB.prepare(`
+        SELECT id,started_at,completed_at,status,summary
+        FROM premium_access_auto_runs_v1050 ORDER BY id DESC LIMIT 1
+      `).first();
+    } catch(_) {}
+
+    const total=Number(counts?.total||0);
+    const active=Number(counts?.active||0);
+    const cancellingPaid=Number(counts?.cancelling_paid||0);
+    const graceActive=Number(counts?.grace_active||0);
+    const graceExpired=Number(counts?.grace_expired||0);
+    const expired=Number(counts?.expired||0);
+    const recurringCount=active+graceActive;
+    const estimatedMrr=recurringCount*49;
+
+    let enforcementLine="No automatic enforcement run recorded yet.";
+    if(lastRun){
+      const started=Number(lastRun.started_at||0);
+      enforcementLine=`Run ${escapeHtml(String(lastRun.id||"?"))} · ${escapeHtml(String(lastRun.status||"UNKNOWN"))} · ${escapeHtml(started?new Date(started*1000).toISOString():"UNKNOWN")}`;
+    }
+
+    return [
+      "📊 <b>ChainVanta Premium Dashboard — V1051</b>","",
+      `<b>Subscribers</b>`,
+      `Total mapped: <b>${total}</b>`,
+      `Active / trialing: <b>${active}</b>`,
+      `Cancelling but still paid: <b>${cancellingPaid}</b>`,
+      `Inside payment grace: <b>${graceActive}</b>`,
+      `Grace expired: <b>${graceExpired}</b>`,
+      `Ended / paid-through expired: <b>${expired}</b>`,"",
+      `<b>Business snapshot</b>`,
+      `Estimated recurring £49 subscriptions: <b>${recurringCount}</b>`,
+      `Estimated MRR at £49: <b>£${estimatedMrr.toLocaleString("en-GB")}</b>`,
+      `<i>Estimate uses D1 ACTIVE/TRIALING plus active PAYMENT_GRACE records; Stripe remains authoritative for actual revenue.</i>`,"",
+      `<b>Automatic enforcement</b>`,
+      enforcementLine,"",
+      `<i>Read-only dashboard. D1 writes: 0 · Telegram membership calls: 0 · scanner changes: 0.</i>`
+    ].join("\n");
+  } catch(error) {
+    return `📊 <b>ChainVanta Premium Dashboard — V1051</b>\n\nFailed safely: ${escapeHtml(errorString(error).slice(0,700))}`;
+  }
+}
 
 async function premiumAccessAutoRunEnsureV1050(env) {
   if(!env?.CHAINVANTA_DB) return {ok:false,reason:"D1_BINDING_MISSING"};
