@@ -1,4 +1,18 @@
 /**
+ * ChainVanta — V1084
+ * HISTORY INTEGRITY NULL-COERCION FIX
+ * Builds directly from deployed V1083.
+ * - Fixes the V1083 diagnostic treating SQL NULL market_snapshot_changed as 0
+ *   because Number(null) === 0 in JavaScript.
+ * - Legacy/pre-V1083 rows are now reported separately instead of being counted
+ *   as unchanged market evidence.
+ * - The diagnostic now reports V1083-classified rows explicitly, so we can tell
+ *   whether a post-deploy history row has actually been written yet.
+ * - No scanner, scoring, provider, request-budget, accumulation or Telegram
+ *   behaviour changes.
+ */
+
+/**
  * ChainVanta — V1083
  * HISTORY EVIDENCE INTEGRITY
  * Builds directly from deployed V1082.
@@ -9106,7 +9120,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1083"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1084"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -186430,9 +186444,33 @@ async function historyIntegrityV1083(env, url) {
 
     const rows = Array.isArray(result?.results) ? result.results : [];
     const verified = rows.filter(r => Number(r?.market_verified) === 1);
-    const changed = rows.filter(r => Number(r?.market_snapshot_changed) === 1);
-    const unchanged = rows.filter(r => Number(r?.market_snapshot_changed) === 0);
-    const flowRows = rows.filter(r => Number(r?.flow_verified) === 1);
+    const classifiedRows = rows.filter(
+      r =>
+        r?.market_evidence_mode !== null &&
+        r?.market_evidence_mode !== undefined &&
+        String(r.market_evidence_mode).trim() !== ""
+    );
+    const legacyUnclassifiedRows = rows.filter(
+      r =>
+        r?.market_evidence_mode === null ||
+        r?.market_evidence_mode === undefined ||
+        String(r.market_evidence_mode).trim() === ""
+    );
+    const changed = rows.filter(
+      r => r?.market_snapshot_changed !== null &&
+           r?.market_snapshot_changed !== undefined &&
+           Number(r.market_snapshot_changed) === 1
+    );
+    const unchanged = rows.filter(
+      r => r?.market_snapshot_changed !== null &&
+           r?.market_snapshot_changed !== undefined &&
+           Number(r.market_snapshot_changed) === 0
+    );
+    const flowRows = rows.filter(
+      r => r?.flow_verified !== null &&
+           r?.flow_verified !== undefined &&
+           Number(r.flow_verified) === 1
+    );
 
     return {
       ...base,
@@ -186441,22 +186479,32 @@ async function historyIntegrityV1083(env, url) {
       rowCount:rows.length,
       summary:{
         marketVerifiedRows:verified.length,
+        v1083ClassifiedRows:classifiedRows.length,
+        legacyUnclassifiedRows:legacyUnclassifiedRows.length,
         changedMarketRows:changed.length,
         unchangedMarketRows:unchanged.length,
         comparableMarketRows:changed.length + unchanged.length,
         verifiedOnChainFlowRows:flowRows.length,
         latestMarketEvidenceMode:rows[0]?.market_evidence_mode || null,
-        latestFlowVerified:Number(rows[0]?.flow_verified) === 1,
+        latestFlowVerified:
+          rows[0]?.flow_verified !== null &&
+          rows[0]?.flow_verified !== undefined &&
+          Number(rows[0].flow_verified) === 1,
+        postV1083HistoryObserved:classifiedRows.length > 0,
         staticMarketEvidenceDominant:
           (changed.length + unchanged.length) >= 3 &&
           unchanged.length > changed.length * 2
       },
       recent:rows.slice(0,20),
       interpretation:
-        flowRows.length > 0
-          ? "Verified bot-observed on-chain USD flow is persisted separately from provider market snapshots."
-          : "No verified V212 on-chain USD flow has yet been stored for this token; provider snapshot freshness is still tracked independently.",
-      note:"Measurement only. V1083 does not change accumulation scoring or Telegram qualification.",
+        classifiedRows.length === 0
+          ? "No post-V1083 classified history row has been stored for this token yet. Existing rows are legacy history and must not be interpreted as unchanged V1083 evidence."
+          : (
+              flowRows.length > 0
+                ? "Verified bot-observed on-chain USD flow is persisted separately from provider market snapshots."
+                : "Post-V1083 history exists, but no verified V212 on-chain USD flow has yet been stored for this token."
+            ),
+      note:"Measurement only. V1084 fixes diagnostic null handling; accumulation scoring and Telegram qualification remain unchanged.",
       timestamp:now()
     };
   } catch (error) {
