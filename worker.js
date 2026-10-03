@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1078
+ * ACCUMULATION INTELLIGENCE — SHADOW / DIAGNOSTIC ONLY
+ * Builds directly from deployed V1077.
+ * - Reads the existing V1076 D1 market-history time series only.
+ * - Produces a bounded 0-100 Accumulation score plus evidence coverage,
+ *   trend components, warnings and a non-actionable shadow state.
+ * - Contract address is the identity key; symbols are display-only and may duplicate.
+ * - Strong protection against false bullish readings from price spikes on collapsing
+ *   or tiny liquidity.
+ * - Adds /accumulation-status and /accumulation?token=0x... endpoints.
+ * - Requires repeated observations before a BUILDING/STRONG shadow state is possible.
+ * - No Opportunity/Momentum/Confidence/Risk weights change.
+ * - No Telegram qualification, calls, Stripe, provider routing, request ceilings,
+ *   KV schema or Durable Objects change.
+ * - Zero external provider/RPC calls from the new diagnostics.
+ */
+
+/**
  * ChainVanta — V1077
  * PERSISTENT INTELLIGENCE WATCHLIST
  * Builds directly from deployed V1076.
@@ -9003,7 +9021,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1077"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1078"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184872,6 +184890,446 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
 
 
 
+
+/* ============================================================
+   V1078 — ACCUMULATION INTELLIGENCE — SHADOW MODE
+   ============================================================
+   IMPORTANT:
+   - Diagnostic/read-only only.
+   - Never changes Telegram qualification or existing scores.
+   - Address-keyed. Symbol is display only.
+*/
+const ACCUM_MIN_OBSERVATIONS_V1078 = 3;
+const ACCUM_MIN_SPAN_MS_V1078 = 10 * 60 * 1000;
+const ACCUM_STRONG_MIN_OBSERVATIONS_V1078 = 5;
+const ACCUM_STRONG_MIN_SPAN_MS_V1078 = 20 * 60 * 1000;
+const ACCUM_MIN_HEALTHY_LIQUIDITY_USD_V1078 = 5000;
+const ACCUM_LIQUIDITY_COLLAPSE_RATIO_V1078 = 0.50;
+const ACCUM_EXTREME_PRICE_SPIKE_PCT_V1078 = 75;
+
+function pctChangeV1078(first, last) {
+  const a = finiteOrNullV1076(first);
+  const b = finiteOrNullV1076(last);
+  if (a === null || b === null || a <= 0) return null;
+  return Number((((b - a) / a) * 100).toFixed(3));
+}
+
+function averageV1078(values) {
+  const rows = (Array.isArray(values) ? values : [])
+    .map(finiteOrNullV1076)
+    .filter(v => v !== null);
+  if (!rows.length) return null;
+  return rows.reduce((a,b) => a + b, 0) / rows.length;
+}
+
+function clampScoreV1078(value) {
+  return Math.max(0, Math.min(100, Math.round(safeNumber(value))));
+}
+
+function accumulationLabelV1078(score, evidenceReady, warnings, observations, spanMs) {
+  if (!evidenceReady) return "BUILDING_HISTORY";
+  if (Array.isArray(warnings) && warnings.some(w =>
+    [
+      "LIQUIDITY_COLLAPSE",
+      "EXTREME_PRICE_SPIKE_ON_THIN_OR_FALLING_LIQUIDITY",
+      "VERIFIED_HIGH_RISK",
+      "EXTREME_CONCENTRATION"
+    ].includes(w)
+  )) {
+    return score >= 55 ? "CAUTION" : "WEAK";
+  }
+  if (
+    observations >= ACCUM_STRONG_MIN_OBSERVATIONS_V1078 &&
+    spanMs >= ACCUM_STRONG_MIN_SPAN_MS_V1078 &&
+    score >= 75
+  ) return "STRONG";
+  if (score >= 60) return "BUILDING";
+  if (score >= 40) return "MIXED";
+  return "WEAK";
+}
+
+function accumulationFromRowsV1078(address, rows) {
+  const normalizedAddress = normalize(address);
+  const ordered = (Array.isArray(rows) ? rows : [])
+    .filter(row => normalize(row?.address) === normalizedAddress)
+    .sort((a,b) => safeNumber(a?.captured_at) - safeNumber(b?.captured_at));
+
+  const observations = ordered.length;
+  const firstAt = observations ? safeNumber(ordered[0]?.captured_at) : 0;
+  const lastAt = observations ? safeNumber(ordered[observations - 1]?.captured_at) : 0;
+  const spanMs = firstAt && lastAt ? Math.max(0, lastAt - firstAt) : 0;
+
+  const verifiedMarketRows = ordered.filter(row => Number(row?.market_verified) === 1);
+  const firstMarket = verifiedMarketRows[0] || null;
+  const lastMarket = verifiedMarketRows[verifiedMarketRows.length - 1] || null;
+
+  const priceChangePct = firstMarket && lastMarket
+    ? pctChangeV1078(firstMarket?.price_usd, lastMarket?.price_usd)
+    : null;
+  const liquidityChangePct = firstMarket && lastMarket
+    ? pctChangeV1078(firstMarket?.liquidity_usd, lastMarket?.liquidity_usd)
+    : null;
+  const volumeChangePct = firstMarket && lastMarket
+    ? pctChangeV1078(firstMarket?.volume_24h_usd, lastMarket?.volume_24h_usd)
+    : null;
+
+  const latestLiquidityUsd = lastMarket
+    ? finiteOrNullV1076(lastMarket?.liquidity_usd)
+    : null;
+
+  const txRows = verifiedMarketRows.map(row => {
+    const buys = finiteOrNullV1076(row?.buys_5m);
+    const sells = finiteOrNullV1076(row?.sells_5m);
+    if (buys === null || sells === null || buys + sells <= 0) return null;
+    return {
+      buys,
+      sells,
+      buyShare: buys / (buys + sells)
+    };
+  }).filter(Boolean);
+
+  const averageBuyShare = averageV1078(txRows.map(row => row.buyShare));
+  const latestBuyShare = txRows.length ? txRows[txRows.length - 1].buyShare : null;
+
+  const momentumValues = ordered
+    .map(row => finiteOrNullV1076(row?.momentum_score))
+    .filter(v => v !== null);
+  const averageMomentum = averageV1078(momentumValues);
+  const latestMomentum = momentumValues.length ? momentumValues[momentumValues.length - 1] : null;
+
+  const confidenceValues = ordered
+    .map(row => finiteOrNullV1076(row?.confidence_score))
+    .filter(v => v !== null);
+  const latestConfidence = confidenceValues.length ? confidenceValues[confidenceValues.length - 1] : null;
+
+  const riskRows = ordered
+    .filter(row => Number(row?.risk_verified) === 1)
+    .map(row => finiteOrNullV1076(row?.risk_score))
+    .filter(v => v !== null);
+  const latestRisk = riskRows.length ? riskRows[riskRows.length - 1] : null;
+
+  const top1Rows = ordered
+    .map(row => finiteOrNullV1076(row?.top_holder_pct))
+    .filter(v => v !== null && v > 0);
+  const top10Rows = ordered
+    .map(row => finiteOrNullV1076(row?.top10_pct))
+    .filter(v => v !== null && v > 0);
+
+  const top1ChangePctPoints =
+    top1Rows.length >= 2
+      ? Number((top1Rows[top1Rows.length - 1] - top1Rows[0]).toFixed(3))
+      : null;
+  const top10ChangePctPoints =
+    top10Rows.length >= 2
+      ? Number((top10Rows[top10Rows.length - 1] - top10Rows[0]).toFixed(3))
+      : null;
+
+  const latestTop1 = top1Rows.length ? top1Rows[top1Rows.length - 1] : null;
+  const latestTop10 = top10Rows.length ? top10Rows[top10Rows.length - 1] : null;
+
+  const warnings = [];
+  let score = 0;
+
+  const evidenceReady =
+    observations >= ACCUM_MIN_OBSERVATIONS_V1078 &&
+    spanMs >= ACCUM_MIN_SPAN_MS_V1078 &&
+    verifiedMarketRows.length >= 2;
+
+  // Evidence depth: max 15
+  score += Math.min(15, observations * 2);
+  if (verifiedMarketRows.length >= 2) score += 5;
+
+  // Price behaviour: max 15. Reward controlled appreciation, not vertical spikes.
+  if (priceChangePct !== null) {
+    if (priceChangePct >= 2 && priceChangePct <= 30) score += 15;
+    else if (priceChangePct > 30 && priceChangePct <= 60) score += 9;
+    else if (priceChangePct > 0 && priceChangePct < 2) score += 6;
+    else if (priceChangePct >= -5 && priceChangePct <= 0) score += 4;
+    else if (priceChangePct < -15) score -= 8;
+  }
+
+  // Liquidity trend: max 25. This is deliberately heavily weighted.
+  if (latestLiquidityUsd !== null) {
+    if (latestLiquidityUsd >= ACCUM_MIN_HEALTHY_LIQUIDITY_USD_V1078) score += 8;
+    else if (latestLiquidityUsd < 1000) score -= 12;
+  }
+
+  if (liquidityChangePct !== null) {
+    if (liquidityChangePct >= 10) score += 17;
+    else if (liquidityChangePct >= 0) score += 10;
+    else if (liquidityChangePct >= -10) score += 5;
+    else if (liquidityChangePct <= -50) score -= 30;
+    else if (liquidityChangePct <= -25) score -= 18;
+    else score -= 8;
+  }
+
+  const firstLiquidity = firstMarket ? finiteOrNullV1076(firstMarket?.liquidity_usd) : null;
+  if (
+    firstLiquidity !== null &&
+    latestLiquidityUsd !== null &&
+    firstLiquidity > 0 &&
+    latestLiquidityUsd / firstLiquidity <= ACCUM_LIQUIDITY_COLLAPSE_RATIO_V1078
+  ) {
+    warnings.push("LIQUIDITY_COLLAPSE");
+  }
+
+  // Buy pressure: max 25
+  if (averageBuyShare !== null) {
+    if (averageBuyShare >= 0.65) score += 20;
+    else if (averageBuyShare >= 0.58) score += 14;
+    else if (averageBuyShare >= 0.52) score += 8;
+    else if (averageBuyShare < 0.45) score -= 10;
+  }
+  if (latestBuyShare !== null && averageBuyShare !== null) {
+    if (latestBuyShare >= averageBuyShare + 0.08) score += 5;
+    if (latestBuyShare <= averageBuyShare - 0.10) score -= 5;
+  }
+
+  // Momentum persistence: max 10
+  if (averageMomentum !== null) {
+    if (averageMomentum >= 50) score += 10;
+    else if (averageMomentum >= 25) score += 7;
+    else if (averageMomentum >= 10) score += 4;
+  }
+
+  // Confidence: max 10
+  if (latestConfidence !== null) {
+    if (latestConfidence >= 75) score += 10;
+    else if (latestConfidence >= 65) score += 7;
+    else if (latestConfidence >= 55) score += 4;
+  }
+
+  // Volume expansion: modest because 24h rolling volume can be noisy over short spans.
+  if (volumeChangePct !== null) {
+    if (volumeChangePct >= 20) score += 8;
+    else if (volumeChangePct >= 5) score += 4;
+    else if (volumeChangePct <= -25) score -= 5;
+  }
+
+  // Holder concentration trend: only when repeated, non-zero evidence exists.
+  if (top1ChangePctPoints !== null && top1ChangePctPoints <= -2) score += 4;
+  if (top10ChangePctPoints !== null && top10ChangePctPoints <= -3) score += 4;
+  if (top1ChangePctPoints !== null && top1ChangePctPoints >= 5) score -= 8;
+  if (top10ChangePctPoints !== null && top10ChangePctPoints >= 8) score -= 8;
+
+  // Safety penalties.
+  if (latestRisk !== null && latestRisk > 60) {
+    warnings.push("VERIFIED_HIGH_RISK");
+    score -= 25;
+  }
+
+  if (
+    (latestTop1 !== null && latestTop1 >= 50) ||
+    (latestTop10 !== null && latestTop10 >= 80)
+  ) {
+    warnings.push("EXTREME_CONCENTRATION");
+    score -= 25;
+  }
+
+  if (
+    priceChangePct !== null &&
+    priceChangePct >= ACCUM_EXTREME_PRICE_SPIKE_PCT_V1078 &&
+    (
+      latestLiquidityUsd === null ||
+      latestLiquidityUsd < ACCUM_MIN_HEALTHY_LIQUIDITY_USD_V1078 ||
+      (liquidityChangePct !== null && liquidityChangePct < -20)
+    )
+  ) {
+    warnings.push("EXTREME_PRICE_SPIKE_ON_THIN_OR_FALLING_LIQUIDITY");
+    score -= 30;
+  }
+
+  if (verifiedMarketRows.length < 2) warnings.push("INSUFFICIENT_VERIFIED_MARKET_HISTORY");
+  if (observations < ACCUM_MIN_OBSERVATIONS_V1078) warnings.push("INSUFFICIENT_OBSERVATIONS");
+  if (spanMs < ACCUM_MIN_SPAN_MS_V1078) warnings.push("INSUFFICIENT_TIME_SPAN");
+  if (!txRows.length) warnings.push("BUY_SELL_PRESSURE_UNAVAILABLE");
+
+  const finalScore = clampScoreV1078(score);
+  const label = accumulationLabelV1078(
+    finalScore,
+    evidenceReady,
+    warnings,
+    observations,
+    spanMs
+  );
+
+  return {
+    version:"V1078",
+    shadowOnly:true,
+    actionable:false,
+    address:normalizedAddress,
+    symbol:ordered[ordered.length - 1]?.symbol || null,
+    observations,
+    verifiedMarketObservations:verifiedMarketRows.length,
+    firstAt:firstAt || null,
+    lastAt:lastAt || null,
+    spanMinutes:Number((spanMs / 60000).toFixed(1)),
+    evidenceReady,
+    accumulationScore:finalScore,
+    accumulationState:label,
+    trends:{
+      priceChangePct,
+      liquidityChangePct,
+      volume24hChangePct:volumeChangePct,
+      latestLiquidityUsd,
+      averageBuySharePct:
+        averageBuyShare === null ? null : Number((averageBuyShare * 100).toFixed(1)),
+      latestBuySharePct:
+        latestBuyShare === null ? null : Number((latestBuyShare * 100).toFixed(1)),
+      averageMomentum:
+        averageMomentum === null ? null : Number(averageMomentum.toFixed(1)),
+      latestMomentum,
+      latestConfidence,
+      latestRisk,
+      topHolderChangePctPoints:top1ChangePctPoints,
+      top10ChangePctPoints
+    },
+    warnings:[...new Set(warnings)],
+    interpretation:
+      label === "STRONG"
+        ? "Sustained multi-snapshot accumulation evidence in shadow mode."
+        : label === "BUILDING"
+          ? "Accumulation evidence is building but is not yet a production buy-zone signal."
+          : label === "CAUTION"
+            ? "Some bullish inputs exist, but material safety/liquidity warnings prevent a bullish interpretation."
+            : label === "BUILDING_HISTORY"
+              ? "More repeated history is required before accumulation can be judged."
+              : "Current repeated evidence does not show strong accumulation.",
+    productionImpact:{
+      opportunityChanged:false,
+      momentumChanged:false,
+      confidenceChanged:false,
+      riskChanged:false,
+      telegramQualificationChanged:false,
+      telegramCallsChanged:false
+    }
+  };
+}
+
+async function accumulationRowsForAddressV1078(env, address, limit = 288) {
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) return {ok:false,status:ready.status,error:ready.error||null,rows:[]};
+
+  const normalized = normalize(address);
+  if (!isAddress(normalized)) {
+    return {ok:false,status:"INVALID_TOKEN_ADDRESS_V1078",error:null,rows:[]};
+  }
+
+  const safeLimit = Math.max(3, Math.min(1000, Math.trunc(Number(limit) || 288)));
+
+  try {
+    const result = await env.CHAINVANTA_DB.prepare(`
+      SELECT *
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+      WHERE address = ?
+      ORDER BY captured_at DESC
+      LIMIT ?
+    `).bind(normalized, safeLimit).all();
+
+    return {
+      ok:true,
+      status:"ACCUMULATION_HISTORY_ROWS_OK_V1078",
+      rows:(Array.isArray(result?.results) ? result.results : []).reverse()
+    };
+  } catch (error) {
+    return {
+      ok:false,
+      status:"ACCUMULATION_HISTORY_ROWS_FAILED_V1078",
+      error:errorString(error).slice(0,700),
+      rows:[]
+    };
+  }
+}
+
+async function accumulationTokenDiagnosticV1078(env, url) {
+  const token = normalize(url.searchParams.get("token"));
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"ACCUMULATION_TOKEN_V1078",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0,
+    token
+  };
+
+  if (!isAddress(token)) {
+    return {...base,status:"INVALID_TOKEN_ADDRESS_V1078",timestamp:now()};
+  }
+
+  const history = await accumulationRowsForAddressV1078(
+    env,
+    token,
+    url.searchParams.get("limit") || 288
+  );
+
+  if (!history.ok) {
+    return {...base,status:history.status,error:history.error||null,timestamp:now()};
+  }
+
+  return {
+    ...base,
+    success:true,
+    status:"ACCUMULATION_TOKEN_OK_V1078",
+    result:accumulationFromRowsV1078(token, history.rows),
+    timestamp:now()
+  };
+}
+
+async function accumulationStatusV1078(env) {
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"ACCUMULATION_STATUS_V1078",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0
+  };
+
+  const watch = await intelligenceWatchRowsV1077(env, 100);
+  if (!watch.ok) {
+    return {...base,status:watch.status,error:watch.error||null,timestamp:now()};
+  }
+
+  const nowMs = Date.now();
+  const eligible = watch.rows
+    .filter(row => intelligenceWatchRowEligibleV1077(row, nowMs))
+    .slice(0, 20);
+
+  const results = [];
+  for (const row of eligible) {
+    const address = normalize(row?.address);
+    const history = await accumulationRowsForAddressV1078(env, address, 288);
+    if (!history.ok) continue;
+    results.push(accumulationFromRowsV1078(address, history.rows));
+  }
+
+  results.sort((a,b) =>
+    (b.accumulationScore - a.accumulationScore) ||
+    (b.observations - a.observations)
+  );
+
+  return {
+    ...base,
+    success:true,
+    status:"ACCUMULATION_STATUS_OK_V1078",
+    evaluated:results.length,
+    evidenceReady:results.filter(r => r.evidenceReady).length,
+    strong:results.filter(r => r.accumulationState === "STRONG").length,
+    building:results.filter(r => r.accumulationState === "BUILDING").length,
+    caution:results.filter(r => r.accumulationState === "CAUTION").length,
+    mixed:results.filter(r => r.accumulationState === "MIXED").length,
+    weak:results.filter(r => r.accumulationState === "WEAK").length,
+    buildingHistory:results.filter(r => r.accumulationState === "BUILDING_HISTORY").length,
+    tokens:results.slice(0,20),
+    note:"Shadow diagnostic only. No token shown here is automatically a BUY or Telegram-qualified call.",
+    timestamp:now()
+  };
+}
+
+
 /* ============================================================
    V1077 — PERSISTENT INTELLIGENCE WATCHLIST
    ============================================================
@@ -186868,6 +187326,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await intelligenceWatchlistStatusV1077(env)
+    );
+  }
+
+  if (
+    path ===
+      "/accumulation-status"
+  ) {
+    return jsonResponse(
+      await accumulationStatusV1078(env)
+    );
+  }
+
+  if (
+    path ===
+      "/accumulation"
+  ) {
+    return jsonResponse(
+      await accumulationTokenDiagnosticV1078(env, url)
     );
   }
 
