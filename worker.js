@@ -1,4 +1,21 @@
 /**
+ * ChainVanta — V1082
+ * DURABLE COHORT QUALITY PRUNING
+ * Builds directly from deployed V1081.
+ * - Removes retained cohort entries only when repeated D1 history confirms
+ *   severe verified risk or extreme holder concentration.
+ * - Requires at least 2 stored observations before a quality removal can occur,
+ *   avoiding one-snapshot churn.
+ * - Severe-risk removal: verified Risk >= 90.
+ * - Extreme-concentration removal: top holder >= 50% OR top 10 >= 80%.
+ * - Quality pruning runs only in the scheduled intelligence lane; the status
+ *   endpoint remains diagnostic/read-only.
+ * - Frees bounded cohort slots for healthier candidates without changing the
+ *   existing scanner, scores, qualification, Telegram calls or request ceilings.
+ * - Uses D1 only; adds zero external provider/RPC requests.
+ */
+
+/**
  * ChainVanta — V1081
  * TARGETED COHORT HISTORY LOOKUP
  * Builds directly from deployed V1080.
@@ -9075,7 +9092,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1081"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1082"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -185070,6 +185087,168 @@ async function cohortHistorySummariesV1081(env, addresses) {
   }
 }
 
+
+/* ============================================================
+   V1082 — DURABLE COHORT QUALITY PRUNING
+   ============================================================ */
+const INTELLIGENCE_COHORT_QUALITY_MIN_OBSERVATIONS_V1082 = 2;
+const INTELLIGENCE_COHORT_SEVERE_RISK_V1082 = 90;
+const INTELLIGENCE_COHORT_EXTREME_TOP1_V1082 = 50;
+const INTELLIGENCE_COHORT_EXTREME_TOP10_V1082 = 80;
+
+function intelligenceCohortQualityDecisionV1082(row) {
+  const observations = safeNumber(row?.observation_count);
+
+  if (observations < INTELLIGENCE_COHORT_QUALITY_MIN_OBSERVATIONS_V1082) {
+    return {
+      keep:true,
+      reason:"INSUFFICIENT_REPEAT_HISTORY_FOR_QUALITY_PRUNE_V1082",
+      observations
+    };
+  }
+
+  const riskVerified = Number(row?.risk_verified) === 1;
+  const riskScore = riskVerified
+    ? finiteOrNullV1076(row?.risk_score)
+    : null;
+
+  const top1 = finiteOrNullV1076(row?.top_holder_pct);
+  const top10 = finiteOrNullV1076(row?.top10_pct);
+
+  if (
+    riskVerified &&
+    riskScore !== null &&
+    riskScore >= INTELLIGENCE_COHORT_SEVERE_RISK_V1082
+  ) {
+    return {
+      keep:false,
+      reason:"VERIFIED_SEVERE_RISK_PRUNED_V1082",
+      observations,
+      riskScore,
+      top1,
+      top10
+    };
+  }
+
+  if (
+    (top1 !== null && top1 >= INTELLIGENCE_COHORT_EXTREME_TOP1_V1082) ||
+    (top10 !== null && top10 >= INTELLIGENCE_COHORT_EXTREME_TOP10_V1082)
+  ) {
+    return {
+      keep:false,
+      reason:"VERIFIED_EXTREME_CONCENTRATION_PRUNED_V1082",
+      observations,
+      riskScore,
+      top1,
+      top10
+    };
+  }
+
+  return {
+    keep:true,
+    reason:"QUALITY_ACCEPTABLE_V1082",
+    observations,
+    riskScore,
+    top1,
+    top10
+  };
+}
+
+async function applyIntelligenceCohortQualityPruningV1082(env, state) {
+  const cohort = ensureIntelligenceCohortV1079(state);
+  const base = {
+    version:"V1082",
+    applied:false,
+    entriesBefore:safeNumber(cohort?.entries?.length),
+    entriesAfter:safeNumber(cohort?.entries?.length),
+    removed:0,
+    removedEntries:[],
+    historyStatus:null,
+    externalRequestsUsed:0,
+    status:null
+  };
+
+  if (!cohort?.entries?.length) {
+    return {
+      ...base,
+      applied:true,
+      status:"NO_COHORT_ENTRIES_TO_QUALITY_PRUNE_V1082"
+    };
+  }
+
+  const history = await cohortHistorySummariesV1081(
+    env,
+    cohort.entries.map(entry => entry?.address)
+  );
+
+  base.historyStatus = history?.status || null;
+
+  if (!history?.ok) {
+    return {
+      ...base,
+      status:"QUALITY_PRUNE_HISTORY_UNAVAILABLE_V1082",
+      error:history?.error || null
+    };
+  }
+
+  const rowByAddress = new Map(
+    (history.rows || [])
+      .map(row => [normalize(row?.address), row])
+      .filter(([address]) => isAddress(address))
+  );
+
+  const kept = [];
+
+  for (const entry of cohort.entries) {
+    const address = normalize(entry?.address);
+    const row = rowByAddress.get(address) || null;
+
+    // Missing D1 history is not a removal reason.
+    if (!row) {
+      kept.push(entry);
+      continue;
+    }
+
+    const decision = intelligenceCohortQualityDecisionV1082(row);
+
+    if (decision.keep !== false) {
+      kept.push(entry);
+      continue;
+    }
+
+    base.removed++;
+    base.removedEntries.push({
+      address,
+      symbol:entry?.symbol || row?.symbol || null,
+      reason:decision.reason,
+      observations:decision.observations,
+      riskScore:decision.riskScore ?? null,
+      topHolderPct:decision.top1 ?? null,
+      top10Pct:decision.top10 ?? null
+    });
+  }
+
+  cohort.entries = kept
+    .filter(entry => cohortTokenSafeV1079(entry?.token))
+    .slice(0, INTELLIGENCE_COHORT_MAX_V1079);
+
+  cohort.lastQualityPruneV1082 = {
+    at:Date.now(),
+    removed:base.removed,
+    removedEntries:base.removedEntries.slice(0, INTELLIGENCE_COHORT_MAX_V1079)
+  };
+  cohort.updatedAt = Date.now();
+
+  base.applied = true;
+  base.entriesAfter = cohort.entries.length;
+  base.status =
+    base.removed > 0
+      ? "COHORT_QUALITY_ENTRIES_PRUNED_V1082"
+      : "COHORT_QUALITY_ACCEPTABLE_V1082";
+
+  return base;
+}
+
 /* ============================================================
    V1080 — DURABLE COHORT DIRECT-SEED HOTFIX
    ============================================================
@@ -185490,8 +185669,11 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
   }
 
   const refresh = await refreshIntelligenceCohortV1079(env, state);
+  const qualityPruneV1082 =
+    await applyIntelligenceCohortQualityPruningV1082(env, state);
   const cohort = pruneIntelligenceCohortV1079(state, Date.now());
   base.cohortRefresh = refresh;
+  base.cohortQualityPruneV1082 = qualityPruneV1082;
   base.cohortEntries = safeNumber(cohort?.entries?.length);
 
   if (!cohort?.entries?.length) {
@@ -185638,9 +185820,10 @@ async function intelligenceCohortStatusV1079(env, state) {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
     diagnostic:"INTELLIGENCE_COHORT_STATUS_V1079",
-    cohortRuntimeVersion:"V1081",
+    cohortRuntimeVersion:"V1082",
     directSeedFromAnalysedCandidates:true,
     targetedHistoryLookup:true,
+    qualityPruning:true,
     success:true,
     readOnly:true,
     externalRequestsUsed:0,
@@ -185709,6 +185892,20 @@ async function intelligenceCohortStatusV1079(env, state) {
     safeNumber(a?.observations) - safeNumber(b?.observations) ||
     safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt)
   );
+
+  base.lastQualityPruneV1082 =
+    cohort?.lastQualityPruneV1082 || null;
+
+  base.qualityThresholdsV1082 = {
+    minimumObservations:
+      INTELLIGENCE_COHORT_QUALITY_MIN_OBSERVATIONS_V1082,
+    severeRisk:
+      INTELLIGENCE_COHORT_SEVERE_RISK_V1082,
+    extremeTopHolderPct:
+      INTELLIGENCE_COHORT_EXTREME_TOP1_V1082,
+    extremeTop10Pct:
+      INTELLIGENCE_COHORT_EXTREME_TOP10_V1082
+  };
 
   base.status = "INTELLIGENCE_COHORT_STATUS_OK_V1079";
   base.note =
