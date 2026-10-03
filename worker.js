@@ -1,5 +1,5 @@
 /**
- * ChainVanta — V1070
+ * ChainVanta — V1071
  * ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
  * Builds directly from confirmed-working V1069.
  * - Preserves the completed V1069 20-sample fresh/current-live Bitquery benchmark unchanged.
@@ -12,7 +12,8 @@
  * - Uses the already-validated V1064 boundary-safe Bitquery reconstruction.
  * - Records a direct comparison against the frozen V1069 fresh-launch recovery result.
  * - Hard-capped to 20 automatic established-token samples; at most one attempt per scheduled scan.
- * - Adds GET /bitquery-established-shadow-status.
+ * - Preserves GET /bitquery-established-shadow-status and adds alias GET /bitquery-rpc-established-shadow-status.
+ * - V1071 adds bounded direct-RPC activity evidence beside Bitquery on each new established-token sample.
  * - Remains SHADOW ONLY: no live evidence promotion, scoring mutation, Telegram qualification,
  *   provider routing, Stripe, D1 or Durable Object behaviour changes.
  */
@@ -8919,7 +8920,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1070"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1071"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184995,6 +184996,107 @@ async function bitqueryShadowStatusV1069(env) {
 }
 
 
+
+/* ============================================================
+   V1071 — ESTABLISHED-TOKEN RPC ↔ BITQUERY SIDE-BY-SIDE SHADOW
+   - Adds a bounded direct-RPC activity probe to every NEW established sample.
+   - Uses the same selected token and same scheduled scan as Bitquery.
+   - Measures raw token Transfer logs and, when usable pool identity exists,
+     recent exact V3/V4 Swap logs.
+   - Read-only benchmark only: no scoring, Telegram, provider promotion or evidence mutation.
+   ============================================================ */
+const RPC_ESTABLISHED_LOOKBACK_BLOCKS_V1071 = 600;
+const RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071 = 250;
+
+function rpcEstablishedPoolTargetV1071(state, candidate) {
+  const token = normalize(candidate?.address);
+  const exact = token ? exactPoolIdentityFromPriorCompletionV465(state, token) : null;
+  const exactId = normalize(exact?.poolId || exact?.pairAddress || exact?.address || '');
+  const marketPair = normalize(candidate?.market?.pairAddress || candidate?.market?.pairId || candidate?.pairAddress || candidate?.pairId || '');
+  const selected = exactId || marketPair || null;
+  if (!selected) return {available:false,type:null,id:null,source:null};
+  if (/^0x[a-f0-9]{64}$/.test(selected)) return {available:true,type:'V4_POOL_ID',id:selected,source:exactId?'PRIOR_EXACT_POOL_IDENTITY':'MARKET_PAIR_ID'};
+  if (isAddress(selected)) return {available:true,type:'V3_POOL_ADDRESS',id:selected,source:exactId?'PRIOR_EXACT_POOL_IDENTITY':'MARKET_PAIR_ADDRESS'};
+  return {available:false,type:null,id:selected,source:exactId?'PRIOR_EXACT_POOL_IDENTITY':'MARKET_PAIR_ID_UNUSABLE'};
+}
+
+async function establishedRpcProbeV1071(env, state, candidate) {
+  const token = normalize(candidate?.address);
+  const target = rpcEstablishedPoolTargetV1071(state, candidate);
+  const startedAt = Date.now();
+  let requests = 0;
+  const headCall = await directRpcCallV1065(env,'eth_blockNumber',[]);
+  requests += safeNumber(headCall?.externalRequestsUsed);
+  if (!headCall?.ok || !headCall?.result) {
+    return {success:false,status:'RPC_HEAD_UNAVAILABLE_V1071',externalRequestsUsed:requests,elapsedMs:Date.now()-startedAt,poolTarget:target};
+  }
+  let head = 0;
+  try { head = Number(BigInt(headCall.result)); } catch (_) { head = 0; }
+  if (!Number.isFinite(head) || head <= 0) {
+    return {success:false,status:'RPC_HEAD_INVALID_V1071',externalRequestsUsed:requests,elapsedMs:Date.now()-startedAt,poolTarget:target};
+  }
+  const from = Math.max(0, head - RPC_ESTABLISHED_LOOKBACK_BLOCKS_V1071 + 1);
+  const fromHex='0x'+from.toString(16), toHex='0x'+head.toString(16);
+
+  let transferLogs=[];
+  let transferProvider=null;
+  const transferCall=await directRpcCallV1065(env,'eth_getLogs',[{address:token,fromBlock:fromHex,toBlock:toHex,topics:[ERC20_TRANSFER_TOPIC_V1065]}]);
+  requests += safeNumber(transferCall?.externalRequestsUsed);
+  if (transferCall?.ok && Array.isArray(transferCall.result)) {
+    transferProvider=transferCall.provider||null;
+    transferLogs=transferCall.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071);
+  }
+
+  let swapLogs=[];
+  let swapProvider=null;
+  let swapProbeStatus='POOL_IDENTITY_UNAVAILABLE_V1071';
+  if (target.available && target.type==='V3_POOL_ADDRESS') {
+    const call=await directRpcCallV1065(env,'eth_getLogs',[{address:target.id,fromBlock:fromHex,toBlock:toHex,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]);
+    requests += safeNumber(call?.externalRequestsUsed);
+    if (call?.ok && Array.isArray(call.result)) {
+      swapProvider=call.provider||null; swapLogs=call.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071);
+      swapProbeStatus=swapLogs.length?'V3_SWAP_LOGS_FOUND_V1071':'V3_NO_SWAP_LOGS_V1071';
+    } else swapProbeStatus='V3_SWAP_LOG_QUERY_FAILED_V1071';
+  } else if (target.available && target.type==='V4_POOL_ID') {
+    const call=await directRpcCallV1065(env,'eth_getLogs',[{address:normalize(POOL_MANAGER),fromBlock:fromHex,toBlock:toHex,topics:[SWAP_TOPIC,target.id]}]);
+    requests += safeNumber(call?.externalRequestsUsed);
+    if (call?.ok && Array.isArray(call.result)) {
+      swapProvider=call.provider||null; swapLogs=call.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071);
+      swapProbeStatus=swapLogs.length?'V4_SWAP_LOGS_FOUND_V1071':'V4_NO_SWAP_LOGS_V1071';
+    } else swapProbeStatus='V4_SWAP_LOG_QUERY_FAILED_V1071';
+  }
+
+  const txHashes=new Set();
+  for (const row of [...transferLogs,...swapLogs]) { const h=normalize(row?.transactionHash); if(h) txHashes.add(h); }
+  const hasActivity=transferLogs.length>0 || swapLogs.length>0;
+  return {
+    success:true,
+    status:hasActivity?'RPC_RECENT_ACTIVITY_FOUND_V1071':'RPC_NO_RECENT_ACTIVITY_V1071',
+    headBlock:head,fromBlock:from,toBlock:head,lookbackBlocks:RPC_ESTABLISHED_LOOKBACK_BLOCKS_V1071,
+    poolTarget:target,
+    tokenTransferLogs:transferLogs.length,
+    exactPoolSwapLogs:swapLogs.length,
+    uniqueTransactionCount:txHashes.size,
+    swapProbeStatus,
+    transferProvider,swapProvider,
+    externalRequestsUsed:requests,
+    elapsedMs:Date.now()-startedAt
+  };
+}
+
+function compareEstablishedProvidersV1071(bitquery, rpcProbe) {
+  const bqTx=safeNumber(bitquery?.reconstruction?.uniqueTransactionCount);
+  const bqRows=safeNumber(bitquery?.completion?.completedRowCount || bitquery?.seed?.rowCount);
+  const bqHas=bqRows>0 || bqTx>0;
+  const rpcSwaps=safeNumber(rpcProbe?.exactPoolSwapLogs);
+  const rpcTransfers=safeNumber(rpcProbe?.tokenTransferLogs);
+  const rpcHas=rpcSwaps>0 || rpcTransfers>0;
+  let verdict='NEITHER_FOUND_ACTIVITY_V1071';
+  if (bqHas && rpcHas) verdict='BOTH_FOUND_ACTIVITY_V1071';
+  else if (bqHas) verdict='BITQUERY_ONLY_ACTIVITY_V1071';
+  else if (rpcHas) verdict='RPC_ONLY_ACTIVITY_V1071';
+  return {verdict,bitqueryHasActivity:bqHas,rpcHasActivity:rpcHas,bitqueryRows:bqRows,bitqueryTransactions:bqTx,rpcTransferLogs:rpcTransfers,rpcExactPoolSwapLogs:rpcSwaps};
+}
 /* ============================================================
    V1070 — ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
    ============================================================ */
@@ -185165,7 +185267,7 @@ function ensureBitqueryEstablishedStoreV1070(state) {
   if (!state.bitqueryEstablishedShadowV1070 || typeof state.bitqueryEstablishedShadowV1070 !== "object") {
     state.bitqueryEstablishedShadowV1070 = {
       version:"V1070",
-      mode:"ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
+      mode:"ESTABLISHED_RPC_VS_BITQUERY_SHADOW_BENCHMARK",
       minAgeHours:24,
       maxAutomaticSamples:BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070,
       attemptedSamples:0,
@@ -185179,8 +185281,8 @@ function ensureBitqueryEstablishedStoreV1070(state) {
 
 async function runBitqueryEstablishedShadowV1070(env, state, candidates, scheduled) {
   const store = ensureBitqueryEstablishedStoreV1070(state);
-  store.version = "V1070";
-  store.mode = "ESTABLISHED_TOKEN_SHADOW_BENCHMARK";
+  store.version = "V1071";
+  store.mode = "ESTABLISHED_RPC_VS_BITQUERY_SHADOW_BENCHMARK";
   store.minAgeHours = 24;
   store.maxAutomaticSamples = BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070;
   store.liveScoringEnabled = false;
@@ -185241,8 +185343,17 @@ async function runBitqueryEstablishedShadowV1070(env, state, candidates, schedul
     };
   }
 
+  let rpcProbe;
+  try {
+    rpcProbe = await establishedRpcProbeV1071(env, state, candidate);
+  } catch (error) {
+    rpcProbe = {success:false,status:'RPC_ESTABLISHED_SHADOW_EXCEPTION_V1071',externalRequestsUsed:0,error:String(error?.message||error||'UNKNOWN_ERROR').slice(0,240)};
+  }
+
   const sample = compactBitqueryEstablishedSampleV1070(candidate, result, picked.priority);
   if (result?.error) sample.bitquery.error = result.error;
+  sample.rpc = rpcProbe;
+  sample.providerComparison = compareEstablishedProvidersV1071(result, rpcProbe);
   store.attemptedSamples = safeNumber(store.attemptedSamples) + 1;
   if (sample.wouldRecoverDirectionalUsdEvidence === true) store.successfulRecoveries = safeNumber(store.successfulRecoveries) + 1;
   store.lastAttemptAt = Date.now();
@@ -185271,7 +185382,7 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BITQUERY_ESTABLISHED_TOKEN_SHADOW_STATUS_V1070",
+    diagnostic:"ESTABLISHED_RPC_VS_BITQUERY_SHADOW_STATUS_V1071",
     success:true,
     readOnly:true,
     mode:"ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
@@ -185290,6 +185401,19 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
       establishedRecoveryRatePct:establishedRate,
       recoveryRateDeltaPctPoints:freshRate === null ? null : Number((establishedRate - freshRate).toFixed(1))
     },
+    rpcVsBitqueryV1071:(()=>{
+      const rows=Array.isArray(store?.samples)?store.samples:[];
+      const compared=rows.filter(x=>x?.providerComparison);
+      const count=v=>compared.filter(x=>x?.providerComparison?.verdict===v).length;
+      return {
+        comparedSamples:compared.length,
+        bothFoundActivity:count('BOTH_FOUND_ACTIVITY_V1071'),
+        bitqueryOnlyActivity:count('BITQUERY_ONLY_ACTIVITY_V1071'),
+        rpcOnlyActivity:count('RPC_ONLY_ACTIVITY_V1071'),
+        neitherFoundActivity:count('NEITHER_FOUND_ACTIVITY_V1071'),
+        note:'V1070 samples created before V1071 have no RPC comparison; only new samples are counted.'
+      };
+    })(),
     lastAttemptAt:store?.lastAttemptAt || null,
     lastAddress:store?.lastAddress || null,
     lastSymbol:store?.lastSymbol || null,
@@ -185308,7 +185432,7 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
     telegramQualificationEnabled:false,
     providerPromotionEnabled:false,
     scannerEvidenceMutated:false,
-    note:"V1070 benchmarks Bitquery on already-analysed established tokens only. It does not widen the production watchlist and does not create live calls. The result is intended to decide whether an older-token product lane and Bitquery Pro are justified.",
+    note:"V1071 compares Bitquery with a bounded direct-RPC activity probe on the same established-token samples. Existing V1070 samples are preserved; new samples record both providers. It remains shadow-only and cannot change live scoring, Telegram or provider routing.",
     timestamp:now()
   };
 }
@@ -185588,7 +185712,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
-      "/bitquery-established-shadow-status"
+      "/bitquery-established-shadow-status" ||
+    path ===
+      "/bitquery-rpc-established-shadow-status"
   ) {
     return jsonResponse(
       await bitqueryEstablishedShadowStatusV1070(env)
