@@ -1,4 +1,20 @@
 /**
+ * ChainVanta — V1073
+ * ACTIVITY-PRIORITISED ESTABLISHED RPC ↔ BITQUERY SHADOW BENCHMARK
+ * Builds directly from confirmed-working V1072.
+ * - Preserves all V1072 fair-window RPC ↔ Bitquery comparison logic.
+ * - Continues the existing established-token sample set rather than resetting it.
+ * - Stops selecting mature tokens merely because Opportunity >=35 or liquidity is present.
+ * - New established samples require actual recent activity evidence:
+ *   observed swaps >0 OR Momentum >0 OR observed market volume >0.
+ * - Ranking strongly prioritises live/observed swaps, then market volume and Momentum.
+ * - Keeps verified age >=24h, unverified directional USD, duplicate avoidance and one
+ *   Bitquery attempt per scheduled scan.
+ * - Remains SHADOW ONLY: no live evidence promotion, scoring mutation, Telegram
+ *   qualification, provider routing, Stripe, D1 or Durable Object behaviour changes.
+ */
+
+/**
  * ChainVanta — V1072
  * ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
  * Builds directly from confirmed-working V1069.
@@ -8924,7 +8940,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1072"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1073"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -185216,17 +185232,22 @@ function establishedCandidateEligibleV1070(candidate) {
   const age = establishedAgeEvidenceV1070(candidate);
   if (age.verified !== true || safeNumber(age.ageMs) < BITQUERY_ESTABLISHED_MIN_AGE_MS_V1070) return false;
 
-  const opportunity = safeNumber(candidate?.opportunity?.score);
   const momentum = safeNumber(candidate?.momentum?.score);
   const observedSwaps = Math.max(
     safeNumber(candidate?.liveMomentumActivityV152?.swaps),
     safeNumber(candidate?.activity?.swaps)
   );
-  const liquidity = safeNumber(candidate?.market?.liquidityUsd);
+  const marketVolume = Math.max(
+    safeNumber(candidate?.market?.volume?.m5),
+    safeNumber(candidate?.market?.volume?.h1),
+    safeNumber(candidate?.market?.volume?.h6),
+    safeNumber(candidate?.market?.volume?.h24)
+  );
 
-  // Keep the benchmark relevant to the user's eventual "older coins that look good" lane.
-  // This is selection only; it does not change any score or qualification threshold.
-  return opportunity >= 35 || momentum >= 5 || observedSwaps > 0 || liquidity >= 5000;
+  // V1073: this benchmark is deliberately activity-first.
+  // Opportunity or liquidity alone can no longer spend a Bitquery trial attempt.
+  // Selection only; no live score/qualification threshold is changed.
+  return observedSwaps > 0 || momentum > 0 || marketVolume > 0;
 }
 
 function establishedCandidatePriorityV1070(state, candidate) {
@@ -185247,15 +185268,16 @@ function establishedCandidatePriorityV1070(state, candidate) {
   const momentum = safeNumber(candidate?.momentum?.score);
 
   let priority = 0;
-  if (candidate?.market?.verified === true) priority += 8;
-  if (exactPool) priority += 5;
-  if (liveMomentumSwaps > 0) priority += 6;
-  else if (activitySwaps > 0) priority += 4;
-  if (marketVolume > 0) priority += 3;
-  if (liquidity >= 5000) priority += 3;
+  // V1073 ranking: actual recent activity dominates provider-test selection.
+  if (liveMomentumSwaps > 0) priority += 40 + Math.min(20, liveMomentumSwaps);
+  else if (activitySwaps > 0) priority += 30 + Math.min(15, activitySwaps);
+  if (marketVolume > 0) priority += 20;
+  if (momentum > 0) priority += 10 + Math.min(10, Math.max(1, Math.floor(momentum / 5)));
+  if (exactPool) priority += 6;
+  if (candidate?.market?.verified === true) priority += 5;
+  if (liquidity >= 5000) priority += 2;
   else if (liquidity > 0) priority += 1;
-  if (momentum > 0) priority += Math.min(4, Math.max(1, Math.floor(momentum / 10)));
-  priority += Math.min(5, Math.floor(opportunity / 20));
+  priority += Math.min(3, Math.floor(opportunity / 25));
 
   return {
     priority,
@@ -185361,8 +185383,8 @@ function ensureBitqueryEstablishedStoreV1070(state) {
 
 async function runBitqueryEstablishedShadowV1070(env, state, candidates, scheduled) {
   const store = ensureBitqueryEstablishedStoreV1070(state);
-  store.version = "V1072";
-  store.mode = "ESTABLISHED_RPC_VS_BITQUERY_SHADOW_BENCHMARK";
+  store.version = "V1073";
+  store.mode = "ACTIVITY_PRIORITISED_ESTABLISHED_RPC_VS_BITQUERY_SHADOW_BENCHMARK";
   store.minAgeHours = 24;
   store.maxAutomaticSamples = BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070;
   store.liveScoringEnabled = false;
@@ -185462,10 +185484,10 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"ESTABLISHED_RPC_VS_BITQUERY_FAIR_WINDOW_STATUS_V1072",
+    diagnostic:"ESTABLISHED_RPC_VS_BITQUERY_ACTIVITY_PRIORISED_STATUS_V1073",
     success:true,
     readOnly:true,
-    mode:"ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
+    mode:"ACTIVITY_PRIORITISED_ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
     statePersistent:loaded?.persistent === true,
     minimumVerifiedAgeHours:24,
     totalSamplesTarget:BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070,
@@ -185504,10 +185526,12 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
     selectionPolicy:{
       requiresVerifiedMarketOrLaunchAgeAtLeast24h:true,
       requiresDirectionalUsdUnverified:true,
-      requiresUsefulQualityOrActivitySignal:true,
-      qualityOrActivityRule:"Opportunity >=35 OR Momentum >=5 OR observed swaps >0 OR liquidity >=$5k",
+      requiresRecentActivitySignal:true,
+      qualityOrActivityRule:"observed swaps >0 OR Momentum >0 OR observed market volume >0; Opportunity/liquidity alone do not qualify",
       avoidsV1069DuplicateTokens:true,
-      atMostOneBitqueryAttemptPerScheduledScan:true
+      atMostOneBitqueryAttemptPerScheduledScan:true,
+      continuesExistingV1070ToV1072SampleStore:true,
+      activityPriorityOrder:["LIVE_OBSERVED_SWAPS","OBSERVED_SWAPS","MARKET_VOLUME","MOMENTUM","EXACT_POOL","VERIFIED_MARKET"]
     },
     liveScoringEnabled:false,
     telegramQualificationEnabled:false,
