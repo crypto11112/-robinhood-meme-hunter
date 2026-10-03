@@ -1,4 +1,20 @@
 /**
+ * ChainVanta — V1081
+ * TARGETED COHORT HISTORY LOOKUP
+ * Builds directly from deployed V1080.
+ * - Fixes misleading cohort observation counts caused by the older V1077 helper
+ *   reading only a globally-limited slice of D1 history.
+ * - V1081 queries D1 history specifically for the retained cohort addresses, so a
+ *   newly retained token cannot disappear from diagnostics merely because >100
+ *   other historical addresses exist.
+ * - Durable cohort selection now uses targeted per-cohort observation counts.
+ * - /accumulation-status prioritises the durable cohort itself, so accumulation
+ *   shadow scoring follows the tokens ChainVanta is deliberately retaining.
+ * - Read-only/status logic only; no provider/RPC requests, no request ceiling changes,
+ *   no Opportunity/Momentum/Confidence/Risk changes and no Telegram qualification changes.
+ */
+
+/**
  * ChainVanta — V1080
  * DURABLE INTELLIGENCE COHORT — SEEDING HOTFIX
  * Builds directly from deployed V1079.
@@ -9059,7 +9075,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1080"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1081"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184966,6 +184982,94 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
 
 
 
+
+/* ============================================================
+   V1081 — TARGETED COHORT HISTORY LOOKUP
+   ============================================================ */
+async function cohortHistorySummariesV1081(env, addresses) {
+  const normalized = [...new Set(
+    (Array.isArray(addresses) ? addresses : [])
+      .map(normalize)
+      .filter(isAddress)
+  )].slice(0, INTELLIGENCE_COHORT_MAX_V1079);
+
+  if (!normalized.length) {
+    return {
+      ok:true,
+      status:"NO_COHORT_ADDRESSES_V1081",
+      rows:[]
+    };
+  }
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) {
+    return {
+      ok:false,
+      status:ready.status,
+      error:ready.error||null,
+      rows:[]
+    };
+  }
+
+  const placeholders = normalized.map(() => "?").join(",");
+
+  try {
+    const result = await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        h.address,
+        h.symbol,
+        h.captured_at,
+        h.market_verified,
+        h.market_source,
+        h.price_usd,
+        h.market_cap_usd,
+        h.liquidity_usd,
+        h.volume_24h_usd,
+        h.opportunity_score,
+        h.momentum_score,
+        h.confidence_score,
+        h.risk_verified,
+        h.risk_score,
+        h.holder_count,
+        h.top_holder_pct,
+        h.top10_pct,
+        h.launch_stage,
+        h.age_hours,
+        s.observation_count,
+        s.first_at,
+        s.last_at
+      FROM ${MARKET_HISTORY_TABLE_V1076} h
+      JOIN (
+        SELECT
+          address,
+          COUNT(*) AS observation_count,
+          MIN(captured_at) AS first_at,
+          MAX(captured_at) AS last_at
+        FROM ${MARKET_HISTORY_TABLE_V1076}
+        WHERE address IN (${placeholders})
+        GROUP BY address
+      ) s
+        ON s.address = h.address
+       AND s.last_at = h.captured_at
+      WHERE h.address IN (${placeholders})
+      ORDER BY s.last_at DESC
+    `).bind(...normalized, ...normalized).all();
+
+    return {
+      ok:true,
+      status:"TARGETED_COHORT_HISTORY_OK_V1081",
+      rows:Array.isArray(result?.results) ? result.results : []
+    };
+  } catch (error) {
+    return {
+      ok:false,
+      status:"TARGETED_COHORT_HISTORY_FAILED_V1081",
+      error:errorString(error).slice(0,700),
+      rows:[]
+    };
+  }
+}
+
 /* ============================================================
    V1080 — DURABLE COHORT DIRECT-SEED HOTFIX
    ============================================================
@@ -185398,7 +185502,10 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
   }
 
   const nowMs = Date.now();
-  const history = await intelligenceWatchRowsV1077(env, 100);
+  const history = await cohortHistorySummariesV1081(
+    env,
+    cohort.entries.map(entry => entry?.address)
+  );
   const historyByAddress = new Map(
     (history?.ok ? history.rows : [])
       .map(row => [normalize(row?.address), row])
@@ -185531,8 +185638,9 @@ async function intelligenceCohortStatusV1079(env, state) {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
     diagnostic:"INTELLIGENCE_COHORT_STATUS_V1079",
-    cohortRuntimeVersion:"V1080",
+    cohortRuntimeVersion:"V1081",
     directSeedFromAnalysedCandidates:true,
+    targetedHistoryLookup:true,
     success:true,
     readOnly:true,
     externalRequestsUsed:0,
@@ -185545,12 +185653,22 @@ async function intelligenceCohortStatusV1079(env, state) {
     retained:[]
   };
 
-  const history = await intelligenceWatchRowsV1077(env, 100);
+  const history = await cohortHistorySummariesV1081(
+    env,
+    (cohort?.entries || []).map(entry => entry?.address)
+  );
   const historyByAddress = new Map(
     (history?.ok ? history.rows : [])
       .map(row => [normalize(row?.address), row])
       .filter(([address]) => isAddress(address))
   );
+
+  base.targetedHistoryLookupV1081 = {
+    ok:history?.ok === true,
+    status:history?.status || null,
+    matchedAddresses:safeNumber(history?.rows?.length),
+    error:history?.error || null
+  };
 
   base.retained = (cohort?.entries || []).map(entry => {
     const address = normalize(entry?.address);
@@ -185997,19 +186115,31 @@ async function accumulationStatusV1078(env) {
     externalRequestsUsed:0
   };
 
-  const watch = await intelligenceWatchRowsV1077(env, 100);
-  if (!watch.ok) {
-    return {...base,status:watch.status,error:watch.error||null,timestamp:now()};
+  const stateReadV1081 = await readState(env);
+  const cohortV1081 = ensureIntelligenceCohortV1079(stateReadV1081?.state || {});
+  const cohortAddressesV1081 = (cohortV1081?.entries || [])
+    .map(entry => normalize(entry?.address))
+    .filter(isAddress);
+
+  let evaluationAddressesV1081 = [...new Set(cohortAddressesV1081)];
+
+  // Fallback to the older V1077 eligible-history view only while the durable
+  // cohort is empty, preserving backward compatibility during deployment.
+  if (!evaluationAddressesV1081.length) {
+    const watch = await intelligenceWatchRowsV1077(env, 100);
+    if (!watch.ok) {
+      return {...base,status:watch.status,error:watch.error||null,timestamp:now()};
+    }
+    const nowMs = Date.now();
+    evaluationAddressesV1081 = watch.rows
+      .filter(row => intelligenceWatchRowEligibleV1077(row, nowMs))
+      .slice(0, 20)
+      .map(row => normalize(row?.address))
+      .filter(isAddress);
   }
 
-  const nowMs = Date.now();
-  const eligible = watch.rows
-    .filter(row => intelligenceWatchRowEligibleV1077(row, nowMs))
-    .slice(0, 20);
-
   const results = [];
-  for (const row of eligible) {
-    const address = normalize(row?.address);
+  for (const address of evaluationAddressesV1081.slice(0,20)) {
     const history = await accumulationRowsForAddressV1078(env, address, 288);
     if (!history.ok) continue;
     results.push(accumulationFromRowsV1078(address, history.rows));
@@ -186024,6 +186154,12 @@ async function accumulationStatusV1078(env) {
     ...base,
     success:true,
     status:"ACCUMULATION_STATUS_OK_V1078",
+    accumulationRuntimeVersion:"V1081",
+    evaluationSource:
+      cohortAddressesV1081.length
+        ? "DURABLE_INTELLIGENCE_COHORT_V1081"
+        : "LEGACY_V1077_HISTORY_FALLBACK",
+    durableCohortAddresses:cohortAddressesV1081.length,
     evaluated:results.length,
     evidenceReady:results.filter(r => r.evidenceReady).length,
     strong:results.filter(r => r.accumulationState === "STRONG").length,
