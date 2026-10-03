@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1068
+ * BITQUERY CONTROLLED SHADOW FALLBACK INTEGRATION
+ * Builds directly from confirmed-working V1067.
+ * - Runs only after normal candidate analysis/scoring has completed.
+ * - Selects at most ONE real scanner candidate per scheduled scan whose existing
+ *   directional-USD evidence remains UNVERIFIED.
+ * - Uses the already-validated V1064 boundary-safe Bitquery reconstruction.
+ * - Records only compact shadow telemetry; Bitquery values DO NOT alter market,
+ *   Momentum, Opportunity, Confidence, Risk, qualification or Telegram delivery.
+ * - Hard-capped to SIX automatic shadow samples, then stops automatically so the
+ *   Bitquery trial is not silently consumed.
+ * - Adds GET /bitquery-shadow-status for read-only inspection of the saved samples.
+ */
+
+/**
  * ChainVanta — V1067
  * UNISWAP V4 PATH / POOLMANAGER SWAP CROSS-CHECK DIAGNOSTIC
  * Builds directly from confirmed-working V1063.
@@ -8871,7 +8886,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1067"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1068"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -121367,6 +121382,17 @@ for (
     };
   }
 
+  /* V1068: post-analysis shadow fallback. This deliberately runs only after all
+   * scoring/qualification work is finished, so its result cannot affect this scan.
+   * The compact result is persisted only as diagnostic telemetry. */
+  const bitqueryShadowFallbackV1068 =
+    await runBitqueryShadowFallbackV1068(
+      env,
+      state,
+      candidates,
+      scheduled
+    );
+
   const save =
     await writeState(
       env,
@@ -121510,6 +121536,8 @@ for (
     },
 
     productionV4EnrichmentV772,
+
+    bitqueryShadowFallbackV1068,
 
     discoveryRpc: {
       publicCooldownActive:
@@ -184637,6 +184665,184 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
   };
 }
 
+
+/* ============================================================
+   V1068 — CONTROLLED BITQUERY SHADOW FALLBACK
+   ============================================================ */
+const BITQUERY_SHADOW_MAX_SAMPLES_V1068 = 6;
+
+function verifiedDirectionalUsdWindowsV1068(candidate) {
+  const flow = candidate?.market?.directionalFlow;
+  if (!flow || typeof flow !== "object") return [];
+  return Object.entries(flow)
+    .filter(([, row]) => row?.verified === true)
+    .map(([window]) => window);
+}
+
+function shadowCandidateEligibleV1068(candidate) {
+  if (!candidate || candidate?.validERC20 !== true || candidate?.analysisDeferred === true) return false;
+  const address = normalize(candidate?.address);
+  if (!address || !isAddress(address)) return false;
+  return verifiedDirectionalUsdWindowsV1068(candidate).length === 0;
+}
+
+function compactBitqueryShadowSampleV1068(candidate, result) {
+  const r = result?.reconstruction || {};
+  const flow = r?.directionalFlow || {};
+  const completion = result?.completion || {};
+  const confidence = r?.confidence || {};
+  return {
+    recordedAt: Date.now(),
+    address: normalize(candidate?.address),
+    symbol: candidate?.symbol || candidate?.validation?.symbol || null,
+    opportunityAtObservation: safeNumber(candidate?.opportunity?.score),
+    momentumAtObservation: safeNumber(candidate?.momentum?.score),
+    existingVerifiedDirectionalUsdWindows: verifiedDirectionalUsdWindowsV1068(candidate),
+    existingFlowWasUnverified: true,
+    bitquery: {
+      success: result?.success === true,
+      status: result?.status || null,
+      boundaryComplete: completion?.boundaryComplete === true,
+      seedRowCount: safeNumber(result?.seed?.rowCount),
+      completedRowCount: safeNumber(completion?.completedRowCount),
+      uniqueTransactionCount: safeNumber(r?.uniqueTransactionCount),
+      buyTransactions: safeNumber(r?.classifications?.userOrRoutedBuyTransactions),
+      sellTransactions: safeNumber(r?.classifications?.userOrRoutedSellTransactions),
+      routedBuyTransactions: safeNumber(r?.classifications?.routedBuyTransactions),
+      routedSellTransactions: safeNumber(r?.classifications?.routedSellTransactions),
+      arbitrageTransactions: safeNumber(r?.classifications?.arbitrageTransactions),
+      unknownTransactions: safeNumber(r?.classifications?.unknownTransactions),
+      buyUsd: Number.isFinite(Number(flow?.buyUsd)) ? Number(flow.buyUsd) : null,
+      sellUsd: Number.isFinite(Number(flow?.sellUsd)) ? Number(flow.sellUsd) : null,
+      netBuyMinusSellUsd: Number.isFinite(Number(flow?.netBuyMinusSellUsd)) ? Number(flow.netBuyMinusSellUsd) : null,
+      directionalUsdTotal: Number.isFinite(Number(flow?.directionalUsdTotal)) ? Number(flow.directionalUsdTotal) : null,
+      confidence: confidence?.level || null,
+      boundarySafetyPassed: completion?.boundaryComplete === true && completion?.capHit !== true && (completion?.missingHashes || []).length === 0,
+      externalRequestsUsed: safeNumber(result?.externalRequestsUsed)
+    },
+    wouldRecoverDirectionalUsdEvidence:
+      result?.success === true &&
+      completion?.boundaryComplete === true &&
+      Number.isFinite(Number(flow?.directionalUsdTotal)) &&
+      Number(flow.directionalUsdTotal) > 0,
+    promotedToLiveEvidence: false,
+    scoringChanged: false,
+    telegramChanged: false,
+    providerRoutingChanged: false
+  };
+}
+
+async function runBitqueryShadowFallbackV1068(env, state, candidates, scheduled) {
+  state.bitqueryShadowFallbackV1068 =
+    state.bitqueryShadowFallbackV1068 && typeof state.bitqueryShadowFallbackV1068 === "object"
+      ? state.bitqueryShadowFallbackV1068
+      : {
+          version: "V1068",
+          mode: "SHADOW_ONLY",
+          maxAutomaticSamples: BITQUERY_SHADOW_MAX_SAMPLES_V1068,
+          attemptedSamples: 0,
+          successfulRecoveries: 0,
+          samples: []
+        };
+
+  const store = state.bitqueryShadowFallbackV1068;
+  store.version = "V1068";
+  store.mode = "SHADOW_ONLY";
+  store.maxAutomaticSamples = BITQUERY_SHADOW_MAX_SAMPLES_V1068;
+  store.liveScoringEnabled = false;
+  store.telegramQualificationEnabled = false;
+  store.providerPromotionEnabled = false;
+
+  if (scheduled !== true) {
+    store.lastSkipReason = "NOT_SCHEDULED_SCAN_V1068";
+    return { attempted:false, reason:store.lastSkipReason };
+  }
+  if (safeNumber(store.attemptedSamples) >= BITQUERY_SHADOW_MAX_SAMPLES_V1068) {
+    store.lastSkipReason = "SHADOW_SAMPLE_CAP_REACHED_V1068";
+    store.completed = true;
+    return { attempted:false, reason:store.lastSkipReason };
+  }
+  if (!String(env?.BITQUERY_CLIENT_ID || "").trim() || !String(env?.BITQUERY_CLIENT_SECRET || "").trim()) {
+    store.lastSkipReason = "BITQUERY_OAUTH_NOT_CONFIGURED_V1068";
+    return { attempted:false, reason:store.lastSkipReason };
+  }
+
+  const eligible = (Array.isArray(candidates) ? candidates : [])
+    .filter(shadowCandidateEligibleV1068)
+    .sort((a,b) => {
+      const liveB = (b?.liveDiscovery === true || b?.newlyDiscovered === true) ? 1 : 0;
+      const liveA = (a?.liveDiscovery === true || a?.newlyDiscovered === true) ? 1 : 0;
+      return liveB-liveA || safeNumber(b?.opportunity?.score)-safeNumber(a?.opportunity?.score);
+    });
+
+  const candidate = eligible[0] || null;
+  if (!candidate) {
+    store.lastSkipReason = "NO_UNVERIFIED_DIRECTIONAL_USD_CANDIDATE_V1068";
+    return { attempted:false, reason:store.lastSkipReason };
+  }
+
+  const token = normalize(candidate.address);
+  const diagnosticUrl = new URL(`https://chainvanta.invalid/bitquery-swaps-complete?token=${encodeURIComponent(token)}&limit=25`);
+  let result;
+  try {
+    result = await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, diagnosticUrl);
+  } catch (error) {
+    result = {
+      success:false,
+      status:"BITQUERY_SHADOW_EXCEPTION_V1068",
+      externalRequestsUsed:0,
+      error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240)
+    };
+  }
+
+  const sample = compactBitqueryShadowSampleV1068(candidate, result);
+  if (result?.error) sample.bitquery.error = result.error;
+  store.attemptedSamples = safeNumber(store.attemptedSamples) + 1;
+  if (sample.wouldRecoverDirectionalUsdEvidence === true) {
+    store.successfulRecoveries = safeNumber(store.successfulRecoveries) + 1;
+  }
+  store.lastAttemptAt = Date.now();
+  store.lastAddress = token;
+  store.lastSymbol = sample.symbol;
+  store.lastStatus = sample.bitquery.status;
+  store.lastSkipReason = null;
+  store.completed = safeNumber(store.attemptedSamples) >= BITQUERY_SHADOW_MAX_SAMPLES_V1068;
+  store.samples = [sample, ...(Array.isArray(store.samples) ? store.samples : [])].slice(0, BITQUERY_SHADOW_MAX_SAMPLES_V1068);
+
+  return { attempted:true, sample };
+}
+
+async function bitqueryShadowStatusV1068(env) {
+  const loaded = await readState(env);
+  const store = loaded?.state?.bitqueryShadowFallbackV1068 || null;
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"BITQUERY_SHADOW_FALLBACK_STATUS_V1068",
+    success:true,
+    readOnly:true,
+    mode:"SHADOW_ONLY",
+    statePersistent:loaded?.persistent === true,
+    maxAutomaticSamples:BITQUERY_SHADOW_MAX_SAMPLES_V1068,
+    attemptedSamples:safeNumber(store?.attemptedSamples),
+    successfulRecoveries:safeNumber(store?.successfulRecoveries),
+    remainingAutomaticSamples:Math.max(0, BITQUERY_SHADOW_MAX_SAMPLES_V1068-safeNumber(store?.attemptedSamples)),
+    completed:store?.completed === true,
+    lastAttemptAt:store?.lastAttemptAt || null,
+    lastAddress:store?.lastAddress || null,
+    lastSymbol:store?.lastSymbol || null,
+    lastStatus:store?.lastStatus || null,
+    lastSkipReason:store?.lastSkipReason || null,
+    samples:Array.isArray(store?.samples) ? store.samples : [],
+    liveScoringEnabled:false,
+    telegramQualificationEnabled:false,
+    providerPromotionEnabled:false,
+    scannerEvidenceMutated:false,
+    note:"V1068 observes what Bitquery could recover for real scanner candidates whose existing directional-USD evidence is UNVERIFIED. Results are not promoted into live evidence or scoring. Automatic shadow sampling stops after six attempts.",
+    timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -184898,6 +185104,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryV4PoolIdentityCrosscheckV1067(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-shadow-status"
+  ) {
+    return jsonResponse(
+      await bitqueryShadowStatusV1068(env)
     );
   }
 
