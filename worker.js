@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1088
+ * COHORT FLOW HANDOFF ELIGIBILITY DIAGNOSTIC
+ * Builds directly from deployed V1087.
+ * - V1087 has now been live-tested with an actually-admitted cohort token
+ *   (LIQLORACLE) but no exact-pool watch was registered.
+ * - Records the exact handoff eligibility decision for the admitted cohort
+ *   token: candidate presence, ERC20 validity, exact-pool verification,
+ *   PoolId validity, quote-token validity and USD-priceability.
+ * - Exposes the last decision through /cohort-flow-status so the failed gate
+ *   can be fixed without weakening verification standards by guesswork.
+ * - Measurement only: no new RPC/provider requests, no scoring changes,
+ *   no qualification/Telegram changes, no request-ceiling changes.
+ */
+
+/**
  * ChainVanta — V1087
  * COHORT EXACT-POOL FLOW HANDOFF
  * Builds directly from deployed V1086.
@@ -9170,7 +9185,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1087"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1088"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -119076,43 +119091,112 @@ for (
    * the quote is already USD-priceable. No backfill is inferred and no request
    * ceiling is raised.
    */
-  const directionalCohortExactPoolCandidatesV1087 =
+  const directionalCohortExactPoolEligibilityV1088 =
     (() => {
       const admittedAddress =
         intelligenceAdmissionCommitV1086?.committed === true
           ? normalize(intelligenceAdmissionCommitV1086?.address)
           : null;
 
-      if (!isAddress(admittedAddress)) {
+      const candidate =
+        isAddress(admittedAddress)
+          ? (Array.isArray(candidates) ? candidates : [])
+              .find(row => normalize(row?.address) === admittedAddress)
+          : null;
+
+      const identity = candidate?.onChainPoolIdentityV153 || null;
+      const poolId = normalize(identity?.poolId);
+      const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
+
+      const quoteReference =
+        onChainDirectionalV179?.wethUsdGReferenceV187 ||
+        bestVerifiedWethUsdGReferenceV195(state);
+
+      const quoteEligibility =
+        isAddress(quoteTokenAddress)
+          ? v254PriceableQuote(
+              quoteTokenAddress,
+              quoteReference
+            )
+          : null;
+
+      const gates = {
+        admissionCommitted:
+          intelligenceAdmissionCommitV1086?.committed === true,
+        admittedAddressValid:
+          isAddress(admittedAddress),
+        candidatePresent:
+          Boolean(candidate),
+        validERC20:
+          candidate?.validERC20 === true,
+        exactPoolIdentityVerified:
+          identity?.verified === true,
+        poolIdValid:
+          /^0x[a-f0-9]{64}$/.test(String(poolId || "")),
+        quoteTokenAddressValid:
+          isAddress(quoteTokenAddress),
+        quoteUsdPriceable:
+          quoteEligibility?.eligible === true
+      };
+
+      const failedGates =
+        Object.entries(gates)
+          .filter(([, passed]) => passed !== true)
+          .map(([gate]) => gate);
+
+      return {
+        at:Date.now(),
+        admittedAddress,
+        candidateSymbol:
+          candidate?.symbol ||
+          candidate?.validation?.symbol ||
+          null,
+        gates,
+        failedGates,
+        eligible:failedGates.length === 0,
+        identity:{
+          verified:identity?.verified === true,
+          status:identity?.status || null,
+          source:identity?.source || null,
+          poolId:poolId || null,
+          quoteTokenAddress:quoteTokenAddress || null
+        },
+        quoteEligibility:quoteEligibility
+          ? {
+              eligible:quoteEligibility?.eligible === true,
+              basis:quoteEligibility?.basis || null,
+              reason:
+                quoteEligibility?.reason ||
+                quoteEligibility?.status ||
+                null
+            }
+          : null,
+        reason:
+          failedGates.length === 0
+            ? "COHORT_EXACT_POOL_HANDOFF_ELIGIBLE_V1088"
+            : `COHORT_EXACT_POOL_HANDOFF_BLOCKED_V1088:${failedGates.join(",")}`,
+        externalRequestsUsed:0
+      };
+    })();
+
+  state.lastCohortExactPoolHandoffV1088 =
+    directionalCohortExactPoolEligibilityV1088;
+
+  const directionalCohortExactPoolCandidatesV1087 =
+    (() => {
+      const decision =
+        directionalCohortExactPoolEligibilityV1088;
+
+      if (decision?.eligible !== true) {
         return [];
       }
 
+      const admittedAddress = normalize(decision?.admittedAddress);
       const candidate =
         (Array.isArray(candidates) ? candidates : [])
           .find(row => normalize(row?.address) === admittedAddress);
 
-      if (
-        !candidate ||
-        candidate?.validERC20 !== true ||
-        candidate?.onChainPoolIdentityV153?.verified !== true
-      ) {
-        return [];
-      }
-
-      const identity = candidate.onChainPoolIdentityV153;
-      const poolId = normalize(identity?.poolId);
-      const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
-      const quoteEligibility = v254PriceableQuote(
-        quoteTokenAddress,
-        onChainDirectionalV179?.wethUsdGReferenceV187 ||
-          bestVerifiedWethUsdGReferenceV195(state)
-      );
-
-      if (
-        !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
-        !isAddress(quoteTokenAddress) ||
-        quoteEligibility?.eligible !== true
-      ) {
+      if (!candidate) {
         return [];
       }
 
@@ -119122,12 +119206,16 @@ for (
           verified:true,
           source:"ADMITTED_DURABLE_COHORT_EXACT_POOL_V1087",
           tokenAddress:admittedAddress,
-          poolId,
-          quoteTokenAddress,
-          quoteBasis:quoteEligibility?.basis || null,
+          poolId:decision?.identity?.poolId || null,
+          quoteTokenAddress:
+            decision?.identity?.quoteTokenAddress || null,
+          quoteBasis:
+            decision?.quoteEligibility?.basis || null,
           forwardOnly:true,
           historicalBackfill:false,
-          requestCeilingRaised:false
+          requestCeilingRaised:false,
+          eligibilityDiagnosticV1088:
+            "COHORT_EXACT_POOL_HANDOFF_ELIGIBLE_V1088"
         }
       }];
     })();
@@ -119446,6 +119534,8 @@ for (
   const directionalCohortPoolHandoffV1087 = {
     enabled:true,
     measurementOnly:false,
+    eligibilityDiagnosticV1088:
+      directionalCohortExactPoolEligibilityV1088,
     externalRequestsAddedByHandoff:0,
     hardGlobalLimitUnchanged:42,
     admittedCohortAddress:
@@ -186875,7 +186965,7 @@ async function cohortFlowStatusV1085(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1087",
+    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1088",
     success:false,
     readOnly:true,
     externalRequestsUsed:0,
@@ -186987,11 +187077,13 @@ async function cohortFlowStatusV1085(env) {
     return {
       ...base,
       success:true,
-      status:"COHORT_FLOW_COVERAGE_OK_V1087",
+      status:"COHORT_FLOW_COVERAGE_OK_V1088",
+      lastCohortExactPoolHandoffV1088:
+        state?.lastCohortExactPoolHandoffV1088 || null,
       verifiedFlowTokens:tokens.filter(t => t.flowVerified).length,
       missingVerifiedFlowTokens:tokens.filter(t => !t.flowVerified).length,
       tokens,
-      note:"Read-only D1 + existing directional-watch state diagnostic. No provider or RPC calls are made by this endpoint.",
+      note:"Read-only D1 + existing directional-watch state + persisted V1088 handoff eligibility diagnostic. No provider or RPC calls are made by this endpoint.",
       timestamp:now()
     };
   } catch (error) {
