@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1076
+ * PERSISTENT COMPACT D1 MARKET HISTORY — PHASE 1
+ * Builds directly from deployed V1075.
+ * - Starts forward-only 5-minute market-history snapshots in existing CHAINVANTA_DB.
+ * - Stores only already-known scanner evidence; adds ZERO provider/RPC requests.
+ * - One row per token per aligned 5-minute bucket via INSERT OR REPLACE.
+ * - Captures verified price/market cap/liquidity/24h volume plus current score/risk/
+ *   holder context when available. Unverified market values stay NULL.
+ * - Adds read-only /market-history-status and /market-history?token=0x... diagnostics.
+ * - History writes are isolated from subscriber/payment tables.
+ * - No live scoring, qualification, Telegram, Stripe, provider routing, request
+ *   budgets, KV state, or Durable Object behaviour changes.
+ */
+
+/**
  * ChainVanta — V1075
  * TRANSACTION-COMPLETE V4 RPC ↔ BITQUERY CROSS-CHECK
  * Builds directly from deployed V1074.
@@ -8970,7 +8985,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1075"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1076"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -121488,6 +121503,16 @@ for (
       scheduled
     );
 
+  /* V1076: forward-only compact D1 market-history snapshots.
+   * Uses only evidence already present on analysed candidates.
+   * Adds zero provider/RPC requests and does not mutate candidate evidence. */
+  const marketHistoryV1076 =
+    await persistMarketHistoryV1076(
+      env,
+      candidates,
+      Date.now()
+    );
+
   const save =
     await writeState(
       env,
@@ -121537,6 +121562,8 @@ for (
 
     rpcProvider:
       latest.provider,
+
+    marketHistoryV1076,
 
     persistence: {
       enabled:
@@ -184762,6 +184789,329 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
 
 
 
+
+/* ============================================================
+   V1076 — PERSISTENT COMPACT D1 MARKET HISTORY — PHASE 1
+   ============================================================
+   Forward-only storage of evidence the scanner already has.
+   No provider/RPC calls are made here.
+*/
+const MARKET_HISTORY_BUCKET_MS_V1076 = 5 * 60 * 1000;
+const MARKET_HISTORY_TABLE_V1076 = 'market_history_v1076';
+
+function finiteOrNullV1076(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function marketHistoryBucketV1076(ts = Date.now()) {
+  const n = Number(ts);
+  const safe = Number.isFinite(n) && n > 0 ? n : Date.now();
+  return Math.floor(safe / MARKET_HISTORY_BUCKET_MS_V1076) * MARKET_HISTORY_BUCKET_MS_V1076;
+}
+
+async function ensureMarketHistoryV1076(env) {
+  if (!env?.CHAINVANTA_DB) return {ok:false,status:'D1_BINDING_MISSING_V1076'};
+  try {
+    await env.CHAINVANTA_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS ${MARKET_HISTORY_TABLE_V1076} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        captured_at INTEGER NOT NULL,
+        bucket_at INTEGER NOT NULL,
+        address TEXT NOT NULL,
+        symbol TEXT,
+        market_verified INTEGER NOT NULL DEFAULT 0,
+        market_source TEXT,
+        price_usd REAL,
+        market_cap_usd REAL,
+        liquidity_usd REAL,
+        volume_24h_usd REAL,
+        buys_5m INTEGER,
+        sells_5m INTEGER,
+        buys_1h INTEGER,
+        sells_1h INTEGER,
+        buys_24h INTEGER,
+        sells_24h INTEGER,
+        opportunity_score REAL,
+        momentum_score REAL,
+        confidence_score REAL,
+        risk_verified INTEGER NOT NULL DEFAULT 0,
+        risk_score REAL,
+        holder_count REAL,
+        top_holder_pct REAL,
+        top10_pct REAL,
+        launch_stage TEXT,
+        age_hours REAL,
+        created_at INTEGER NOT NULL,
+        UNIQUE(address, bucket_at)
+      )
+    `).run();
+
+    await env.CHAINVANTA_DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_market_history_v1076_address_time
+      ON ${MARKET_HISTORY_TABLE_V1076}(address, captured_at DESC)
+    `).run();
+
+    await env.CHAINVANTA_DB.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_market_history_v1076_time
+      ON ${MARKET_HISTORY_TABLE_V1076}(captured_at DESC)
+    `).run();
+
+    return {ok:true,status:'READY_V1076'};
+  } catch (error) {
+    return {ok:false,status:'D1_SCHEMA_ERROR_V1076',error:errorString(error).slice(0,700)};
+  }
+}
+
+function marketHistorySnapshotV1076(candidate, capturedAt = Date.now()) {
+  const market = candidate?.market || {};
+  const holders = candidate?.holders || {};
+  const whale = holders?.whale || {};
+  const launch = candidate?.launchStage || candidate?.verifiedLaunchAgeV223 || {};
+  const marketVerified = market?.verified === true;
+
+  let ageHours = null;
+  const ageMsCandidates = [
+    candidate?.verifiedLaunchAgeV223?.ageMs,
+    launch?.ageMs,
+    market?.pairCreatedAt ? Math.max(0, capturedAt - Number(market.pairCreatedAt)) : null
+  ];
+  for (const ageMs of ageMsCandidates) {
+    const n = Number(ageMs);
+    if (Number.isFinite(n) && n >= 0) {
+      ageHours = n / 3600000;
+      break;
+    }
+  }
+
+  let holderCount = null;
+  if (holders?.holderCountCompletionV256?.verified === true) {
+    holderCount = finiteOrNullV1076(holders?.holderCountCompletionV256?.count);
+  }
+  if (holderCount === null && holders?.counterVerified === true) {
+    holderCount = finiteOrNullV1076(holders?.count);
+  }
+  if (holderCount === null) {
+    holderCount = finiteOrNullV1076(
+      holders?.holderCountDisplayV225?.verified === true
+        ? holders?.holderCountDisplayV225?.count
+        : null
+    );
+  }
+
+  return {
+    capturedAt,
+    bucketAt: marketHistoryBucketV1076(capturedAt),
+    address: normalize(candidate?.address),
+    symbol: candidate?.symbol || candidate?.validation?.symbol || null,
+    marketVerified,
+    marketSource: marketVerified ? (market?.source || null) : null,
+    priceUsd: marketVerified ? finiteOrNullV1076(market?.priceUsd) : null,
+    marketCapUsd: marketVerified ? finiteOrNullV1076(market?.marketCap) : null,
+    liquidityUsd: marketVerified ? finiteOrNullV1076(market?.liquidityUsd) : null,
+    volume24hUsd: marketVerified ? finiteOrNullV1076(market?.volume?.h24) : null,
+    buys5m: marketVerified ? finiteOrNullV1076(market?.transactions?.m5?.buys) : null,
+    sells5m: marketVerified ? finiteOrNullV1076(market?.transactions?.m5?.sells) : null,
+    buys1h: marketVerified ? finiteOrNullV1076(market?.transactions?.h1?.buys) : null,
+    sells1h: marketVerified ? finiteOrNullV1076(market?.transactions?.h1?.sells) : null,
+    buys24h: marketVerified ? finiteOrNullV1076(market?.transactions?.h24?.buys) : null,
+    sells24h: marketVerified ? finiteOrNullV1076(market?.transactions?.h24?.sells) : null,
+    opportunityScore: finiteOrNullV1076(candidate?.opportunity?.score),
+    momentumScore: finiteOrNullV1076(candidate?.momentum?.score),
+    confidenceScore: finiteOrNullV1076(candidate?.confidence?.score),
+    riskVerified: candidate?.risk?.verified === true,
+    riskScore: candidate?.risk?.verified === true ? finiteOrNullV1076(candidate?.risk?.score) : null,
+    holderCount,
+    topHolderPct: holders?.concentrationVerified === true || whale?.verified === true
+      ? finiteOrNullV1076(whale?.top1Percent)
+      : null,
+    top10Pct: holders?.concentrationVerified === true || whale?.verified === true
+      ? finiteOrNullV1076(whale?.top10Percent)
+      : null,
+    launchStage: candidate?.launchStage?.stage || candidate?.launchStage?.label || candidate?.verifiedLaunchAgeV223?.stage || null,
+    ageHours: Number.isFinite(ageHours) ? ageHours : null
+  };
+}
+
+async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now()) {
+  const base = {
+    enabled:true,
+    version:'V1076',
+    d1Binding:Boolean(env?.CHAINVANTA_DB),
+    attempted:0,
+    written:0,
+    skippedInvalidAddress:0,
+    verifiedMarketRows:0,
+    unverifiedMarketRows:0,
+    bucketAt:marketHistoryBucketV1076(capturedAt),
+    externalRequestsUsed:0,
+    scannerEvidenceMutated:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramChanged:false,
+    providerRoutingChanged:false,
+    error:null,
+    status:null
+  };
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) return {...base,status:ready.status,error:ready.error||null};
+
+  const rows = [];
+  const seen = new Set();
+  for (const candidate of (Array.isArray(candidates) ? candidates : [])) {
+    const snap = marketHistorySnapshotV1076(candidate,capturedAt);
+    if (!isAddress(snap.address)) {
+      base.skippedInvalidAddress++;
+      continue;
+    }
+    if (seen.has(snap.address)) continue;
+    seen.add(snap.address);
+    rows.push(snap);
+  }
+
+  base.attempted = rows.length;
+  if (!rows.length) return {...base,status:'NO_CANDIDATE_ROWS_V1076'};
+
+  const sql = `
+    INSERT OR REPLACE INTO ${MARKET_HISTORY_TABLE_V1076} (
+      captured_at,bucket_at,address,symbol,market_verified,market_source,
+      price_usd,market_cap_usd,liquidity_usd,volume_24h_usd,
+      buys_5m,sells_5m,buys_1h,sells_1h,buys_24h,sells_24h,
+      opportunity_score,momentum_score,confidence_score,
+      risk_verified,risk_score,holder_count,top_holder_pct,top10_pct,
+      launch_stage,age_hours,created_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `;
+
+  try {
+    const statements = rows.map(r => env.CHAINVANTA_DB.prepare(sql).bind(
+      r.capturedAt,r.bucketAt,r.address,r.symbol,r.marketVerified?1:0,r.marketSource,
+      r.priceUsd,r.marketCapUsd,r.liquidityUsd,r.volume24hUsd,
+      r.buys5m,r.sells5m,r.buys1h,r.sells1h,r.buys24h,r.sells24h,
+      r.opportunityScore,r.momentumScore,r.confidenceScore,
+      r.riskVerified?1:0,r.riskScore,r.holderCount,r.topHolderPct,r.top10Pct,
+      r.launchStage,r.ageHours,capturedAt
+    ));
+
+    // Keep batches small even if future candidate counts grow.
+    for (let i=0;i<statements.length;i+=25) {
+      const batch = statements.slice(i,i+25);
+      await env.CHAINVANTA_DB.batch(batch);
+    }
+
+    base.written = rows.length;
+    base.verifiedMarketRows = rows.filter(r=>r.marketVerified).length;
+    base.unverifiedMarketRows = rows.length - base.verifiedMarketRows;
+    base.status = 'MARKET_HISTORY_WRITTEN_V1076';
+    return base;
+  } catch (error) {
+    return {...base,status:'MARKET_HISTORY_WRITE_FAILED_V1076',error:errorString(error).slice(0,700)};
+  }
+}
+
+async function marketHistoryStatusV1076(env) {
+  const base = {
+    agent:'ChainVanta',
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'MARKET_HISTORY_STATUS_V1076',
+    success:false,
+    readOnly:true,
+    table:MARKET_HISTORY_TABLE_V1076,
+    bucketMinutes:5,
+    forwardOnly:true,
+    externalRequestsUsed:0
+  };
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) return {...base,status:ready.status,error:ready.error||null};
+
+  try {
+    const summary = await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        COUNT(*) AS rows,
+        COUNT(DISTINCT address) AS tokens,
+        MIN(captured_at) AS first_at,
+        MAX(captured_at) AS last_at,
+        SUM(CASE WHEN market_verified=1 THEN 1 ELSE 0 END) AS verified_market_rows
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+    `).first();
+
+    const latest = await env.CHAINVANTA_DB.prepare(`
+      SELECT address,symbol,captured_at,market_verified,price_usd,market_cap_usd,
+             liquidity_usd,volume_24h_usd,opportunity_score,momentum_score,
+             confidence_score,risk_score,holder_count,top_holder_pct,top10_pct
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+      ORDER BY captured_at DESC
+      LIMIT 10
+    `).all();
+
+    return {
+      ...base,
+      success:true,
+      status:'MARKET_HISTORY_STATUS_OK_V1076',
+      summary:{
+        rows:safeNumber(summary?.rows),
+        tokens:safeNumber(summary?.tokens),
+        verifiedMarketRows:safeNumber(summary?.verified_market_rows),
+        firstAt:safeNumber(summary?.first_at)||null,
+        lastAt:safeNumber(summary?.last_at)||null
+      },
+      latestRows:Array.isArray(latest?.results)?latest.results:[],
+      timestamp:now()
+    };
+  } catch (error) {
+    return {...base,status:'MARKET_HISTORY_STATUS_FAILED_V1076',error:errorString(error).slice(0,700),timestamp:now()};
+  }
+}
+
+async function marketHistoryTokenV1076(env,url) {
+  const token = normalize(url?.searchParams?.get('token')||'');
+  const limitRaw = Number(url?.searchParams?.get('limit')||100);
+  const limit = Math.max(1,Math.min(500,Number.isFinite(limitRaw)?Math.trunc(limitRaw):100));
+  const base = {
+    agent:'ChainVanta',
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'MARKET_HISTORY_TOKEN_V1076',
+    success:false,
+    readOnly:true,
+    token,
+    limit,
+    externalRequestsUsed:0
+  };
+  if (!isAddress(token)) return {...base,status:'INVALID_TOKEN_ADDRESS_V1076',timestamp:now()};
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) return {...base,status:ready.status,error:ready.error||null,timestamp:now()};
+
+  try {
+    const result = await env.CHAINVANTA_DB.prepare(`
+      SELECT captured_at,bucket_at,address,symbol,market_verified,market_source,
+             price_usd,market_cap_usd,liquidity_usd,volume_24h_usd,
+             buys_5m,sells_5m,buys_1h,sells_1h,buys_24h,sells_24h,
+             opportunity_score,momentum_score,confidence_score,risk_verified,
+             risk_score,holder_count,top_holder_pct,top10_pct,launch_stage,age_hours
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+      WHERE address=?
+      ORDER BY captured_at DESC
+      LIMIT ?
+    `).bind(token,limit).all();
+
+    const rows = Array.isArray(result?.results)?result.results:[];
+    return {
+      ...base,
+      success:true,
+      status:rows.length?'MARKET_HISTORY_TOKEN_OK_V1076':'NO_HISTORY_FOR_TOKEN_V1076',
+      rows,
+      rowCount:rows.length,
+      timestamp:now()
+    };
+  } catch (error) {
+    return {...base,status:'MARKET_HISTORY_TOKEN_FAILED_V1076',error:errorString(error).slice(0,700),timestamp:now()};
+  }
+}
+
+
 /* ============================================================
    V1075 — TRANSACTION-COMPLETE V4 RPC ↔ BITQUERY CROSS-CHECK
    ============================================================
@@ -186113,6 +186463,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryV4TransactionCompleteCrosscheckV1075(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/market-history-status"
+  ) {
+    return jsonResponse(
+      await marketHistoryStatusV1076(env)
+    );
+  }
+
+  if (
+    path ===
+      "/market-history"
+  ) {
+    return jsonResponse(
+      await marketHistoryTokenV1076(env, url)
     );
   }
 
