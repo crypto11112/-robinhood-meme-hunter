@@ -1,5 +1,5 @@
 /**
- * ChainVanta — V1064
+ * ChainVanta — V1065
  * BITQUERY BOUNDARY-SAFE TRANSACTION COMPLETION DIAGNOSTIC
  * Builds directly from confirmed-working V1063.
  * Preserves V1059-V1063 Bitquery diagnostics unchanged.
@@ -8871,7 +8871,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1064"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1065"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184099,6 +184099,214 @@ async function bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, url) {
   };
 }
 
+
+
+/* ============================================================
+   V1065 — BITQUERY ↔ DIRECT RPC TRANSACTION CROSS-CHECK
+   ============================================================
+   - GET /bitquery-rpc-crosscheck?token=0x...&limit=25 only.
+   - Reuses V1064 boundary-safe Bitquery reconstruction.
+   - Selects up to five representative transactions:
+       USER_BUY, USER_SELL, ROUTED_BUY, ROUTED_SELL, and a V4 example when available.
+   - Independently reads ERC-20 decimals + eth_getTransactionReceipt from Robinhood RPC.
+   - Reconstructs token flow to/from the Bitquery-identified pool set from raw Transfer logs.
+   - Reports MATCH / PARTIAL_MATCH / MISMATCH without mutating scanner state.
+   - No scoring, Telegram, D1, KV, Stripe, DO, or provider-routing changes.
+*/
+const ERC20_TRANSFER_TOPIC_V1065 =
+  '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+
+function hexAddressTopicV1065(topic) {
+  const t=String(topic||'').toLowerCase();
+  return /^0x[0-9a-f]{64}$/.test(t) ? ('0x'+t.slice(-40)) : null;
+}
+
+function hexBigIntV1065(value) {
+  try { return BigInt(String(value||'0x0')); } catch (_) { return 0n; }
+}
+
+function decimalFromRawV1065(raw, decimals) {
+  const d=Math.max(0, Math.min(36, Number(decimals)||0));
+  const scale=10n ** BigInt(d);
+  const whole=raw/scale;
+  const rem=raw%scale;
+  const frac=rem.toString().padStart(d,'0').slice(0,12).replace(/0+$/,'');
+  return Number(frac ? `${whole}.${frac}` : String(whole));
+}
+
+async function directRpcCallV1065(env, method, params) {
+  const providerNames=['VALIDATION_CLOUD','CHAINSTACK','ALCHEMY','ROBINHOOD_PUBLIC_RPC'];
+  const attempts=[];
+  let requests=0;
+  for (const provider of providerNames) {
+    const rpcUrl=rpcProviderUrl(env, provider);
+    if (!rpcUrl) continue;
+    requests += 1;
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),7000);
+    try {
+      const res=await fetch(rpcUrl,{
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({jsonrpc:'2.0',id:Date.now(),method,params}),
+        signal:controller.signal
+      });
+      clearTimeout(timer);
+      let payload=null;
+      try { payload=await res.json(); } catch (_) {}
+      const err=payload?.error?.message || (!res.ok?`HTTP_${res.status}`:null);
+      attempts.push({provider,httpStatus:res.status,ok:res.ok&&!payload?.error,error:err||null});
+      if (res.ok && !payload?.error) {
+        return {ok:true,result:payload?.result??null,provider,attempts,externalRequestsUsed:requests};
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      attempts.push({provider,httpStatus:null,ok:false,error:String(error?.message||error||'FETCH_ERROR').slice(0,160)});
+    }
+  }
+  return {ok:false,result:null,provider:null,attempts,externalRequestsUsed:requests};
+}
+
+function pickCrosscheckTransactionsV1065(transactions) {
+  const txs=Array.isArray(transactions)?transactions:[];
+  const picked=[];
+  const seen=new Set();
+  const add=(tx)=>{
+    const h=safeLowerV1063(tx?.txHash);
+    if (!tx||!h||seen.has(h)||picked.length>=5) return;
+    seen.add(h); picked.push(tx);
+  };
+  for (const cls of ['USER_BUY','USER_SELL','ROUTED_BUY','ROUTED_SELL']) {
+    add(txs.find(t=>String(t?.classification||'')===cls));
+  }
+  add(txs.find(t=>(t?.protocols||[]).some(p=>String(p||'').toLowerCase().includes('uniswap_v4'))));
+  for (const tx of txs) add(tx);
+  return picked.slice(0,5);
+}
+
+function transferEvidenceFromReceiptV1065(receipt, token, pools, decimals) {
+  const tokenLc=safeLowerV1063(token);
+  const poolSet=new Set((Array.isArray(pools)?pools:[]).map(safeLowerV1063).filter(Boolean));
+  let poolInRaw=0n, poolOutRaw=0n, otherRaw=0n;
+  const transfers=[];
+  for (const log of Array.isArray(receipt?.logs)?receipt.logs:[]) {
+    if (safeLowerV1063(log?.address)!==tokenLc) continue;
+    const topics=Array.isArray(log?.topics)?log.topics:[];
+    if (safeLowerV1063(topics[0])!==ERC20_TRANSFER_TOPIC_V1065 || topics.length<3) continue;
+    const from=hexAddressTopicV1065(topics[1]);
+    const to=hexAddressTopicV1065(topics[2]);
+    const raw=hexBigIntV1065(log?.data);
+    const fromPool=poolSet.has(safeLowerV1063(from));
+    const toPool=poolSet.has(safeLowerV1063(to));
+    if (fromPool&&!toPool) poolOutRaw += raw;
+    else if (!fromPool&&toPool) poolInRaw += raw;
+    else otherRaw += raw;
+    transfers.push({from,to,rawAmount:raw.toString(),amount:decimalFromRawV1065(raw,decimals),fromListedPool:fromPool,toListedPool:toPool});
+  }
+  let direction='UNKNOWN';
+  let economicRaw=0n;
+  if (poolOutRaw>poolInRaw) { direction='BUY'; economicRaw=poolOutRaw-poolInRaw; }
+  else if (poolInRaw>poolOutRaw) { direction='SELL'; economicRaw=poolInRaw-poolOutRaw; }
+  else if (poolInRaw===poolOutRaw && poolInRaw>0n) direction='NEUTRAL';
+  return {
+    direction,
+    poolInAmount:decimalFromRawV1065(poolInRaw,decimals),
+    poolOutAmount:decimalFromRawV1065(poolOutRaw,decimals),
+    economicTokenAmount:decimalFromRawV1065(economicRaw,decimals),
+    transferLogCount:transfers.length,
+    otherRawAmount:decimalFromRawV1065(otherRaw,decimals),
+    transfers
+  };
+}
+
+async function bitqueryRpcCrosscheckV1065(env, url) {
+  const startedAt=Date.now();
+  const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
+  if (!base?.success || base?.completion?.boundaryComplete!==true) {
+    return {
+      ...base,
+      version:CHAINVANTA_DISPLAY_VERSION,
+      diagnostic:'BITQUERY_RPC_CROSSCHECK_V1065',
+      success:false,
+      status:'BITQUERY_BASE_NOT_BOUNDARY_COMPLETE_V1065',
+      scannerMutated:false,
+      note:'RPC cross-check was not attempted because V1064 did not return a successful boundary-complete sample.'
+    };
+  }
+
+  const token=safeLowerV1063(base?.request?.token);
+  let rpcRequests=0;
+  const decimalsCall=await directRpcCallV1065(env,'eth_call',[{to:token,data:'0x313ce567'},'latest']);
+  rpcRequests += decimalsCall.externalRequestsUsed||0;
+  let decimals=null;
+  if (decimalsCall.ok && typeof decimalsCall.result==='string') {
+    try { decimals=Number(BigInt(decimalsCall.result)); } catch (_) {}
+  }
+  if (!Number.isInteger(decimals) || decimals<0 || decimals>36) decimals=18;
+
+  const selected=pickCrosscheckTransactionsV1065(base?.reconstruction?.transactions);
+  const checks=[];
+  for (const tx of selected) {
+    const receiptCall=await directRpcCallV1065(env,'eth_getTransactionReceipt',[tx.txHash]);
+    rpcRequests += receiptCall.externalRequestsUsed||0;
+    const receipt=receiptCall.result;
+    if (!receiptCall.ok || !receipt) {
+      checks.push({
+        txHash:tx.txHash,classification:tx.classification,bitqueryDirection:tx.direction,
+        verdict:'MISMATCH',reason:'RPC_RECEIPT_UNAVAILABLE',rpc:receiptCall
+      });
+      continue;
+    }
+    const evidence=transferEvidenceFromReceiptV1065(receipt,token,tx.pools,decimals);
+    const receiptBlock=receipt?.blockNumber?Number(BigInt(receipt.blockNumber)):null;
+    const blockMatch=Number(tx?.block)===receiptBlock;
+    const directionMatch=String(tx?.direction||'')===String(evidence.direction||'');
+    const bqAmount=Math.abs(Number(tx?.targetToken?.netAmount)||0);
+    const rpcAmount=Math.abs(Number(evidence?.economicTokenAmount)||0);
+    const denom=Math.max(bqAmount,rpcAmount,1e-18);
+    const amountDiffPct=Math.abs(bqAmount-rpcAmount)/denom*100;
+    const amountMatch=Number.isFinite(amountDiffPct)&&amountDiffPct<=1.0;
+    const statusOk=String(receipt?.status||'').toLowerCase()!=='0x0';
+    const verdict=(statusOk&&blockMatch&&directionMatch&&amountMatch)?'MATCH':
+      (statusOk&&directionMatch?'PARTIAL_MATCH':'MISMATCH');
+    checks.push({
+      txHash:tx.txHash,
+      classification:tx.classification,
+      protocols:tx.protocols,
+      bitquery:{block:tx.block,direction:tx.direction,tokenAmount:bqAmount,usd:tx?.usd?.economicDirectional??null,pools:tx.pools},
+      rpc:{provider:receiptCall.provider,receiptStatus:receipt?.status??null,block:receiptBlock,direction:evidence.direction,tokenAmount:rpcAmount,transferLogCount:evidence.transferLogCount,poolInAmount:evidence.poolInAmount,poolOutAmount:evidence.poolOutAmount},
+      comparison:{blockMatch,directionMatch,amountMatch,amountDiffPct:Number(amountDiffPct.toFixed(4))},
+      verdict
+    });
+  }
+
+  const counts={MATCH:0,PARTIAL_MATCH:0,MISMATCH:0};
+  for (const c of checks) counts[c.verdict]=(counts[c.verdict]||0)+1;
+  const overall=checks.length>0 && counts.MISMATCH===0 && counts.MATCH===checks.length
+    ? 'ALL_MATCH'
+    : (counts.MISMATCH===0 ? 'NO_HARD_MISMATCHES' : 'MISMATCH_DETECTED');
+
+  return {
+    agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'BITQUERY_RPC_CROSSCHECK_V1065',success:counts.MISMATCH===0,readOnly:true,configured:true,
+    status:overall==='ALL_MATCH'?'BITQUERY_RPC_ALL_MATCH_V1065':(overall==='NO_HARD_MISMATCHES'?'BITQUERY_RPC_PARTIAL_MATCH_V1065':'BITQUERY_RPC_MISMATCH_V1065'),
+    request:base.request,
+    bitqueryBoundary:{boundaryComplete:base?.completion?.boundaryComplete===true,completedRowCount:base?.completion?.completedRowCount??null},
+    rpcDecimals:{value:decimals,verified:decimalsCall.ok,provider:decimalsCall.provider},
+    selectedTransactions:checks.length,
+    verdictCounts:counts,
+    overall,
+    checks,
+    externalRequestsUsed:(base.externalRequestsUsed||4)+rpcRequests,
+    bitqueryExternalRequestsUsed:base.externalRequestsUsed||4,
+    rpcExternalRequestsUsed:rpcRequests,
+    scannerMutated:false,
+    authoritative:false,
+    note:'Diagnostic cross-check only. MATCH requires receipt/block, BUY/SELL direction and target-token amount (within 1%) to agree. No result feeds live scoring or provider routing.',
+    elapsedMs:Date.now()-startedAt,timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -184332,6 +184540,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-rpc-crosscheck"
+  ) {
+    return jsonResponse(
+      await bitqueryRpcCrosscheckV1065(env, url)
     );
   }
 
