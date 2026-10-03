@@ -1,4 +1,24 @@
 /**
+ * ChainVanta — V1079
+ * DURABLE INTELLIGENCE COHORT
+ * Builds directly from deployed V1078.
+ * - Fixes the continuity weakness exposed by V1078: useful history addresses no
+ *   longer have to remain inside the rotating main watchedTokens list to be revisited.
+ * - Persists a separate bounded cohort of up to 8 useful token objects in existing KV.
+ * - Seeds/refreshes the cohort only from conservative V1077 history eligibility.
+ * - Cohort identity is contract address; symbols are display-only.
+ * - At most ONE cohort token can use an existing analysis slot on a scheduled scan,
+ *   and only when current/live verified-launch pressure is low.
+ * - Fresh launches, carried completion, holder retry and evidence-completion lanes
+ *   keep priority. MAX_TOKEN_CHECKS and all hard/provider request ceilings remain unchanged.
+ * - Cohort entries expire after 48h and are bounded to limit state growth.
+ * - Adds /intelligence-cohort-status read-only diagnostic.
+ * - V1078 accumulation remains shadow-only: no Opportunity/Momentum/Confidence/Risk
+ *   weights, Telegram qualification, Telegram calls, Stripe, provider routing,
+ *   D1 schema, KV binding, or Durable Objects are changed.
+ */
+
+/**
  * ChainVanta — V1078
  * ACCUMULATION INTELLIGENCE — SHADOW / DIAGNOSTIC ONLY
  * Builds directly from deployed V1077.
@@ -9021,7 +9041,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1078"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1079"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -24196,6 +24216,15 @@ function newState() {
 
     watchedTokens:
       [],
+
+    intelligenceCohortV1079: {
+      schemaVersion: "V1079_1",
+      maxEntries: 8,
+      updatedAt: null,
+      lastSelectedAddress: null,
+      lastSelectedAt: null,
+      entries: []
+    },
 
     alerts:
       {},
@@ -109773,11 +109802,11 @@ for (
       evidenceCompletionRetryTokenV658?.address
     );
 
-  /* V1077: one bounded established-token follow-up slot.
-   * The token comes from existing D1 history and must still be in state.watchedTokens.
-   * It never raises MAX_TOKEN_CHECKS or any request ceiling. */
+  /* V1079: one bounded durable-cohort follow-up slot.
+   * Unlike V1077, the token does not need to remain in rotating watchedTokens.
+   * It still never raises MAX_TOKEN_CHECKS or any request ceiling. */
   const intelligenceFollowUpSelectionV1077 =
-    await selectIntelligenceFollowUpV1077(
+    await selectIntelligenceFollowUpV1079(
       env,
       state,
       scheduled
@@ -110007,6 +110036,8 @@ for (
 
   const intelligenceFollowUpV1077 = {
     ...intelligenceFollowUpSelectionV1077,
+    telemetryVersion:"V1079",
+    durableCohortEnabled:true,
     token:undefined,
     freshLaunchPressureLow:
       intelligenceFreshLaunchPressureLowV1077,
@@ -113868,6 +113899,12 @@ for (
         currentLiveVerifiedLaunchTokensV621,
         Date.now()
       );
+
+    noteIntelligenceCohortAnalysisV1079(
+      state,
+      address,
+      candidate
+    );
 
     candidates.push(
       candidate
@@ -184891,6 +184928,444 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
 
 
 
+
+/* ============================================================
+   V1079 — DURABLE INTELLIGENCE COHORT
+   ============================================================
+   The V1077 follow-up lane depended on a useful token still being present in
+   state.watchedTokens. That list is intentionally rotating/bounded. V1079 keeps
+   a second, tiny, bounded cohort so D1 history can actually become longitudinal.
+*/
+const INTELLIGENCE_COHORT_MAX_V1079 = 8;
+const INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 = 48 * 60 * 60 * 1000;
+const INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 = 4 * 60 * 1000;
+
+function ensureIntelligenceCohortV1079(state) {
+  if (!state || typeof state !== "object") return null;
+
+  if (
+    !state.intelligenceCohortV1079 ||
+    typeof state.intelligenceCohortV1079 !== "object"
+  ) {
+    state.intelligenceCohortV1079 = {
+      schemaVersion: "V1079_1",
+      maxEntries: INTELLIGENCE_COHORT_MAX_V1079,
+      updatedAt: null,
+      lastSelectedAddress: null,
+      lastSelectedAt: null,
+      entries: []
+    };
+  }
+
+  const cohort = state.intelligenceCohortV1079;
+  cohort.schemaVersion = "V1079_1";
+  cohort.maxEntries = INTELLIGENCE_COHORT_MAX_V1079;
+  cohort.entries = Array.isArray(cohort.entries) ? cohort.entries : [];
+  return cohort;
+}
+
+function pruneIntelligenceCohortV1079(state, nowMs = Date.now()) {
+  const cohort = ensureIntelligenceCohortV1079(state);
+  if (!cohort) return null;
+
+  const deduped = new Map();
+
+  for (const entry of cohort.entries) {
+    const address = normalize(entry?.address || entry?.token?.address);
+    const lastUsefulAt = safeNumber(entry?.lastUsefulAt || entry?.retainedAt);
+    if (!isAddress(address)) continue;
+    if (!lastUsefulAt || nowMs - lastUsefulAt > INTELLIGENCE_COHORT_MAX_AGE_MS_V1079) continue;
+    if (!entry?.token || typeof entry.token !== "object") continue;
+
+    const existing = deduped.get(address);
+    if (
+      !existing ||
+      safeNumber(entry?.lastUsefulAt) > safeNumber(existing?.lastUsefulAt)
+    ) {
+      deduped.set(address, {
+        ...entry,
+        address,
+        token: entry.token
+      });
+    }
+  }
+
+  cohort.entries = [...deduped.values()]
+    .sort((a,b) =>
+      safeNumber(b?.retentionScore) - safeNumber(a?.retentionScore) ||
+      safeNumber(b?.lastUsefulAt) - safeNumber(a?.lastUsefulAt)
+    )
+    .slice(0, INTELLIGENCE_COHORT_MAX_V1079);
+
+  cohort.updatedAt = nowMs;
+  return cohort;
+}
+
+function cohortTokenSafeV1079(token) {
+  if (!token || typeof token !== "object") return null;
+  const address = normalize(token?.address);
+  if (!isAddress(address)) return null;
+
+  const terminal = terminalPriorityRejectFromWatched(token);
+  const excluded = preMarketExcludedToken(token);
+  if (terminal?.terminal === true || excluded?.excluded === true) return null;
+
+  return token;
+}
+
+async function refreshIntelligenceCohortV1079(env, state) {
+  const cohort = pruneIntelligenceCohortV1079(state, Date.now());
+  const base = {
+    version:"V1079",
+    seeded:0,
+    refreshed:0,
+    dropped:0,
+    entriesBefore:safeNumber(cohort?.entries?.length),
+    entriesAfter:0,
+    eligibleHistoryRows:0,
+    historyRowsConsidered:0,
+    externalRequestsUsed:0,
+    status:null
+  };
+
+  if (!cohort) return {...base,status:"COHORT_STATE_UNAVAILABLE_V1079"};
+
+  const history = await intelligenceWatchRowsV1077(env, 100);
+  if (!history.ok) {
+    return {
+      ...base,
+      entriesAfter:cohort.entries.length,
+      status:history.status,
+      error:history.error||null
+    };
+  }
+
+  const nowMs = Date.now();
+  const watched = Array.isArray(state?.watchedTokens) ? state.watchedTokens : [];
+  const watchedByAddress = new Map(
+    watched
+      .map(token => [normalize(token?.address), token])
+      .filter(([address]) => isAddress(address))
+  );
+
+  const eligibleRows = history.rows
+    .filter(row => intelligenceWatchRowEligibleV1077(row, nowMs));
+
+  base.historyRowsConsidered = history.rows.length;
+  base.eligibleHistoryRows = eligibleRows.length;
+
+  const entryByAddress = new Map(
+    cohort.entries.map(entry => [normalize(entry?.address), entry])
+  );
+
+  for (const row of eligibleRows) {
+    const address = normalize(row?.address);
+    const liveToken = cohortTokenSafeV1079(watchedByAddress.get(address));
+    if (!liveToken) continue;
+
+    const score = intelligenceWatchRowScoreV1077(row, nowMs);
+    const existing = entryByAddress.get(address);
+
+    const next = {
+      address,
+      symbol:
+        liveToken?.metadata?.symbol ||
+        liveToken?.symbol ||
+        row?.symbol ||
+        null,
+      retainedAt:
+        safeNumber(existing?.retainedAt) || nowMs,
+      lastUsefulAt:nowMs,
+      lastAnalysedAt:safeNumber(existing?.lastAnalysedAt)||null,
+      lastSelectedAt:safeNumber(existing?.lastSelectedAt)||null,
+      retentionScore:score,
+      observationCount:safeNumber(row?.observation_count),
+      latestHistoryAt:safeNumber(row?.last_at)||null,
+      marketVerified:Number(row?.market_verified)===1,
+      opportunityScore:finiteOrNullV1076(row?.opportunity_score),
+      momentumScore:finiteOrNullV1076(row?.momentum_score),
+      confidenceScore:finiteOrNullV1076(row?.confidence_score),
+      riskScore:Number(row?.risk_verified)===1
+        ? finiteOrNullV1076(row?.risk_score)
+        : null,
+      liquidityUsd:Number(row?.market_verified)===1
+        ? finiteOrNullV1076(row?.liquidity_usd)
+        : null,
+      token:liveToken
+    };
+
+    if (existing) {
+      base.refreshed++;
+    } else {
+      base.seeded++;
+    }
+
+    entryByAddress.set(address, next);
+  }
+
+  cohort.entries = [...entryByAddress.values()]
+    .filter(entry => cohortTokenSafeV1079(entry?.token))
+    .sort((a,b) =>
+      safeNumber(b?.retentionScore) - safeNumber(a?.retentionScore) ||
+      safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt)
+    )
+    .slice(0, INTELLIGENCE_COHORT_MAX_V1079);
+
+  cohort.updatedAt = nowMs;
+  base.entriesAfter = cohort.entries.length;
+  base.dropped = Math.max(
+    0,
+    base.entriesBefore + base.seeded - base.entriesAfter
+  );
+  base.status = "INTELLIGENCE_COHORT_REFRESHED_V1079";
+  return base;
+}
+
+async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
+  const base = {
+    enabled:true,
+    version:"V1079",
+    scheduledRun:scheduled === true,
+    selectedAddress:null,
+    selectedSymbol:null,
+    selectedHistoryScore:null,
+    observationCount:0,
+    lastHistoryAt:null,
+    marketVerified:false,
+    opportunityScore:null,
+    momentumScore:null,
+    confidenceScore:null,
+    riskScore:null,
+    liquidityUsd:null,
+    cohortEntries:0,
+    cohortRefresh:null,
+    selectedFromDurableCohort:false,
+    status:null,
+    error:null,
+    externalRequestsUsed:0,
+    requestCeilingsChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramChanged:false
+  };
+
+  if (scheduled !== true) {
+    return {...base,status:"MANUAL_SCAN_NO_INTELLIGENCE_SLOT_V1079"};
+  }
+
+  const refresh = await refreshIntelligenceCohortV1079(env, state);
+  const cohort = pruneIntelligenceCohortV1079(state, Date.now());
+  base.cohortRefresh = refresh;
+  base.cohortEntries = safeNumber(cohort?.entries?.length);
+
+  if (!cohort?.entries?.length) {
+    return {
+      ...base,
+      status:"NO_ELIGIBLE_DURABLE_INTELLIGENCE_COHORT_V1079"
+    };
+  }
+
+  const nowMs = Date.now();
+  const history = await intelligenceWatchRowsV1077(env, 100);
+  const historyByAddress = new Map(
+    (history?.ok ? history.rows : [])
+      .map(row => [normalize(row?.address), row])
+      .filter(([address]) => isAddress(address))
+  );
+
+  const ranked = [];
+
+  for (const entry of cohort.entries) {
+    const address = normalize(entry?.address);
+    const token = cohortTokenSafeV1079(entry?.token);
+    if (!token || !isAddress(address)) continue;
+
+    const lastSelectedAt = safeNumber(entry?.lastSelectedAt);
+    if (
+      lastSelectedAt &&
+      nowMs - lastSelectedAt < INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079
+    ) {
+      continue;
+    }
+
+    const row = historyByAddress.get(address) || null;
+    if (row && !intelligenceWatchRowEligibleV1077(row, nowMs)) continue;
+
+    const historyScore = row
+      ? intelligenceWatchRowScoreV1077(row, nowMs)
+      : safeNumber(entry?.retentionScore);
+
+    // Prefer useful tokens that have the fewest observations, then the token
+    // least recently selected. This builds breadth and repeated history instead
+    // of allowing one high-score token to monopolise the lane.
+    ranked.push({
+      entry,
+      row,
+      token,
+      historyScore,
+      observationCount:
+        row ? safeNumber(row?.observation_count) : safeNumber(entry?.observationCount),
+      lastSelectedAt
+    });
+  }
+
+  ranked.sort((a,b) =>
+    safeNumber(a?.observationCount) - safeNumber(b?.observationCount) ||
+    safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
+    safeNumber(b?.historyScore) - safeNumber(a?.historyScore)
+  );
+
+  const selected = ranked[0] || null;
+  if (!selected) {
+    return {
+      ...base,
+      status:"DURABLE_COHORT_COOLDOWN_OR_INELIGIBLE_V1079"
+    };
+  }
+
+  const entry = selected.entry;
+  entry.lastSelectedAt = nowMs;
+  cohort.lastSelectedAddress = normalize(entry?.address);
+  cohort.lastSelectedAt = nowMs;
+  cohort.updatedAt = nowMs;
+
+  return {
+    ...base,
+    status:"DURABLE_INTELLIGENCE_FOLLOW_UP_SELECTED_V1079",
+    selectedAddress:normalize(entry?.address),
+    selectedSymbol:
+      entry?.symbol ||
+      selected?.token?.metadata?.symbol ||
+      selected?.token?.symbol ||
+      null,
+    selectedHistoryScore:safeNumber(selected?.historyScore),
+    observationCount:safeNumber(selected?.observationCount),
+    lastHistoryAt:
+      safeNumber(selected?.row?.last_at || entry?.latestHistoryAt) || null,
+    marketVerified:
+      selected?.row
+        ? Number(selected.row?.market_verified)===1
+        : entry?.marketVerified===true,
+    opportunityScore:
+      selected?.row
+        ? finiteOrNullV1076(selected.row?.opportunity_score)
+        : finiteOrNullV1076(entry?.opportunityScore),
+    momentumScore:
+      selected?.row
+        ? finiteOrNullV1076(selected.row?.momentum_score)
+        : finiteOrNullV1076(entry?.momentumScore),
+    confidenceScore:
+      selected?.row
+        ? finiteOrNullV1076(selected.row?.confidence_score)
+        : finiteOrNullV1076(entry?.confidenceScore),
+    riskScore:
+      selected?.row && Number(selected.row?.risk_verified)===1
+        ? finiteOrNullV1076(selected.row?.risk_score)
+        : finiteOrNullV1076(entry?.riskScore),
+    liquidityUsd:
+      selected?.row && Number(selected.row?.market_verified)===1
+        ? finiteOrNullV1076(selected.row?.liquidity_usd)
+        : finiteOrNullV1076(entry?.liquidityUsd),
+    selectedFromDurableCohort:true,
+    token:selected.token
+  };
+}
+
+function noteIntelligenceCohortAnalysisV1079(state, address, analysed) {
+  const cohort = ensureIntelligenceCohortV1079(state);
+  const normalized = normalize(address);
+  if (!cohort || !isAddress(normalized)) return false;
+
+  const entry = cohort.entries.find(
+    row => normalize(row?.address) === normalized
+  );
+  if (!entry) return false;
+
+  entry.lastAnalysedAt = Date.now();
+
+  // analyzeToken mutates the selected token caches. Preserve the same object
+  // back into the cohort so subsequent follow-ups can reuse verified evidence.
+  if (analysed && typeof analysed === "object" && entry.token) {
+    entry.token = entry.token;
+  }
+
+  cohort.updatedAt = Date.now();
+  return true;
+}
+
+async function intelligenceCohortStatusV1079(env, state) {
+  const cohort = pruneIntelligenceCohortV1079(state, Date.now());
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"INTELLIGENCE_COHORT_STATUS_V1079",
+    success:true,
+    readOnly:true,
+    externalRequestsUsed:0,
+    maximumEntries:INTELLIGENCE_COHORT_MAX_V1079,
+    maximumAgeHours:48,
+    selectionCooldownMinutes:4,
+    entries:safeNumber(cohort?.entries?.length),
+    lastSelectedAddress:cohort?.lastSelectedAddress||null,
+    lastSelectedAt:cohort?.lastSelectedAt||null,
+    retained:[]
+  };
+
+  const history = await intelligenceWatchRowsV1077(env, 100);
+  const historyByAddress = new Map(
+    (history?.ok ? history.rows : [])
+      .map(row => [normalize(row?.address), row])
+      .filter(([address]) => isAddress(address))
+  );
+
+  base.retained = (cohort?.entries || []).map(entry => {
+    const address = normalize(entry?.address);
+    const row = historyByAddress.get(address) || null;
+    return {
+      address,
+      symbol:entry?.symbol||null,
+      observations:
+        row ? safeNumber(row?.observation_count) : safeNumber(entry?.observationCount),
+      firstAt:row ? safeNumber(row?.first_at)||null : null,
+      lastAt:row ? safeNumber(row?.last_at)||null : entry?.latestHistoryAt||null,
+      retainedAt:safeNumber(entry?.retainedAt)||null,
+      lastSelectedAt:safeNumber(entry?.lastSelectedAt)||null,
+      lastAnalysedAt:safeNumber(entry?.lastAnalysedAt)||null,
+      marketVerified:
+        row ? Number(row?.market_verified)===1 : entry?.marketVerified===true,
+      opportunityScore:
+        row ? finiteOrNullV1076(row?.opportunity_score) : finiteOrNullV1076(entry?.opportunityScore),
+      momentumScore:
+        row ? finiteOrNullV1076(row?.momentum_score) : finiteOrNullV1076(entry?.momentumScore),
+      confidenceScore:
+        row ? finiteOrNullV1076(row?.confidence_score) : finiteOrNullV1076(entry?.confidenceScore),
+      riskScore:
+        row && Number(row?.risk_verified)===1
+          ? finiteOrNullV1076(row?.risk_score)
+          : finiteOrNullV1076(entry?.riskScore),
+      liquidityUsd:
+        row && Number(row?.market_verified)===1
+          ? finiteOrNullV1076(row?.liquidity_usd)
+          : finiteOrNullV1076(entry?.liquidityUsd),
+      retentionScore:
+        row ? intelligenceWatchRowScoreV1077(row, Date.now()) : safeNumber(entry?.retentionScore),
+      stillInMainWatchlist:
+        Array.isArray(state?.watchedTokens) &&
+        state.watchedTokens.some(token => normalize(token?.address)===address)
+    };
+  }).sort((a,b) =>
+    safeNumber(a?.observations) - safeNumber(b?.observations) ||
+    safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt)
+  );
+
+  base.status = "INTELLIGENCE_COHORT_STATUS_OK_V1079";
+  base.note =
+    "Read-only. Cohort retention is not a BUY signal. It exists only to create repeated longitudinal evidence without sacrificing fresh-launch priority.";
+  base.timestamp = now();
+  return base;
+}
+
+
 /* ============================================================
    V1078 — ACCUMULATION INTELLIGENCE — SHADOW MODE
    ============================================================
@@ -187326,6 +187801,21 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await intelligenceWatchlistStatusV1077(env)
+    );
+  }
+
+  if (
+    path ===
+      "/intelligence-cohort-status"
+  ) {
+    const cohortStateV1079 =
+      await readState(env);
+
+    return jsonResponse(
+      await intelligenceCohortStatusV1079(
+        env,
+        cohortStateV1079.state
+      )
     );
   }
 
