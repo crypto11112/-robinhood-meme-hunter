@@ -1,4 +1,23 @@
 /**
+ * ChainVanta — V1070
+ * ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
+ * Builds directly from confirmed-working V1069.
+ * - Preserves the completed V1069 20-sample fresh/current-live Bitquery benchmark unchanged.
+ * - Adds a separate 20-sample SHADOW-ONLY benchmark for established tokens whose verified
+ *   market/pair age is at least 24 hours.
+ * - Uses the existing scanner candidate objects and existing Opportunity/Momentum/market/activity
+ *   evidence; no wider watchlist, discovery, scoring, risk or Telegram behaviour is changed.
+ * - Only samples established candidates whose directional USD remains UNVERIFIED and which have
+ *   a useful quality/activity signal, so trial allowance is not spent on arbitrary dormant tokens.
+ * - Uses the already-validated V1064 boundary-safe Bitquery reconstruction.
+ * - Records a direct comparison against the frozen V1069 fresh-launch recovery result.
+ * - Hard-capped to 20 automatic established-token samples; at most one attempt per scheduled scan.
+ * - Adds GET /bitquery-established-shadow-status.
+ * - Remains SHADOW ONLY: no live evidence promotion, scoring mutation, Telegram qualification,
+ *   provider routing, Stripe, D1 or Durable Object behaviour changes.
+ */
+
+/**
  * ChainVanta — V1069
  * BITQUERY SHADOW PHASE 2 — PRIORITISED REAL-WORLD VALIDATION
  * Builds directly from confirmed-working V1068.
@@ -8900,7 +8919,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1069"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1070"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -121407,6 +121426,17 @@ for (
       scheduled
     );
 
+  /* V1070: separate established-token Bitquery benchmark. This deliberately does
+   * not widen the production watchlist or alter candidate scoring. It only observes
+   * already-analysed candidates whose verified market age is >=24h. */
+  const bitqueryEstablishedShadowV1070 =
+    await runBitqueryEstablishedShadowV1070(
+      env,
+      state,
+      candidates,
+      scheduled
+    );
+
   const save =
     await writeState(
       env,
@@ -184964,6 +184994,325 @@ async function bitqueryShadowStatusV1069(env) {
   };
 }
 
+
+/* ============================================================
+   V1070 — ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
+   ============================================================ */
+const BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070 = 20;
+const BITQUERY_ESTABLISHED_MIN_AGE_MS_V1070 = 24 * 60 * 60 * 1000;
+
+function establishedAgeEvidenceV1070(candidate) {
+  const market = candidate?.market || {};
+  const nowMs = Date.now();
+  const pairCreatedAt = Number(market?.pairCreatedAt);
+  if (market?.verified === true && Number.isFinite(pairCreatedAt) && pairCreatedAt > 0 && pairCreatedAt <= nowMs) {
+    const ageMs = Math.max(0, nowMs - pairCreatedAt);
+    return { verified:true, ageMs, ageHours:ageMs / 3600000, source:"VERIFIED_MARKET_PAIR_CREATED_AT" };
+  }
+
+  const pairAgeMs = Number(market?.pairAgeMs ?? market?.ageMs);
+  if (market?.verified === true && Number.isFinite(pairAgeMs) && pairAgeMs >= 0) {
+    return { verified:true, ageMs:pairAgeMs, ageHours:pairAgeMs / 3600000, source:"VERIFIED_MARKET_PAIR_AGE" };
+  }
+
+  const stage = candidate?.launchStage;
+  const ageMinutes = Number(stage?.ageMinutes);
+  if (stage?.verified === true && Number.isFinite(ageMinutes) && ageMinutes >= 0) {
+    const ageMs = ageMinutes * 60000;
+    return { verified:true, ageMs, ageHours:ageMs / 3600000, source:"VERIFIED_LAUNCH_STAGE_AGE" };
+  }
+
+  return { verified:false, ageMs:null, ageHours:null, source:"AGE_UNVERIFIED" };
+}
+
+function establishedCandidateEligibleV1070(candidate) {
+  if (!candidate || candidate?.validERC20 !== true || candidate?.analysisDeferred === true) return false;
+  const address = normalize(candidate?.address);
+  if (!address || !isAddress(address)) return false;
+  if (verifiedDirectionalUsdWindowsV1069(candidate).length > 0) return false;
+
+  const age = establishedAgeEvidenceV1070(candidate);
+  if (age.verified !== true || safeNumber(age.ageMs) < BITQUERY_ESTABLISHED_MIN_AGE_MS_V1070) return false;
+
+  const opportunity = safeNumber(candidate?.opportunity?.score);
+  const momentum = safeNumber(candidate?.momentum?.score);
+  const observedSwaps = Math.max(
+    safeNumber(candidate?.liveMomentumActivityV152?.swaps),
+    safeNumber(candidate?.activity?.swaps)
+  );
+  const liquidity = safeNumber(candidate?.market?.liquidityUsd);
+
+  // Keep the benchmark relevant to the user's eventual "older coins that look good" lane.
+  // This is selection only; it does not change any score or qualification threshold.
+  return opportunity >= 35 || momentum >= 5 || observedSwaps > 0 || liquidity >= 5000;
+}
+
+function establishedCandidatePriorityV1070(state, candidate) {
+  const age = establishedAgeEvidenceV1070(candidate);
+  const address = normalize(candidate?.address);
+  const exactPool = Boolean(exactPoolIdentityFromPriorCompletionV465(state, address));
+  const liveMomentumSwaps = safeNumber(candidate?.liveMomentumActivityV152?.swaps);
+  const activitySwaps = safeNumber(candidate?.activity?.swaps);
+  const observedSwaps = Math.max(liveMomentumSwaps, activitySwaps);
+  const marketVolume = Math.max(
+    safeNumber(candidate?.market?.volume?.m5),
+    safeNumber(candidate?.market?.volume?.h1),
+    safeNumber(candidate?.market?.volume?.h6),
+    safeNumber(candidate?.market?.volume?.h24)
+  );
+  const liquidity = safeNumber(candidate?.market?.liquidityUsd);
+  const opportunity = safeNumber(candidate?.opportunity?.score);
+  const momentum = safeNumber(candidate?.momentum?.score);
+
+  let priority = 0;
+  if (candidate?.market?.verified === true) priority += 8;
+  if (exactPool) priority += 5;
+  if (liveMomentumSwaps > 0) priority += 6;
+  else if (activitySwaps > 0) priority += 4;
+  if (marketVolume > 0) priority += 3;
+  if (liquidity >= 5000) priority += 3;
+  else if (liquidity > 0) priority += 1;
+  if (momentum > 0) priority += Math.min(4, Math.max(1, Math.floor(momentum / 10)));
+  priority += Math.min(5, Math.floor(opportunity / 20));
+
+  return {
+    priority,
+    age,
+    marketVerified:candidate?.market?.verified === true,
+    exactPoolIdentityAvailable:exactPool,
+    observedSwaps,
+    liveMomentumSwaps,
+    activitySwaps,
+    marketVolume,
+    liquidity,
+    opportunity,
+    momentum,
+    stage:String(candidate?.launchStage?.stage || "UNVERIFIED")
+  };
+}
+
+function compactBitqueryEstablishedSampleV1070(candidate, result, priority) {
+  const r = result?.reconstruction || {};
+  const flow = r?.directionalFlow || {};
+  const completion = result?.completion || {};
+  const confidence = r?.confidence || {};
+  const age = priority?.age || establishedAgeEvidenceV1070(candidate);
+  const wouldRecover =
+    result?.success === true &&
+    completion?.boundaryComplete === true &&
+    completion?.capHit !== true &&
+    (completion?.missingHashes || []).length === 0 &&
+    String(confidence?.level || "").toUpperCase() === "HIGH_DIAGNOSTIC" &&
+    safeNumber(r?.classifications?.unknownTransactions) === 0 &&
+    Number.isFinite(Number(flow?.directionalUsdTotal)) &&
+    Number(flow.directionalUsdTotal) > 0;
+
+  return {
+    recordedAt:Date.now(),
+    address:normalize(candidate?.address),
+    symbol:candidate?.symbol || candidate?.validation?.symbol || null,
+    opportunityAtObservation:safeNumber(candidate?.opportunity?.score),
+    momentumAtObservation:safeNumber(candidate?.momentum?.score),
+    launchStage:candidate?.launchStage?.stage || null,
+    age:{
+      verified:age?.verified === true,
+      ageHours:Number.isFinite(Number(age?.ageHours)) ? Number(Number(age.ageHours).toFixed(2)) : null,
+      source:age?.source || null,
+      minimumEstablishedAgeHours:24
+    },
+    existingVerifiedDirectionalUsdWindows:verifiedDirectionalUsdWindowsV1069(candidate),
+    existingFlowWasUnverified:true,
+    establishedSelection:{
+      priorityScore:safeNumber(priority?.priority),
+      marketVerified:priority?.marketVerified === true,
+      exactPoolIdentityAvailable:priority?.exactPoolIdentityAvailable === true,
+      observedSwaps:safeNumber(priority?.observedSwaps),
+      liveMomentumSwaps:safeNumber(priority?.liveMomentumSwaps),
+      activitySwaps:safeNumber(priority?.activitySwaps),
+      marketVolumeObserved:safeNumber(priority?.marketVolume),
+      liquidityObserved:safeNumber(priority?.liquidity)
+    },
+    bitquery:{
+      success:result?.success === true,
+      status:result?.status || null,
+      boundaryComplete:completion?.boundaryComplete === true,
+      seedRowCount:safeNumber(result?.seed?.rowCount),
+      completedRowCount:safeNumber(completion?.completedRowCount),
+      uniqueTransactionCount:safeNumber(r?.uniqueTransactionCount),
+      buyTransactions:safeNumber(r?.classifications?.userOrRoutedBuyTransactions),
+      sellTransactions:safeNumber(r?.classifications?.userOrRoutedSellTransactions),
+      routedBuyTransactions:safeNumber(r?.classifications?.routedBuyTransactions),
+      routedSellTransactions:safeNumber(r?.classifications?.routedSellTransactions),
+      arbitrageTransactions:safeNumber(r?.classifications?.arbitrageTransactions),
+      unknownTransactions:safeNumber(r?.classifications?.unknownTransactions),
+      buyUsd:Number.isFinite(Number(flow?.buyUsd)) ? Number(flow.buyUsd) : null,
+      sellUsd:Number.isFinite(Number(flow?.sellUsd)) ? Number(flow.sellUsd) : null,
+      netBuyMinusSellUsd:Number.isFinite(Number(flow?.netBuyMinusSellUsd)) ? Number(flow.netBuyMinusSellUsd) : null,
+      directionalUsdTotal:Number.isFinite(Number(flow?.directionalUsdTotal)) ? Number(flow.directionalUsdTotal) : null,
+      confidence:confidence?.level || null,
+      boundarySafetyPassed:completion?.boundaryComplete === true && completion?.capHit !== true && (completion?.missingHashes || []).length === 0,
+      externalRequestsUsed:safeNumber(result?.externalRequestsUsed)
+    },
+    wouldRecoverDirectionalUsdEvidence:wouldRecover,
+    promotedToLiveEvidence:false,
+    scoringChanged:false,
+    telegramChanged:false,
+    providerRoutingChanged:false
+  };
+}
+
+function ensureBitqueryEstablishedStoreV1070(state) {
+  if (!state.bitqueryEstablishedShadowV1070 || typeof state.bitqueryEstablishedShadowV1070 !== "object") {
+    state.bitqueryEstablishedShadowV1070 = {
+      version:"V1070",
+      mode:"ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
+      minAgeHours:24,
+      maxAutomaticSamples:BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070,
+      attemptedSamples:0,
+      successfulRecoveries:0,
+      samples:[],
+      completed:false
+    };
+  }
+  return state.bitqueryEstablishedShadowV1070;
+}
+
+async function runBitqueryEstablishedShadowV1070(env, state, candidates, scheduled) {
+  const store = ensureBitqueryEstablishedStoreV1070(state);
+  store.version = "V1070";
+  store.mode = "ESTABLISHED_TOKEN_SHADOW_BENCHMARK";
+  store.minAgeHours = 24;
+  store.maxAutomaticSamples = BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070;
+  store.liveScoringEnabled = false;
+  store.telegramQualificationEnabled = false;
+  store.providerPromotionEnabled = false;
+
+  if (scheduled !== true) {
+    store.lastSkipReason = "NOT_SCHEDULED_SCAN_V1070";
+    return {attempted:false, reason:store.lastSkipReason};
+  }
+  if (safeNumber(store.attemptedSamples) >= BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070) {
+    store.lastSkipReason = "ESTABLISHED_SHADOW_SAMPLE_CAP_REACHED_V1070";
+    store.completed = true;
+    return {attempted:false, reason:store.lastSkipReason};
+  }
+  if (!String(env?.BITQUERY_CLIENT_ID || "").trim() || !String(env?.BITQUERY_CLIENT_SECRET || "").trim()) {
+    store.lastSkipReason = "BITQUERY_OAUTH_NOT_CONFIGURED_V1070";
+    return {attempted:false, reason:store.lastSkipReason};
+  }
+
+  const alreadySampled = new Set(
+    (Array.isArray(store.samples) ? store.samples : []).map(x => normalize(x?.address)).filter(Boolean)
+  );
+  // Avoid spending the trial twice on a token already used in the V1069 fresh/current-live benchmark.
+  for (const row of Array.isArray(state?.bitqueryShadowFallbackV1069?.samples) ? state.bitqueryShadowFallbackV1069.samples : []) {
+    const a = normalize(row?.address);
+    if (a) alreadySampled.add(a);
+  }
+
+  const ranked = (Array.isArray(candidates) ? candidates : [])
+    .filter(establishedCandidateEligibleV1070)
+    .filter(candidate => !alreadySampled.has(normalize(candidate?.address)))
+    .map(candidate => ({candidate, priority:establishedCandidatePriorityV1070(state, candidate)}))
+    .sort((a,b) =>
+      safeNumber(b.priority?.priority) - safeNumber(a.priority?.priority) ||
+      safeNumber(b.candidate?.opportunity?.score) - safeNumber(a.candidate?.opportunity?.score) ||
+      safeNumber(b.candidate?.momentum?.score) - safeNumber(a.candidate?.momentum?.score)
+    );
+
+  const picked = ranked[0] || null;
+  if (!picked) {
+    store.lastSkipReason = "NO_ESTABLISHED_UNVERIFIED_DIRECTIONAL_USD_CANDIDATE_V1070";
+    return {attempted:false, reason:store.lastSkipReason};
+  }
+
+  const candidate = picked.candidate;
+  const token = normalize(candidate.address);
+  const diagnosticUrl = new URL(`https://chainvanta.invalid/bitquery-swaps-complete?token=${encodeURIComponent(token)}&limit=25`);
+  let result;
+  try {
+    result = await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, diagnosticUrl);
+  } catch (error) {
+    result = {
+      success:false,
+      status:"BITQUERY_ESTABLISHED_SHADOW_EXCEPTION_V1070",
+      externalRequestsUsed:0,
+      error:String(error?.message || error || "UNKNOWN_ERROR").slice(0,240)
+    };
+  }
+
+  const sample = compactBitqueryEstablishedSampleV1070(candidate, result, picked.priority);
+  if (result?.error) sample.bitquery.error = result.error;
+  store.attemptedSamples = safeNumber(store.attemptedSamples) + 1;
+  if (sample.wouldRecoverDirectionalUsdEvidence === true) store.successfulRecoveries = safeNumber(store.successfulRecoveries) + 1;
+  store.lastAttemptAt = Date.now();
+  store.lastAddress = token;
+  store.lastSymbol = sample.symbol;
+  store.lastStatus = sample.bitquery.status;
+  store.lastSkipReason = null;
+  store.completed = safeNumber(store.attemptedSamples) >= BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070;
+  store.samples = [sample, ...(Array.isArray(store.samples) ? store.samples : [])].slice(0, BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070);
+
+  return {attempted:true, sample};
+}
+
+async function bitqueryEstablishedShadowStatusV1070(env) {
+  const loaded = await readState(env);
+  const state = loaded?.state || {};
+  const store = state?.bitqueryEstablishedShadowV1070 || null;
+  const attempted = safeNumber(store?.attemptedSamples);
+  const recovered = safeNumber(store?.successfulRecoveries);
+  const freshStore = state?.bitqueryShadowFallbackV1069 || null;
+  const freshAttempted = safeNumber(freshStore?.attemptedSamples);
+  const freshRecovered = safeNumber(freshStore?.successfulRecoveries);
+  const establishedRate = attempted > 0 ? Number((recovered * 100 / attempted).toFixed(1)) : 0;
+  const freshRate = freshAttempted > 0 ? Number((freshRecovered * 100 / freshAttempted).toFixed(1)) : null;
+
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"BITQUERY_ESTABLISHED_TOKEN_SHADOW_STATUS_V1070",
+    success:true,
+    readOnly:true,
+    mode:"ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
+    statePersistent:loaded?.persistent === true,
+    minimumVerifiedAgeHours:24,
+    totalSamplesTarget:BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070,
+    attemptedSamples:attempted,
+    successfulRecoveries:recovered,
+    recoveryRatePct:establishedRate,
+    remainingAutomaticSamples:Math.max(0, BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070 - attempted),
+    completed:store?.completed === true || attempted >= BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070,
+    comparisonToV1069:{
+      freshCurrentLiveAttempted:freshAttempted,
+      freshCurrentLiveRecoveries:freshRecovered,
+      freshCurrentLiveRecoveryRatePct:freshRate,
+      establishedRecoveryRatePct:establishedRate,
+      recoveryRateDeltaPctPoints:freshRate === null ? null : Number((establishedRate - freshRate).toFixed(1))
+    },
+    lastAttemptAt:store?.lastAttemptAt || null,
+    lastAddress:store?.lastAddress || null,
+    lastSymbol:store?.lastSymbol || null,
+    lastStatus:store?.lastStatus || null,
+    lastSkipReason:store?.lastSkipReason || null,
+    samples:Array.isArray(store?.samples) ? store.samples : [],
+    selectionPolicy:{
+      requiresVerifiedMarketOrLaunchAgeAtLeast24h:true,
+      requiresDirectionalUsdUnverified:true,
+      requiresUsefulQualityOrActivitySignal:true,
+      qualityOrActivityRule:"Opportunity >=35 OR Momentum >=5 OR observed swaps >0 OR liquidity >=$5k",
+      avoidsV1069DuplicateTokens:true,
+      atMostOneBitqueryAttemptPerScheduledScan:true
+    },
+    liveScoringEnabled:false,
+    telegramQualificationEnabled:false,
+    providerPromotionEnabled:false,
+    scannerEvidenceMutated:false,
+    note:"V1070 benchmarks Bitquery on already-analysed established tokens only. It does not widen the production watchlist and does not create live calls. The result is intended to decide whether an older-token product lane and Bitquery Pro are justified.",
+    timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -185234,6 +185583,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryShadowStatusV1069(env)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-established-shadow-status"
+  ) {
+    return jsonResponse(
+      await bitqueryEstablishedShadowStatusV1070(env)
     );
   }
 
