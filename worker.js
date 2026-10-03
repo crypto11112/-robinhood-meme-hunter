@@ -1,4 +1,18 @@
 /**
+ * ChainVanta — V1083
+ * HISTORY EVIDENCE INTEGRITY
+ * Builds directly from deployed V1082.
+ * - Separates changing market observations from repeated/static provider/cache snapshots.
+ * - Persists already-verified V212 bot-observed on-chain directional USD flow for
+ *   5m and 1h windows alongside each V1076 D1 history snapshot.
+ * - Adds /history-integrity?token=0x... so market freshness and on-chain-flow
+ *   coverage can be inspected before breakout intelligence is built.
+ * - Existing V1078 accumulation remains shadow-only and unchanged in V1083.
+ * - Zero new provider/RPC requests, no request-ceiling increase, no scoring
+ *   changes and no Telegram qualification/call changes.
+ */
+
+/**
  * ChainVanta — V1082
  * DURABLE COHORT QUALITY PRUNING
  * Builds directly from deployed V1081.
@@ -9092,7 +9106,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1082"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1083"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -186373,6 +186387,90 @@ async function accumulationStatusV1078(env) {
 
 
 /* ============================================================
+   V1083 — HISTORY EVIDENCE INTEGRITY DIAGNOSTIC
+   ============================================================ */
+async function historyIntegrityV1083(env, url) {
+  const token = normalize(url.searchParams.get("token"));
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"HISTORY_EVIDENCE_INTEGRITY_V1083",
+    success:false,
+    readOnly:true,
+    externalRequestsUsed:0,
+    token
+  };
+
+  if (!isAddress(token)) {
+    return {...base,status:"INVALID_TOKEN_ADDRESS_V1083",timestamp:now()};
+  }
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) {
+    return {...base,status:ready.status,error:ready.error||null,timestamp:now()};
+  }
+
+  try {
+    const result = await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        captured_at,bucket_at,address,symbol,
+        market_verified,market_source,price_usd,market_cap_usd,
+        liquidity_usd,volume_24h_usd,
+        market_evidence_mode,market_snapshot_changed,
+        flow_verified,flow_source,
+        flow_5m_trades,flow_5m_buy_usd,flow_5m_sell_usd,
+        flow_5m_net_usd,flow_5m_buy_pressure_pct,
+        flow_1h_trades,flow_1h_buy_usd,flow_1h_sell_usd,
+        flow_1h_net_usd,flow_1h_buy_pressure_pct
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+      WHERE address = ?
+      ORDER BY captured_at DESC
+      LIMIT 100
+    `).bind(token).all();
+
+    const rows = Array.isArray(result?.results) ? result.results : [];
+    const verified = rows.filter(r => Number(r?.market_verified) === 1);
+    const changed = rows.filter(r => Number(r?.market_snapshot_changed) === 1);
+    const unchanged = rows.filter(r => Number(r?.market_snapshot_changed) === 0);
+    const flowRows = rows.filter(r => Number(r?.flow_verified) === 1);
+
+    return {
+      ...base,
+      success:true,
+      status:"HISTORY_EVIDENCE_INTEGRITY_OK_V1083",
+      rowCount:rows.length,
+      summary:{
+        marketVerifiedRows:verified.length,
+        changedMarketRows:changed.length,
+        unchangedMarketRows:unchanged.length,
+        comparableMarketRows:changed.length + unchanged.length,
+        verifiedOnChainFlowRows:flowRows.length,
+        latestMarketEvidenceMode:rows[0]?.market_evidence_mode || null,
+        latestFlowVerified:Number(rows[0]?.flow_verified) === 1,
+        staticMarketEvidenceDominant:
+          (changed.length + unchanged.length) >= 3 &&
+          unchanged.length > changed.length * 2
+      },
+      recent:rows.slice(0,20),
+      interpretation:
+        flowRows.length > 0
+          ? "Verified bot-observed on-chain USD flow is persisted separately from provider market snapshots."
+          : "No verified V212 on-chain USD flow has yet been stored for this token; provider snapshot freshness is still tracked independently.",
+      note:"Measurement only. V1083 does not change accumulation scoring or Telegram qualification.",
+      timestamp:now()
+    };
+  } catch (error) {
+    return {
+      ...base,
+      status:"HISTORY_EVIDENCE_INTEGRITY_FAILED_V1083",
+      error:errorString(error).slice(0,700),
+      timestamp:now()
+    };
+  }
+}
+
+
+/* ============================================================
    V1077 — PERSISTENT INTELLIGENCE WATCHLIST
    ============================================================
    Goal:
@@ -186735,6 +186833,34 @@ async function ensureMarketHistoryV1076(env) {
       ON ${MARKET_HISTORY_TABLE_V1076}(captured_at DESC)
     `).run();
 
+    const v1083Columns = [
+      "market_evidence_mode TEXT",
+      "market_snapshot_changed INTEGER",
+      "flow_verified INTEGER NOT NULL DEFAULT 0",
+      "flow_source TEXT",
+      "flow_5m_trades INTEGER",
+      "flow_5m_buy_usd REAL",
+      "flow_5m_sell_usd REAL",
+      "flow_5m_net_usd REAL",
+      "flow_5m_buy_pressure_pct REAL",
+      "flow_1h_trades INTEGER",
+      "flow_1h_buy_usd REAL",
+      "flow_1h_sell_usd REAL",
+      "flow_1h_net_usd REAL",
+      "flow_1h_buy_pressure_pct REAL"
+    ];
+
+    for (const definition of v1083Columns) {
+      try {
+        await env.CHAINVANTA_DB.prepare(
+          `ALTER TABLE ${MARKET_HISTORY_TABLE_V1076} ADD COLUMN ${definition}`
+        ).run();
+      } catch (error) {
+        const msg = String(errorString(error) || "").toLowerCase();
+        if (!msg.includes("duplicate column")) throw error;
+      }
+    }
+
     return {ok:true,status:'READY_V1076'};
   } catch (error) {
     return {ok:false,status:'D1_SCHEMA_ERROR_V1076',error:errorString(error).slice(0,700)};
@@ -186747,6 +186873,9 @@ function marketHistorySnapshotV1076(candidate, capturedAt = Date.now()) {
   const whale = holders?.whale || {};
   const launch = candidate?.launchStage || candidate?.verifiedLaunchAgeV223 || {};
   const marketVerified = market?.verified === true;
+  const verifiedFlowV1083 = candidate?.onChainVerifiedFlowV212 || {};
+  const flow5mV1083 = verifiedFlowV1083?.windows?.m5 || {};
+  const flow1hV1083 = verifiedFlowV1083?.windows?.h1 || {};
 
   let ageHours = null;
   const ageMsCandidates = [
@@ -186807,8 +186936,63 @@ function marketHistorySnapshotV1076(candidate, capturedAt = Date.now()) {
       ? finiteOrNullV1076(whale?.top10Percent)
       : null,
     launchStage: candidate?.launchStage?.stage || candidate?.launchStage?.label || candidate?.verifiedLaunchAgeV223?.stage || null,
-    ageHours: Number.isFinite(ageHours) ? ageHours : null
+    ageHours: Number.isFinite(ageHours) ? ageHours : null,
+    marketEvidenceMode: marketVerified ? "PENDING_PRIOR_COMPARISON_V1083" : "MARKET_UNVERIFIED_V1083",
+    marketSnapshotChanged: null,
+    flowVerified: verifiedFlowV1083?.verified === true,
+    flowSource: verifiedFlowV1083?.verified === true
+      ? (verifiedFlowV1083?.source || "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212")
+      : null,
+    flow5mTrades: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.observedTrades) : null,
+    flow5mBuyUsd: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.buyVolumeUsd) : null,
+    flow5mSellUsd: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.sellVolumeUsd) : null,
+    flow5mNetUsd: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.netFlowUsd) : null,
+    flow5mBuyPressurePct: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.buyPressureUsd) : null,
+    flow1hTrades: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.observedTrades) : null,
+    flow1hBuyUsd: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.buyVolumeUsd) : null,
+    flow1hSellUsd: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.sellVolumeUsd) : null,
+    flow1hNetUsd: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.netFlowUsd) : null,
+    flow1hBuyPressurePct: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.buyPressureUsd) : null
   };
+}
+
+function marketValueEqualV1083(a, b) {
+  const x = finiteOrNullV1076(a);
+  const y = finiteOrNullV1076(b);
+  if (x === null && y === null) return true;
+  if (x === null || y === null) return false;
+  const scale = Math.max(1, Math.abs(x), Math.abs(y));
+  return Math.abs(x - y) <= scale * 1e-12;
+}
+
+function classifyMarketEvidenceV1083(snap, prior) {
+  if (snap?.marketVerified !== true) {
+    return {mode:"MARKET_UNVERIFIED_V1083", changed:null};
+  }
+
+  const source = String(snap?.marketSource || "").toUpperCase();
+
+  if (!prior || Number(prior?.market_verified) !== 1) {
+    return {
+      mode:source.includes("CACHE")
+        ? "FIRST_VERIFIED_CACHE_V1083"
+        : "FIRST_VERIFIED_OBSERVATION_V1083",
+      changed:null
+    };
+  }
+
+  const changed = !(
+    marketValueEqualV1083(snap?.priceUsd, prior?.price_usd) &&
+    marketValueEqualV1083(snap?.marketCapUsd, prior?.market_cap_usd) &&
+    marketValueEqualV1083(snap?.liquidityUsd, prior?.liquidity_usd) &&
+    marketValueEqualV1083(snap?.volume24hUsd, prior?.volume_24h_usd)
+  );
+
+  if (changed) return {mode:"CHANGED_MARKET_OBSERVATION_V1083", changed:true};
+  if (source.includes("CACHE")) return {mode:"UNCHANGED_CACHE_SNAPSHOT_V1083", changed:false};
+  if (source.includes("COOLDOWN")) return {mode:"UNCHANGED_FALLBACK_COOLDOWN_SNAPSHOT_V1083", changed:false};
+  if (source.includes("FRESH_GUARD")) return {mode:"UNCHANGED_PROVIDER_SNAPSHOT_V1083", changed:false};
+  return {mode:"UNCHANGED_MARKET_SNAPSHOT_V1083", changed:false};
 }
 
 async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now()) {
@@ -186821,6 +187005,9 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
     skippedInvalidAddress:0,
     verifiedMarketRows:0,
     unverifiedMarketRows:0,
+    changedMarketRowsV1083:0,
+    unchangedMarketRowsV1083:0,
+    verifiedFlowRowsV1083:0,
     bucketAt:marketHistoryBucketV1076(capturedAt),
     externalRequestsUsed:0,
     scannerEvidenceMutated:false,
@@ -186851,6 +187038,29 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
   base.attempted = rows.length;
   if (!rows.length) return {...base,status:'NO_CANDIDATE_ROWS_V1076'};
 
+  for (const snap of rows) {
+    try {
+      const prior = await env.CHAINVANTA_DB.prepare(`
+        SELECT market_verified,market_source,price_usd,market_cap_usd,
+               liquidity_usd,volume_24h_usd
+        FROM ${MARKET_HISTORY_TABLE_V1076}
+        WHERE address = ? AND captured_at < ?
+        ORDER BY captured_at DESC
+        LIMIT 1
+      `).bind(snap.address, snap.capturedAt).first();
+
+      const integrity = classifyMarketEvidenceV1083(snap, prior || null);
+      snap.marketEvidenceMode = integrity.mode;
+      snap.marketSnapshotChanged = integrity.changed;
+    } catch (_) {
+      snap.marketEvidenceMode =
+        snap.marketVerified === true
+          ? "PRIOR_COMPARISON_UNAVAILABLE_V1083"
+          : "MARKET_UNVERIFIED_V1083";
+      snap.marketSnapshotChanged = null;
+    }
+  }
+
   const sql = `
     INSERT OR REPLACE INTO ${MARKET_HISTORY_TABLE_V1076} (
       captured_at,bucket_at,address,symbol,market_verified,market_source,
@@ -186858,8 +187068,12 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       buys_5m,sells_5m,buys_1h,sells_1h,buys_24h,sells_24h,
       opportunity_score,momentum_score,confidence_score,
       risk_verified,risk_score,holder_count,top_holder_pct,top10_pct,
-      launch_stage,age_hours,created_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      launch_stage,age_hours,created_at,
+      market_evidence_mode,market_snapshot_changed,
+      flow_verified,flow_source,
+      flow_5m_trades,flow_5m_buy_usd,flow_5m_sell_usd,flow_5m_net_usd,flow_5m_buy_pressure_pct,
+      flow_1h_trades,flow_1h_buy_usd,flow_1h_sell_usd,flow_1h_net_usd,flow_1h_buy_pressure_pct
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `;
 
   try {
@@ -186869,7 +187083,12 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       r.buys5m,r.sells5m,r.buys1h,r.sells1h,r.buys24h,r.sells24h,
       r.opportunityScore,r.momentumScore,r.confidenceScore,
       r.riskVerified?1:0,r.riskScore,r.holderCount,r.topHolderPct,r.top10Pct,
-      r.launchStage,r.ageHours,capturedAt
+      r.launchStage,r.ageHours,capturedAt,
+      r.marketEvidenceMode,
+      r.marketSnapshotChanged === true ? 1 : r.marketSnapshotChanged === false ? 0 : null,
+      r.flowVerified?1:0,r.flowSource,
+      r.flow5mTrades,r.flow5mBuyUsd,r.flow5mSellUsd,r.flow5mNetUsd,r.flow5mBuyPressurePct,
+      r.flow1hTrades,r.flow1hBuyUsd,r.flow1hSellUsd,r.flow1hNetUsd,r.flow1hBuyPressurePct
     ));
 
     // Keep batches small even if future candidate counts grow.
@@ -186881,6 +187100,9 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
     base.written = rows.length;
     base.verifiedMarketRows = rows.filter(r=>r.marketVerified).length;
     base.unverifiedMarketRows = rows.length - base.verifiedMarketRows;
+    base.changedMarketRowsV1083 = rows.filter(r=>r.marketSnapshotChanged===true).length;
+    base.unchangedMarketRowsV1083 = rows.filter(r=>r.marketSnapshotChanged===false).length;
+    base.verifiedFlowRowsV1083 = rows.filter(r=>r.flowVerified===true).length;
     base.status = 'MARKET_HISTORY_WRITTEN_V1076';
     return base;
   } catch (error) {
@@ -188359,6 +188581,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await marketHistoryTokenV1076(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/history-integrity"
+  ) {
+    return jsonResponse(
+      await historyIntegrityV1083(env, url)
     );
   }
 
