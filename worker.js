@@ -1,4 +1,17 @@
 /**
+ * ChainVanta — V1089
+ * COHORT HANDOFF DIAGNOSTIC PERSISTENCE FIX
+ * Builds directly from deployed V1088.
+ * - Live evidence proved a cohort admission occurred under V1088, while the
+ *   root-level handoff diagnostic remained null on the read-only endpoint.
+ * - Persists that V1088 eligibility decision inside the already-durable
+ *   intelligenceCohortV1079 object as well as the root compatibility field.
+ * - /cohort-flow-status reads the durable cohort copy first.
+ * - Zero new provider/RPC requests; no scoring, qualification, Telegram,
+ *   request-ceiling or exact-pool eligibility changes.
+ */
+
+/**
  * ChainVanta — V1088
  * COHORT FLOW HANDOFF ELIGIBILITY DIAGNOSTIC
  * Builds directly from deployed V1087.
@@ -9185,7 +9198,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1088"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1089"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -119182,6 +119195,17 @@ for (
   state.lastCohortExactPoolHandoffV1088 =
     directionalCohortExactPoolEligibilityV1088;
 
+  // V1089: also store inside the durable cohort object whose persistence is
+  // already proven by lastSelectedAt / lastAnalysedAt.
+  const intelligenceCohortV1089 =
+    ensureIntelligenceCohortV1079(state);
+
+  intelligenceCohortV1089.lastCohortExactPoolHandoffV1088 =
+    directionalCohortExactPoolEligibilityV1088;
+
+  intelligenceCohortV1089.lastHandoffDiagnosticPersistedAtV1089 =
+    Date.now();
+
   const directionalCohortExactPoolCandidatesV1087 =
     (() => {
       const decision =
@@ -186965,7 +186989,7 @@ async function cohortFlowStatusV1085(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1088",
+    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1089",
     success:false,
     readOnly:true,
     externalRequestsUsed:0,
@@ -187077,13 +187101,17 @@ async function cohortFlowStatusV1085(env) {
     return {
       ...base,
       success:true,
-      status:"COHORT_FLOW_COVERAGE_OK_V1088",
+      status:"COHORT_FLOW_COVERAGE_OK_V1089",
       lastCohortExactPoolHandoffV1088:
-        state?.lastCohortExactPoolHandoffV1088 || null,
+        cohort?.lastCohortExactPoolHandoffV1088 ||
+        state?.lastCohortExactPoolHandoffV1088 ||
+        null,
+      handoffDiagnosticPersistedAtV1089:
+        cohort?.lastHandoffDiagnosticPersistedAtV1089 || null,
       verifiedFlowTokens:tokens.filter(t => t.flowVerified).length,
       missingVerifiedFlowTokens:tokens.filter(t => !t.flowVerified).length,
       tokens,
-      note:"Read-only D1 + existing directional-watch state + persisted V1088 handoff eligibility diagnostic. No provider or RPC calls are made by this endpoint.",
+      note:"Read-only D1 + directional-watch state + V1089 durable cohort handoff diagnostic. No provider or RPC calls are made by this endpoint.",
       timestamp:now()
     };
   } catch (error) {
