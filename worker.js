@@ -1,4 +1,17 @@
 /**
+ * ChainVanta — V1074
+ * SHADOW RETURN-NAME HOTFIX
+ * Builds directly from deployed V1073.
+ * - Fixes one stale scan-response identifier left behind when the V1068 shadow
+ *   fallback became the V1069 phase-2 shadow fallback.
+ * - Replaces the undefined response field `bitqueryShadowFallbackV1068` with
+ *   the already-computed `bitqueryShadowFallbackV1069`.
+ * - No provider request, candidate selection, scoring, risk, Telegram, Stripe,
+ *   D1, Durable Object, budget, or qualification behaviour changes.
+ * - Preserves V1073 activity-prioritised established-token benchmark unchanged.
+ */
+
+/**
  * ChainVanta — V1073
  * ACTIVITY-PRIORITISED ESTABLISHED RPC ↔ BITQUERY SHADOW BENCHMARK
  * Builds directly from confirmed-working V1072.
@@ -8940,7 +8953,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1073"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1074"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -121602,7 +121615,7 @@ for (
 
     productionV4EnrichmentV772,
 
-    bitqueryShadowFallbackV1068,
+    bitqueryShadowFallbackV1069,
 
     discoveryRpc: {
       publicCooldownActive:
