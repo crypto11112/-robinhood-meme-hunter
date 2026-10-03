@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1086
+ * COHORT ADMISSION + LIVE QUALITY FIX
+ * Builds directly from deployed V1085.
+ * - Cohort selection is now provisional until the chosen token is actually
+ *   admitted into analysisSelected. Fresh-launch pressure or MAX_TOKEN_CHECKS
+ *   can no longer create a false lastSelectedAt/cooldown.
+ * - An already-retained token is immediately evicted when a fresh analysis
+ *   verifies severe Risk >= 90 or extreme holder concentration.
+ * - Preserves breadth-first cohort ordering: fewest observations, then least
+ *   recently selected, then highest history score.
+ * - Zero new provider/RPC requests; no scoring, qualification, Telegram or
+ *   request-ceiling changes.
+ */
+
+/**
  * ChainVanta — V1085
  * COHORT FLOW COVERAGE DIAGNOSTIC
  * Builds directly from deployed V1084.
@@ -9135,7 +9150,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1085"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1086"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -109982,6 +109997,26 @@ for (
         )
       : selected;
 
+  const intelligenceActuallyAdmittedV1086 =
+    Boolean(
+      intelligenceSlotEligibleV1077 &&
+      intelligenceFollowUpAddressV1077 &&
+      analysisSelectedRawV142.some(
+        token =>
+          normalize(token?.address) === intelligenceFollowUpAddressV1077
+      )
+    );
+
+  const intelligenceAdmissionCommitV1086 =
+    commitIntelligenceFollowUpAdmissionV1086(
+      state,
+      intelligenceFollowUpSelectionV1077,
+      intelligenceActuallyAdmittedV1086
+    );
+
+  intelligenceFollowUpSelectionV1077.admissionV1086 =
+    intelligenceAdmissionCommitV1086;
+
   const preAnalysisTerminalRowsV142 =
     analysisSelectedRawV142
       .map(
@@ -185293,6 +185328,106 @@ async function applyIntelligenceCohortQualityPruningV1082(env, state) {
 }
 
 /* ============================================================
+   V1086 — LIVE COHORT QUALITY EVICTION
+   ============================================================ */
+function liveCandidateCohortRejectV1086(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return {reject:false,reason:null};
+  }
+
+  const riskVerified = candidate?.risk?.verified === true;
+  const riskScore = riskVerified
+    ? finiteOrNullV1076(candidate?.risk?.score)
+    : null;
+
+  const top1 = finiteOrNullV1076(
+    candidate?.holders?.whale?.top1Percent ??
+    candidate?.holders?.topHolderPct
+  );
+
+  const top10 = finiteOrNullV1076(
+    candidate?.holders?.whale?.top10Percent ??
+    candidate?.holders?.top10Pct
+  );
+
+  if (
+    riskVerified &&
+    riskScore !== null &&
+    riskScore >= INTELLIGENCE_COHORT_SEVERE_RISK_V1082
+  ) {
+    return {
+      reject:true,
+      reason:"LIVE_VERIFIED_SEVERE_RISK_EVICTED_V1086",
+      riskScore,
+      top1,
+      top10
+    };
+  }
+
+  if (
+    (top1 !== null && top1 >= INTELLIGENCE_COHORT_EXTREME_TOP1_V1082) ||
+    (top10 !== null && top10 >= INTELLIGENCE_COHORT_EXTREME_TOP10_V1082)
+  ) {
+    return {
+      reject:true,
+      reason:"LIVE_EXTREME_CONCENTRATION_EVICTED_V1086",
+      riskScore,
+      top1,
+      top10
+    };
+  }
+
+  return {reject:false,reason:null,riskScore,top1,top10};
+}
+
+function evictLiveRejectedCohortEntryV1086(state, candidate) {
+  const cohort = ensureIntelligenceCohortV1079(state);
+  const address = normalize(candidate?.address);
+
+  if (!cohort || !isAddress(address)) {
+    return {evicted:false,address:null,reason:null};
+  }
+
+  const decision = liveCandidateCohortRejectV1086(candidate);
+  if (decision.reject !== true) {
+    return {evicted:false,address,reason:null};
+  }
+
+  const before = cohort.entries.length;
+  cohort.entries = cohort.entries.filter(
+    entry => normalize(entry?.address) !== address
+  );
+
+  const evicted = cohort.entries.length < before;
+
+  if (evicted) {
+    cohort.lastLiveQualityEvictionV1086 = {
+      at:Date.now(),
+      address,
+      symbol:
+        candidate?.symbol ||
+        candidate?.validation?.symbol ||
+        null,
+      reason:decision.reason,
+      riskScore:decision.riskScore ?? null,
+      topHolderPct:decision.top1 ?? null,
+      top10Pct:decision.top10 ?? null
+    };
+    cohort.updatedAt = Date.now();
+  }
+
+  return {
+    evicted,
+    address,
+    reason:decision.reason,
+    riskScore:decision.riskScore ?? null,
+    topHolderPct:decision.top1 ?? null,
+    top10Pct:decision.top10 ?? null
+  };
+}
+
+
+/* ============================================================
    V1080 — DURABLE COHORT DIRECT-SEED HOTFIX
    ============================================================
    V1079's D1->watchedTokens intersection was too strict for initial seeding.
@@ -185397,6 +185532,18 @@ function seedIntelligenceCohortFromAnalysedCandidateV1080(
 
   if (!token || !isAddress(address)) {
     return {...base,reason:"INVALID_OR_UNSAFE_TOKEN_V1080"};
+  }
+
+  const liveEvictionV1086 =
+    evictLiveRejectedCohortEntryV1086(state, candidate);
+
+  if (liveEvictionV1086?.evicted === true) {
+    return {
+      ...base,
+      address,
+      evicted:true,
+      reason:liveEvictionV1086.reason
+    };
   }
 
   if (!candidateUsefulForCohortV1080(candidate)) {
@@ -185788,11 +185935,9 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
   }
 
   const entry = selected.entry;
-  entry.lastSelectedAt = nowMs;
-  cohort.lastSelectedAddress = normalize(entry?.address);
-  cohort.lastSelectedAt = nowMs;
-  cohort.updatedAt = nowMs;
 
+  // V1086: provisional only. Commit rotation/cooldown state after the token
+  // is confirmed present in analysisSelectedRawV142.
   return {
     ...base,
     status:"DURABLE_INTELLIGENCE_FOLLOW_UP_SELECTED_V1079",
@@ -185857,6 +186002,56 @@ function noteIntelligenceCohortAnalysisV1079(state, address, analysed) {
   return true;
 }
 
+function commitIntelligenceFollowUpAdmissionV1086(
+  state,
+  selection,
+  admitted
+) {
+  const address = normalize(selection?.selectedAddress);
+  const cohort = ensureIntelligenceCohortV1079(state);
+
+  if (!cohort || !isAddress(address)) {
+    return {
+      committed:false,
+      reason:"INVALID_SELECTION_V1086"
+    };
+  }
+
+  if (admitted !== true) {
+    return {
+      committed:false,
+      address,
+      reason:"INTELLIGENCE_SLOT_NOT_ADMITTED_V1086"
+    };
+  }
+
+  const entry = cohort.entries.find(
+    row => normalize(row?.address) === address
+  );
+
+  if (!entry) {
+    return {
+      committed:false,
+      address,
+      reason:"COHORT_ENTRY_NOT_FOUND_V1086"
+    };
+  }
+
+  const at = Date.now();
+  entry.lastSelectedAt = at;
+  cohort.lastSelectedAddress = address;
+  cohort.lastSelectedAt = at;
+  cohort.updatedAt = at;
+
+  return {
+    committed:true,
+    address,
+    at,
+    reason:"INTELLIGENCE_SLOT_ADMISSION_COMMITTED_V1086"
+  };
+}
+
+
 async function intelligenceCohortStatusV1079(env, state) {
   const cohort = pruneIntelligenceCohortV1079(state, Date.now());
   const base = {
@@ -185867,6 +186062,8 @@ async function intelligenceCohortStatusV1079(env, state) {
     directSeedFromAnalysedCandidates:true,
     targetedHistoryLookup:true,
     qualityPruning:true,
+    admissionCommitV1086:true,
+    liveQualityEvictionV1086:true,
     success:true,
     readOnly:true,
     externalRequestsUsed:0,
@@ -185938,6 +186135,9 @@ async function intelligenceCohortStatusV1079(env, state) {
 
   base.lastQualityPruneV1082 =
     cohort?.lastQualityPruneV1082 || null;
+
+  base.lastLiveQualityEvictionV1086 =
+    cohort?.lastLiveQualityEvictionV1086 || null;
 
   base.qualityThresholdsV1082 = {
     minimumObservations:
