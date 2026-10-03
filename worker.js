@@ -1,4 +1,24 @@
 /**
+ * ChainVanta — V1087
+ * COHORT EXACT-POOL FLOW HANDOFF
+ * Builds directly from deployed V1086.
+ * - Fixes a coverage gap for the durable intelligence lane: an admitted cohort
+ *   token with a VERIFIED exact V4 PoolId and USD-priceable quote can now enter
+ *   the existing forward-only continuous exact-pool directional collector even
+ *   when it is not Telegram-qualified, not currently swap-active, and not in
+ *   the provider-corroborated top-2 handoff.
+ * - At most ONE cohort token per scan is added to the existing watch
+ *   registration candidates, matching the single cohort analysis slot.
+ * - Uses the existing V551/V557 directional watch budget and hard request
+ *   ceiling. It adds no new request class and makes no historical coverage claim.
+ * - Extends /cohort-flow-status with exact-pool watch state so we can see
+ *   whether missing V212 flow is caused by no watch, a forward-only watch that
+ *   has not advanced yet, or a watch with collected exact-USD trades.
+ * - No Opportunity/Momentum/Confidence/Risk, qualification, or Telegram
+ *   threshold changes.
+ */
+
+/**
  * ChainVanta — V1086
  * COHORT ADMISSION + LIVE QUALITY FIX
  * Builds directly from deployed V1085.
@@ -9150,7 +9170,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1086"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1087"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -90433,6 +90453,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
             ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
             : candidate?.verifiedObservedRegistrationV570?.verified === true
               ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+            : candidate?.cohortExactPoolHandoffV1087?.verified === true
+              ? "DURABLE_COHORT_EXACT_POOL_HANDOFF_V1087"
             : candidate?.successfulTelegramAlertFallbackV460?.verified === true
               ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
               : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
@@ -90443,6 +90465,10 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       existing.persistedObservedRecoveryV573 =
         candidate?.persistedObservedRecoveryV573 ||
         existing.persistedObservedRecoveryV573 ||
+        null;
+      existing.cohortExactPoolHandoffV1087 =
+        candidate?.cohortExactPoolHandoffV1087 ||
+        existing.cohortExactPoolHandoffV1087 ||
         null;
       existing.updatedAt = now;
       refreshed++;
@@ -90530,6 +90556,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
             ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
             : candidate?.verifiedObservedRegistrationV570?.verified === true
               ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+            : candidate?.cohortExactPoolHandoffV1087?.verified === true
+              ? "DURABLE_COHORT_EXACT_POOL_HANDOFF_V1087"
             : candidate?.successfulTelegramAlertFallbackV460?.verified === true
               ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
               : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET",
@@ -90538,7 +90566,9 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       priorCompletionRecoveryV574:
         candidate?.priorCompletionRecoveryV574 || null,
       persistedObservedRecoveryV573:
-        candidate?.persistedObservedRecoveryV573 || null
+        candidate?.persistedObservedRecoveryV573 || null,
+      cohortExactPoolHandoffV1087:
+        candidate?.cohortExactPoolHandoffV1087 || null
     };
     registered++;
     if (rawOnlyV740) {
@@ -119035,6 +119065,74 @@ for (
       .slice(0, 2);
 
   /*
+   * V1087: the durable intelligence token can have a fully verified exact pool
+   * yet miss every older watch-handoff lane simply because it is established,
+   * not Telegram-qualified, and has no same-scan pool activity. That leaves
+   * V212 with no fresh candidate-matched ledger even though the identity needed
+   * for safe forward-only collection is already known.
+   *
+   * Admit at most the ONE actually-admitted cohort token into the existing V551
+   * watch registration when its exact PoolId + quote identity is verified and
+   * the quote is already USD-priceable. No backfill is inferred and no request
+   * ceiling is raised.
+   */
+  const directionalCohortExactPoolCandidatesV1087 =
+    (() => {
+      const admittedAddress =
+        intelligenceAdmissionCommitV1086?.committed === true
+          ? normalize(intelligenceAdmissionCommitV1086?.address)
+          : null;
+
+      if (!isAddress(admittedAddress)) {
+        return [];
+      }
+
+      const candidate =
+        (Array.isArray(candidates) ? candidates : [])
+          .find(row => normalize(row?.address) === admittedAddress);
+
+      if (
+        !candidate ||
+        candidate?.validERC20 !== true ||
+        candidate?.onChainPoolIdentityV153?.verified !== true
+      ) {
+        return [];
+      }
+
+      const identity = candidate.onChainPoolIdentityV153;
+      const poolId = normalize(identity?.poolId);
+      const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
+      const quoteEligibility = v254PriceableQuote(
+        quoteTokenAddress,
+        onChainDirectionalV179?.wethUsdGReferenceV187 ||
+          bestVerifiedWethUsdGReferenceV195(state)
+      );
+
+      if (
+        !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+        !isAddress(quoteTokenAddress) ||
+        quoteEligibility?.eligible !== true
+      ) {
+        return [];
+      }
+
+      return [{
+        ...candidate,
+        cohortExactPoolHandoffV1087: {
+          verified:true,
+          source:"ADMITTED_DURABLE_COHORT_EXACT_POOL_V1087",
+          tokenAddress:admittedAddress,
+          poolId,
+          quoteTokenAddress,
+          quoteBasis:quoteEligibility?.basis || null,
+          forwardOnly:true,
+          historicalBackfill:false,
+          requestCeilingRaised:false
+        }
+      }];
+    })();
+
+  /*
    * V740: exact PoolId watching no longer depends on immediate USD-quote
    * priceability. Only already-verified exact identities enter this lane.
    * For an unpriceable quote, the watch is explicitly raw-only and cannot
@@ -119180,6 +119278,7 @@ for (
     ...directionalPriorCompletionRecoveryCandidatesV574,
     ...directionalPersistedRecoveryCandidatesV573,
     ...directionalObservedExactPoolCandidatesV570,
+    ...directionalCohortExactPoolCandidatesV1087,
     ...directionalRawExactPoolCandidatesV740,
     ...directionalActiveExactPoolCandidatesV555,
     ...directionalProviderCorroboratedExactPoolCandidatesV737,
@@ -119339,6 +119438,34 @@ for (
       })),
     watchCapUnchanged:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
     hardGlobalLimitUnchanged:42,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
+
+  const directionalCohortPoolHandoffV1087 = {
+    enabled:true,
+    measurementOnly:false,
+    externalRequestsAddedByHandoff:0,
+    hardGlobalLimitUnchanged:42,
+    admittedCohortAddress:
+      intelligenceAdmissionCommitV1086?.committed === true
+        ? normalize(intelligenceAdmissionCommitV1086?.address)
+        : null,
+    eligibleExactPoolCandidates:
+      directionalCohortExactPoolCandidatesV1087.length,
+    rows:
+      directionalCohortExactPoolCandidatesV1087.map(candidate => ({
+        address:normalize(candidate?.address),
+        symbol:candidate?.symbol || null,
+        poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+        quoteTokenAddress:
+          normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
+        quoteBasis:
+          candidate?.cohortExactPoolHandoffV1087?.quoteBasis || null,
+        forwardOnly:true,
+        historicalBackfill:false
+      })),
     scoringChanged:false,
     qualificationChanged:false,
     telegramThresholdChanged:false
@@ -126410,6 +126537,7 @@ for (
     },
     directionalPriorCompletionWatchRecoveryV574,
     directionalPersistedWatchRecoveryV573,
+    directionalCohortPoolHandoffV1087,
     directionalObservedPoolHandoffV570,
     directionalActivePoolTargetingV555,
     directionalWatchRegistrationV551,
@@ -186747,7 +186875,7 @@ async function cohortFlowStatusV1085(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"COHORT_FLOW_COVERAGE_V1085",
+    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1087",
     success:false,
     readOnly:true,
     externalRequestsUsed:0,
@@ -186794,9 +186922,26 @@ async function cohortFlowStatusV1085(env) {
       (result?.results || []).map(row => [normalize(row?.address), row])
     );
 
+    const directionalWatchEntriesV1087 =
+      Object.values(directionalWatchRootV551(state)?.entries || {});
+
     const tokens = (cohort?.entries || []).map(entry => {
       const address = normalize(entry?.address);
       const row = latestByAddress.get(address) || null;
+      const watchesV1087 =
+        directionalWatchEntriesV1087.filter(
+          watch => normalize(watch?.tokenAddress) === address
+        );
+      const exactUsdWatchTradesV1087 =
+        watchesV1087.reduce(
+          (sum, watch) => sum + safeNumber(watch?.exactUsdTrades),
+          0
+        );
+      const latestWatchCollectedAtV1087 =
+        watchesV1087.reduce(
+          (max, watch) => Math.max(max, safeNumber(watch?.lastCollectedAt)),
+          0
+        ) || null;
       return {
         address,
         symbol:entry?.symbol || row?.symbol || null,
@@ -186819,18 +186964,34 @@ async function cohortFlowStatusV1085(env) {
         h1BuyPressurePct:finiteOrNullV1076(row?.flow_1h_buy_pressure_pct),
         classifiedHistory:
           row?.market_evidence_mode !== null &&
-          row?.market_evidence_mode !== undefined
+          row?.market_evidence_mode !== undefined,
+        exactPoolWatchV1087:{
+          watched:watchesV1087.length > 0,
+          watchCount:watchesV1087.length,
+          poolIds:watchesV1087
+            .map(watch => normalize(watch?.poolId))
+            .filter(poolId => /^0x[a-f0-9]{64}$/.test(String(poolId || ""))),
+          exactUsdTrades:exactUsdWatchTradesV1087,
+          latestCollectedAt:latestWatchCollectedAtV1087,
+          statuses:watchesV1087
+            .map(watch => watch?.lastStatus || null)
+            .filter(Boolean),
+          cohortHandoff:
+            watchesV1087.some(
+              watch => watch?.cohortExactPoolHandoffV1087?.verified === true
+            )
+        }
       };
     });
 
     return {
       ...base,
       success:true,
-      status:"COHORT_FLOW_COVERAGE_OK_V1085",
+      status:"COHORT_FLOW_COVERAGE_OK_V1087",
       verifiedFlowTokens:tokens.filter(t => t.flowVerified).length,
       missingVerifiedFlowTokens:tokens.filter(t => !t.flowVerified).length,
       tokens,
-      note:"Read-only D1 diagnostic. No provider or RPC calls are made.",
+      note:"Read-only D1 + existing directional-watch state diagnostic. No provider or RPC calls are made by this endpoint.",
       timestamp:now()
     };
   } catch (error) {
