@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1085
+ * COHORT FLOW COVERAGE DIAGNOSTIC
+ * Builds directly from deployed V1084.
+ * - Persists the V212 flow status/reason, verified record count and pool count
+ *   for every new history snapshot, including rows where verified flow is absent.
+ * - This distinguishes a D1 persistence problem from the legitimate
+ *   NO_RECENT_CANDIDATE_MATCHED_VERIFIED_ONCHAIN_USD state.
+ * - Extends /history-integrity to expose latest V212 coverage status.
+ * - Adds /cohort-flow-status: a read-only D1 summary for current durable-cohort
+ *   addresses, showing which retained tokens have verified flow and why others do not.
+ * - Zero new provider/RPC requests; scanner/scoring/qualification/Telegram
+ *   behaviour and request ceilings are unchanged.
+ */
+
+/**
  * ChainVanta — V1084
  * HISTORY INTEGRITY NULL-COERCION FIX
  * Builds directly from deployed V1083.
@@ -9120,7 +9135,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1084"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1085"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -186431,7 +186446,7 @@ async function historyIntegrityV1083(env, url) {
         market_verified,market_source,price_usd,market_cap_usd,
         liquidity_usd,volume_24h_usd,
         market_evidence_mode,market_snapshot_changed,
-        flow_verified,flow_source,
+        flow_verified,flow_source,flow_status,flow_record_count,flow_pool_count,
         flow_5m_trades,flow_5m_buy_usd,flow_5m_sell_usd,
         flow_5m_net_usd,flow_5m_buy_pressure_pct,
         flow_1h_trades,flow_1h_buy_usd,flow_1h_sell_usd,
@@ -186490,6 +186505,9 @@ async function historyIntegrityV1083(env, url) {
           rows[0]?.flow_verified !== null &&
           rows[0]?.flow_verified !== undefined &&
           Number(rows[0].flow_verified) === 1,
+        latestFlowStatus:rows[0]?.flow_status || null,
+        latestFlowRecordCount:safeNumber(rows[0]?.flow_record_count),
+        latestFlowPoolCount:safeNumber(rows[0]?.flow_pool_count),
         postV1083HistoryObserved:classifiedRows.length > 0,
         staticMarketEvidenceDominant:
           (changed.length + unchanged.length) >= 3 &&
@@ -186511,6 +186529,114 @@ async function historyIntegrityV1083(env, url) {
     return {
       ...base,
       status:"HISTORY_EVIDENCE_INTEGRITY_FAILED_V1083",
+      error:errorString(error).slice(0,700),
+      timestamp:now()
+    };
+  }
+}
+
+
+/* ============================================================
+   V1085 — DURABLE COHORT FLOW COVERAGE STATUS
+   ============================================================ */
+async function cohortFlowStatusV1085(env) {
+  const stateRead = await readState(env);
+  const state = stateRead?.state || {};
+  const cohort = ensureIntelligenceCohortV1079(state);
+
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"COHORT_FLOW_COVERAGE_V1085",
+    success:false,
+    readOnly:true,
+    externalRequestsUsed:0,
+    cohortEntries:safeNumber(cohort?.entries?.length),
+    tokens:[]
+  };
+
+  const addresses = (cohort?.entries || [])
+    .map(entry => normalize(entry?.address))
+    .filter(isAddress);
+
+  if (!addresses.length) {
+    return {
+      ...base,
+      success:true,
+      status:"NO_DURABLE_COHORT_ENTRIES_V1085",
+      timestamp:now()
+    };
+  }
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) {
+    return {...base,status:ready.status,error:ready.error||null,timestamp:now()};
+  }
+
+  try {
+    const placeholders = addresses.map(() => "?").join(",");
+    const result = await env.CHAINVANTA_DB.prepare(`
+      SELECT h.*
+      FROM ${MARKET_HISTORY_TABLE_V1076} h
+      JOIN (
+        SELECT address, MAX(captured_at) AS latest_at
+        FROM ${MARKET_HISTORY_TABLE_V1076}
+        WHERE address IN (${placeholders})
+        GROUP BY address
+      ) latest
+        ON latest.address = h.address
+       AND latest.latest_at = h.captured_at
+      WHERE h.address IN (${placeholders})
+      ORDER BY h.captured_at DESC
+    `).bind(...addresses, ...addresses).all();
+
+    const latestByAddress = new Map(
+      (result?.results || []).map(row => [normalize(row?.address), row])
+    );
+
+    const tokens = (cohort?.entries || []).map(entry => {
+      const address = normalize(entry?.address);
+      const row = latestByAddress.get(address) || null;
+      return {
+        address,
+        symbol:entry?.symbol || row?.symbol || null,
+        latestHistoryAt:safeNumber(row?.captured_at) || null,
+        flowVerified:
+          row?.flow_verified !== null &&
+          row?.flow_verified !== undefined &&
+          Number(row.flow_verified) === 1,
+        flowStatus:row?.flow_status || null,
+        flowSource:row?.flow_source || null,
+        recordCount:safeNumber(row?.flow_record_count),
+        poolCount:safeNumber(row?.flow_pool_count),
+        h1Trades:
+          row?.flow_1h_trades === null || row?.flow_1h_trades === undefined
+            ? null
+            : safeNumber(row.flow_1h_trades),
+        h1BuyUsd:finiteOrNullV1076(row?.flow_1h_buy_usd),
+        h1SellUsd:finiteOrNullV1076(row?.flow_1h_sell_usd),
+        h1NetUsd:finiteOrNullV1076(row?.flow_1h_net_usd),
+        h1BuyPressurePct:finiteOrNullV1076(row?.flow_1h_buy_pressure_pct),
+        classifiedHistory:
+          row?.market_evidence_mode !== null &&
+          row?.market_evidence_mode !== undefined
+      };
+    });
+
+    return {
+      ...base,
+      success:true,
+      status:"COHORT_FLOW_COVERAGE_OK_V1085",
+      verifiedFlowTokens:tokens.filter(t => t.flowVerified).length,
+      missingVerifiedFlowTokens:tokens.filter(t => !t.flowVerified).length,
+      tokens,
+      note:"Read-only D1 diagnostic. No provider or RPC calls are made.",
+      timestamp:now()
+    };
+  } catch (error) {
+    return {
+      ...base,
+      status:"COHORT_FLOW_COVERAGE_FAILED_V1085",
       error:errorString(error).slice(0,700),
       timestamp:now()
     };
@@ -186886,6 +187012,9 @@ async function ensureMarketHistoryV1076(env) {
       "market_snapshot_changed INTEGER",
       "flow_verified INTEGER NOT NULL DEFAULT 0",
       "flow_source TEXT",
+      "flow_status TEXT",
+      "flow_record_count INTEGER",
+      "flow_pool_count INTEGER",
       "flow_5m_trades INTEGER",
       "flow_5m_buy_usd REAL",
       "flow_5m_sell_usd REAL",
@@ -186988,9 +187117,12 @@ function marketHistorySnapshotV1076(candidate, capturedAt = Date.now()) {
     marketEvidenceMode: marketVerified ? "PENDING_PRIOR_COMPARISON_V1083" : "MARKET_UNVERIFIED_V1083",
     marketSnapshotChanged: null,
     flowVerified: verifiedFlowV1083?.verified === true,
-    flowSource: verifiedFlowV1083?.verified === true
-      ? (verifiedFlowV1083?.source || "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212")
-      : null,
+    flowSource: verifiedFlowV1083?.source || null,
+    flowStatus: verifiedFlowV1083?.status || "V212_FLOW_STATUS_UNAVAILABLE_V1085",
+    flowRecordCount: safeNumber(verifiedFlowV1083?.recordCount),
+    flowPoolCount: Array.isArray(verifiedFlowV1083?.poolIds)
+      ? verifiedFlowV1083.poolIds.filter(poolId => /^0x[a-f0-9]{64}$/.test(normalize(poolId))).length
+      : 0,
     flow5mTrades: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.observedTrades) : null,
     flow5mBuyUsd: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.buyVolumeUsd) : null,
     flow5mSellUsd: flow5mV1083?.verified === true ? finiteOrNullV1076(flow5mV1083?.sellVolumeUsd) : null,
@@ -187118,10 +187250,10 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       risk_verified,risk_score,holder_count,top_holder_pct,top10_pct,
       launch_stage,age_hours,created_at,
       market_evidence_mode,market_snapshot_changed,
-      flow_verified,flow_source,
+      flow_verified,flow_source,flow_status,flow_record_count,flow_pool_count,
       flow_5m_trades,flow_5m_buy_usd,flow_5m_sell_usd,flow_5m_net_usd,flow_5m_buy_pressure_pct,
       flow_1h_trades,flow_1h_buy_usd,flow_1h_sell_usd,flow_1h_net_usd,flow_1h_buy_pressure_pct
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `;
 
   try {
@@ -187134,7 +187266,7 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       r.launchStage,r.ageHours,capturedAt,
       r.marketEvidenceMode,
       r.marketSnapshotChanged === true ? 1 : r.marketSnapshotChanged === false ? 0 : null,
-      r.flowVerified?1:0,r.flowSource,
+      r.flowVerified?1:0,r.flowSource,r.flowStatus,r.flowRecordCount,r.flowPoolCount,
       r.flow5mTrades,r.flow5mBuyUsd,r.flow5mSellUsd,r.flow5mNetUsd,r.flow5mBuyPressurePct,
       r.flow1hTrades,r.flow1hBuyUsd,r.flow1hSellUsd,r.flow1hNetUsd,r.flow1hBuyPressurePct
     ));
@@ -188638,6 +188770,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await historyIntegrityV1083(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/cohort-flow-status"
+  ) {
+    return jsonResponse(
+      await cohortFlowStatusV1085(env)
     );
   }
 
