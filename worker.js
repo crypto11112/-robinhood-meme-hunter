@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1090
+ * COHORT ADMISSION BLOCKER DIAGNOSTIC
+ * Builds directly from deployed V1089.
+ * - Repeated live checks showed no new committed cohort admission for many
+ *   scheduled scans, despite a 4-minute selection cooldown.
+ * - Persists the latest cohort admission ATTEMPT, including selector status,
+ *   provisional token, fresh-launch pressure, slot eligibility, whether the
+ *   token was already in selected, MAX_TOKEN_CHECKS pressure, final admission,
+ *   and V1086 commit reason.
+ * - Exposes that state through /intelligence-cohort-status.
+ * - Diagnostic only: zero new provider/RPC requests and no scoring,
+ *   qualification, Telegram, request-ceiling, or selection-policy changes.
+ */
+
+/**
  * ChainVanta — V1089
  * COHORT HANDOFF DIAGNOSTIC PERSISTENCE FIX
  * Builds directly from deployed V1088.
@@ -9198,7 +9213,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1089"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1090"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -110075,6 +110090,60 @@ for (
   intelligenceFollowUpSelectionV1077.admissionV1086 =
     intelligenceAdmissionCommitV1086;
 
+  const intelligenceCohortAdmissionAttemptV1090 = {
+    at:Date.now(),
+    scheduledRun:scheduled === true,
+    selectorStatus:
+      intelligenceFollowUpSelectionV1077?.status || null,
+    provisionalAddress:
+      intelligenceFollowUpAddressV1077 || null,
+    provisionalSymbol:
+      intelligenceFollowUpSelectionV1077?.selectedSymbol || null,
+    selectedFromDurableCohort:
+      intelligenceFollowUpSelectionV1077?.selectedFromDurableCohort === true,
+    cohortEntries:
+      safeNumber(intelligenceFollowUpSelectionV1077?.cohortEntries),
+    freshVerifiedLaunches:
+      safeNumber(currentLiveVerifiedLaunchWatchedV621?.length),
+    freshLaunchThreshold:
+      INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077,
+    freshLaunchPressureLow:
+      intelligenceFreshLaunchPressureLowV1077 === true,
+    alreadyInSelected:
+      intelligenceAlreadyInSelectedV1077 === true,
+    slotEligible:
+      intelligenceSlotEligibleV1077 === true,
+    maxTokenChecks:MAX_TOKEN_CHECKS,
+    selectedBeforeAdmissionCount:
+      safeNumber(selected?.length),
+    analysisSelectedCount:
+      safeNumber(analysisSelectedRawV142?.length),
+    actuallyAdmitted:
+      intelligenceActuallyAdmittedV1086 === true,
+    admissionCommit:
+      intelligenceAdmissionCommitV1086 || null,
+    blocker:
+      intelligenceFollowUpSelectionV1077?.status !==
+        "DURABLE_INTELLIGENCE_FOLLOW_UP_SELECTED_V1079"
+        ? intelligenceFollowUpSelectionV1077?.status || "SELECTOR_DID_NOT_SELECT_V1090"
+        : intelligenceFreshLaunchPressureLowV1077 !== true
+          ? "FRESH_LAUNCH_PRESSURE_BLOCKED_COHORT_SLOT_V1090"
+          : intelligenceSlotEligibleV1077 !== true
+            ? "COHORT_SLOT_NOT_ELIGIBLE_V1090"
+            : intelligenceActuallyAdmittedV1086 !== true
+              ? "SELECTED_COHORT_TOKEN_NOT_IN_FINAL_ANALYSIS_SET_V1090"
+              : intelligenceAdmissionCommitV1086?.committed !== true
+                ? intelligenceAdmissionCommitV1086?.reason ||
+                  "COHORT_ADMISSION_COMMIT_FAILED_V1090"
+                : null
+  };
+
+  const intelligenceCohortStateV1090 =
+    ensureIntelligenceCohortV1079(state);
+
+  intelligenceCohortStateV1090.lastAdmissionAttemptV1090 =
+    intelligenceCohortAdmissionAttemptV1090;
+
   const preAnalysisTerminalRowsV142 =
     analysisSelectedRawV142
       .map(
@@ -186306,6 +186375,7 @@ async function intelligenceCohortStatusV1079(env, state) {
     qualityPruning:true,
     admissionCommitV1086:true,
     liveQualityEvictionV1086:true,
+    admissionBlockerDiagnosticV1090:true,
     success:true,
     readOnly:true,
     externalRequestsUsed:0,
@@ -186380,6 +186450,9 @@ async function intelligenceCohortStatusV1079(env, state) {
 
   base.lastLiveQualityEvictionV1086 =
     cohort?.lastLiveQualityEvictionV1086 || null;
+
+  base.lastAdmissionAttemptV1090 =
+    cohort?.lastAdmissionAttemptV1090 || null;
 
   base.qualityThresholdsV1082 = {
     minimumObservations:
