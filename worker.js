@@ -1,6 +1,6 @@
 /**
- * ChainVanta — V1065
- * BITQUERY BOUNDARY-SAFE TRANSACTION COMPLETION DIAGNOSTIC
+ * ChainVanta — V1066
+ * UNISWAP V4 PATH / POOLMANAGER SWAP CROSS-CHECK DIAGNOSTIC
  * Builds directly from confirmed-working V1063.
  * Preserves V1059-V1063 Bitquery diagnostics unchanged.
  * Adds GET /bitquery-swaps-complete?token=0x...&limit=25.
@@ -8871,7 +8871,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1065"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1066"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184307,6 +184307,153 @@ async function bitqueryRpcCrosscheckV1065(env, url) {
   };
 }
 
+
+/* ============================================================
+   V1066 — UNISWAP V4 PATH / POOLMANAGER SWAP CROSS-CHECK
+   ============================================================
+   - GET /bitquery-v4-crosscheck?token=0x...&limit=25 only.
+   - Builds from the V1064 boundary-complete Bitquery sample.
+   - Selects up to three transactions containing Uniswap v4.
+   - Reads the receipt directly from Robinhood RPC.
+   - Preserves ordered target-token Transfer logs, but DOES NOT infer economic
+     direction from PoolManager transfer netting because v4 settlement may
+     legitimately move the same token into and back out of PoolManager.
+   - Independently decodes canonical PoolManager Swap amount0/amount1 deltas.
+   - Uses only Bitquery-provided counter-token SYMBOL to choose a canonical
+     quote identity (USDG/WETH); token/quote currency order is deterministic by
+     address, so candidate direction comes from the signed PoolManager delta.
+   - Compares that direct v4 Swap-event direction against Bitquery.
+   - Diagnostic/read-only only: no scanner/scoring/provider-routing/Telegram/
+     Stripe/D1/KV/Durable Object changes.
+*/
+function counterAddressFromSymbolV1066(symbol) {
+  const s=String(symbol||'').toUpperCase();
+  if (s==='USDG') return normalize(CANONICAL_USDG_V179);
+  if (s==='WETH') return normalize(CANONICAL_WETH_V179);
+  return null;
+}
+
+function v4SwapEvidenceFromReceiptV1066(receipt, token, quoteAddress, decimals) {
+  const tokenLc=safeLowerV1063(token);
+  const quote=safeLowerV1063(quoteAddress);
+  const orderedTransfers=[];
+  const v4Swaps=[];
+
+  for (let i=0;i<(Array.isArray(receipt?.logs)?receipt.logs:[]).length;i++) {
+    const log=receipt.logs[i];
+    const address=safeLowerV1063(log?.address);
+    const topics=Array.isArray(log?.topics)?log.topics:[];
+
+    if (address===tokenLc && safeLowerV1063(topics[0])===ERC20_TRANSFER_TOPIC_V1065 && topics.length>=3) {
+      const from=hexAddressTopicV1065(topics[1]);
+      const to=hexAddressTopicV1065(topics[2]);
+      const raw=hexBigIntV1065(log?.data);
+      orderedTransfers.push({
+        logIndex:log?.logIndex?Number(BigInt(log.logIndex)):i,
+        from,to,
+        amount:decimalFromRawV1065(raw,decimals),
+        fromPoolManager:safeLowerV1063(from)===safeLowerV1063(POOL_MANAGER),
+        toPoolManager:safeLowerV1063(to)===safeLowerV1063(POOL_MANAGER)
+      });
+    }
+
+    if (address===safeLowerV1063(POOL_MANAGER) && safeLowerV1063(topics[0])===safeLowerV1063(SWAP_TOPIC) && topics.length>=2) {
+      const amount0=decodeSignedInt128WordV179(abiWordV179(log?.data,0));
+      const amount1=decodeSignedInt128WordV179(abiWordV179(log?.data,1));
+      if (amount0===null || amount1===null) continue;
+      let candidateIndex=null;
+      if (isAddress(tokenLc) && isAddress(quote) && tokenLc!==quote) {
+        try { candidateIndex=BigInt(tokenLc)<BigInt(quote)?0:1; } catch (_) {}
+      }
+      const candidateDelta=candidateIndex===0?amount0:(candidateIndex===1?amount1:null);
+      const direction=candidateDelta===null?'UNKNOWN':(candidateDelta<0n?'BUY':(candidateDelta>0n?'SELL':'NEUTRAL'));
+      v4Swaps.push({
+        logIndex:log?.logIndex?Number(BigInt(log.logIndex)):i,
+        poolId:safeLowerV1063(topics[1]),
+        amount0Raw:amount0.toString(),
+        amount1Raw:amount1.toString(),
+        candidateCurrencyIndex:candidateIndex,
+        candidateDeltaRaw:candidateDelta===null?null:candidateDelta.toString(),
+        candidateAmount:candidateDelta===null?null:decimalFromRawV1065(candidateDelta<0n?-candidateDelta:candidateDelta,decimals),
+        direction
+      });
+    }
+  }
+
+  orderedTransfers.sort((a,b)=>a.logIndex-b.logIndex);
+  v4Swaps.sort((a,b)=>a.logIndex-b.logIndex);
+  const dirs=[...new Set(v4Swaps.map(x=>x.direction).filter(x=>x==='BUY'||x==='SELL'))];
+  const direction=dirs.length===1?dirs[0]:(dirs.length>1?'MIXED':'UNKNOWN');
+  const amount=v4Swaps.filter(x=>x.direction===direction).reduce((a,x)=>a+(Number(x.candidateAmount)||0),0);
+  return {direction,candidateAmount:Number(amount.toFixed(12)),swapEventCount:v4Swaps.length,v4Swaps,orderedTransfers};
+}
+
+async function bitqueryV4PathCrosscheckV1066(env,url) {
+  const startedAt=Date.now();
+  const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
+  if (!base?.success || base?.completion?.boundaryComplete!==true) {
+    return {...base,version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_V4_PATH_CROSSCHECK_V1066',success:false,status:'BITQUERY_BASE_NOT_BOUNDARY_COMPLETE_V1066',scannerMutated:false};
+  }
+
+  const token=safeLowerV1063(base?.request?.token);
+  let rpcRequests=0;
+  const decimalsCall=await directRpcCallV1065(env,'eth_call',[{to:token,data:'0x313ce567'},'latest']);
+  rpcRequests += decimalsCall.externalRequestsUsed||0;
+  let decimals=18;
+  if (decimalsCall.ok && typeof decimalsCall.result==='string') {
+    try { const d=Number(BigInt(decimalsCall.result)); if (Number.isInteger(d)&&d>=0&&d<=36) decimals=d; } catch (_) {}
+  }
+
+  const txs=(base?.reconstruction?.transactions||[]).filter(t=>(t?.protocols||[]).some(p=>String(p||'').toLowerCase().includes('uniswap_v4'))).slice(0,3);
+  const checks=[];
+  for (const tx of txs) {
+    const receiptCall=await directRpcCallV1065(env,'eth_getTransactionReceipt',[tx.txHash]);
+    rpcRequests += receiptCall.externalRequestsUsed||0;
+    if (!receiptCall.ok || !receiptCall.result) {
+      checks.push({txHash:tx.txHash,bitqueryDirection:tx.direction,verdict:'MISMATCH',reason:'RPC_RECEIPT_UNAVAILABLE'});
+      continue;
+    }
+    const counterSymbols=[...new Set((tx?.legs||[]).filter(l=>String(l?.protocol||'').toLowerCase().includes('uniswap_v4')).map(l=>String(l?.counterSymbol||'').toUpperCase()).filter(Boolean))];
+    const quoteCandidates=[...new Set(counterSymbols.map(counterAddressFromSymbolV1066).filter(Boolean))];
+    let best=null;
+    for (const quote of quoteCandidates) {
+      const ev=v4SwapEvidenceFromReceiptV1066(receiptCall.result,token,quote,decimals);
+      if (!best || ev.swapEventCount>best.swapEventCount) best={quote,...ev};
+    }
+    if (!best) best={quote:null,...v4SwapEvidenceFromReceiptV1066(receiptCall.result,token,null,decimals)};
+    const directionMatch=String(best.direction||'')===String(tx.direction||'');
+    const bqV4Amount=(tx?.legs||[]).filter(l=>String(l?.protocol||'').toLowerCase().includes('uniswap_v4')).reduce((a,l)=>a+(Number(l?.tokenAmount)||0),0);
+    const denom=Math.max(Math.abs(bqV4Amount),Math.abs(Number(best.candidateAmount)||0),1e-18);
+    const amountDiffPct=Math.abs(bqV4Amount-(Number(best.candidateAmount)||0))/denom*100;
+    const amountMatch=best.swapEventCount>0 && Number.isFinite(amountDiffPct) && amountDiffPct<=1;
+    const verdict=directionMatch&&amountMatch?'MATCH':(directionMatch?'PARTIAL_MATCH':'MISMATCH');
+    checks.push({
+      txHash:tx.txHash,classification:tx.classification,
+      bitquery:{direction:tx.direction,v4TokenAmount:Number(bqV4Amount.toFixed(12)),protocols:tx.protocols,counterSymbols},
+      rpc:{provider:receiptCall.provider,receiptStatus:receiptCall.result?.status??null,quoteAddress:best.quote,poolManager:normalize(POOL_MANAGER),direction:best.direction,v4TokenAmount:best.candidateAmount,swapEventCount:best.swapEventCount,v4Swaps:best.v4Swaps,orderedTargetTokenTransfers:best.orderedTransfers},
+      comparison:{directionMatch,amountMatch,amountDiffPct:Number(amountDiffPct.toFixed(4))},
+      verdict,
+      interpretation:'PoolManager Transfer netting is intentionally ignored for v4 direction; canonical PoolManager Swap signed deltas are the independent direction source.'
+    });
+  }
+
+  const counts={MATCH:0,PARTIAL_MATCH:0,MISMATCH:0};
+  for (const c of checks) counts[c.verdict]=(counts[c.verdict]||0)+1;
+  const overall=checks.length===0?'NO_V4_SAMPLE':(counts.MISMATCH===0&&counts.PARTIAL_MATCH===0?'ALL_MATCH':(counts.MISMATCH===0?'NO_HARD_MISMATCHES':'MISMATCH_DETECTED'));
+  return {
+    agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_V4_PATH_CROSSCHECK_V1066',
+    success:checks.length>0&&counts.MISMATCH===0,readOnly:true,configured:true,
+    status:overall==='ALL_MATCH'?'BITQUERY_V4_RPC_ALL_MATCH_V1066':(overall==='NO_HARD_MISMATCHES'?'BITQUERY_V4_RPC_PARTIAL_MATCH_V1066':(overall==='NO_V4_SAMPLE'?'NO_V4_SAMPLE_V1066':'BITQUERY_V4_RPC_MISMATCH_V1066')),
+    request:base.request,bitqueryBoundary:{boundaryComplete:true,completedRowCount:base?.completion?.completedRowCount??null},
+    rpcDecimals:{value:decimals,verified:decimalsCall.ok,provider:decimalsCall.provider},selectedV4Transactions:checks.length,
+    verdictCounts:counts,overall,checks,
+    externalRequestsUsed:(base.externalRequestsUsed||4)+rpcRequests,bitqueryExternalRequestsUsed:base.externalRequestsUsed||4,rpcExternalRequestsUsed:rpcRequests,
+    scannerMutated:false,authoritative:false,
+    note:'Diagnostic only. V1066 independently uses canonical Uniswap v4 PoolManager Swap signed deltas; no result feeds live scanner/scoring/provider routing.',
+    elapsedMs:Date.now()-startedAt,timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -184549,6 +184696,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryRpcCrosscheckV1065(env, url)
+    );
+  }
+
+
+  if (
+    path ===
+      "/bitquery-v4-crosscheck"
+  ) {
+    return jsonResponse(
+      await bitqueryV4PathCrosscheckV1066(env, url)
     );
   }
 
