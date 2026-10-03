@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1080
+ * DURABLE INTELLIGENCE COHORT — SEEDING HOTFIX
+ * Builds directly from deployed V1079.
+ * - Fixes the V1079 zero-entry condition.
+ * - V1079 could only seed a cohort entry when a D1-history token was ALSO still
+ *   present in rotating state.watchedTokens. In practice that intersection can be zero.
+ * - V1080 seeds/refreshes the durable cohort directly from candidates that were
+ *   successfully analysed in the current scan, while their full token object is
+ *   definitely available.
+ * - Uses conservative usefulness/risk/concentration guards; high-risk/extreme
+ *   concentration candidates are never retained.
+ * - No extra provider/RPC requests, no higher request ceilings, no scoring or
+ *   Telegram qualification changes.
+ * - Existing V1076 D1 history, V1078 accumulation shadow scoring and V1079
+ *   one-follow-up-per-suitable-scan behaviour are preserved.
+ */
+
+/**
  * ChainVanta — V1079
  * DURABLE INTELLIGENCE COHORT
  * Builds directly from deployed V1078.
@@ -9041,7 +9059,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1079"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1080"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -113900,11 +113918,29 @@ for (
         Date.now()
       );
 
+    const intelligenceCohortSeedV1080 =
+      seedIntelligenceCohortFromAnalysedCandidateV1080(
+        state,
+        watched,
+        candidate
+      );
+
     noteIntelligenceCohortAnalysisV1079(
       state,
       address,
       candidate
     );
+
+    if (
+      intelligenceCohortSeedV1080?.seeded === true ||
+      intelligenceCohortSeedV1080?.refreshed === true
+    ) {
+      candidate.intelligenceCohortV1080 = {
+        seeded:intelligenceCohortSeedV1080.seeded === true,
+        refreshed:intelligenceCohortSeedV1080.refreshed === true,
+        reason:intelligenceCohortSeedV1080.reason
+      };
+    }
 
     candidates.push(
       candidate
@@ -184929,6 +184965,202 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
 
 
 
+
+/* ============================================================
+   V1080 — DURABLE COHORT DIRECT-SEED HOTFIX
+   ============================================================
+   V1079's D1->watchedTokens intersection was too strict for initial seeding.
+   V1080 promotes only already-analysed useful candidates into the same bounded
+   cohort, while the full mutable token object is still available.
+*/
+function candidateUsefulForCohortV1080(candidate) {
+  if (!candidate || typeof candidate !== "object") return false;
+
+  const marketVerified = candidate?.market?.verified === true;
+  const opportunity = finiteOrNullV1076(candidate?.opportunity?.score) ?? 0;
+  const momentum = finiteOrNullV1076(candidate?.momentum?.score) ?? 0;
+  const confidence = finiteOrNullV1076(candidate?.confidence?.score) ?? 0;
+
+  const riskVerified = candidate?.risk?.verified === true;
+  const riskScore = riskVerified
+    ? finiteOrNullV1076(candidate?.risk?.score)
+    : null;
+
+  const top1 =
+    finiteOrNullV1076(
+      candidate?.holders?.whale?.top1Percent ??
+      candidate?.holders?.topHolderPct
+    );
+
+  const top10 =
+    finiteOrNullV1076(
+      candidate?.holders?.whale?.top10Percent ??
+      candidate?.holders?.top10Pct
+    );
+
+  if (riskVerified && riskScore !== null && riskScore > 60) return false;
+  if (top1 !== null && top1 >= 50) return false;
+  if (top10 !== null && top10 >= 80) return false;
+
+  const useful =
+    marketVerified ||
+    opportunity >= 55 ||
+    momentum >= 10 ||
+    confidence >= 65;
+
+  if (!useful) return false;
+
+  // If market and risk are both unverified, demand stronger live evidence.
+  if (
+    !marketVerified &&
+    !riskVerified &&
+    !(opportunity >= 55 && momentum >= 10)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function candidateRetentionScoreV1080(candidate) {
+  const marketVerified = candidate?.market?.verified === true;
+  const opportunity = finiteOrNullV1076(candidate?.opportunity?.score) ?? 0;
+  const momentum = finiteOrNullV1076(candidate?.momentum?.score) ?? 0;
+  const confidence = finiteOrNullV1076(candidate?.confidence?.score) ?? 0;
+  const riskVerified = candidate?.risk?.verified === true;
+  const risk = riskVerified
+    ? finiteOrNullV1076(candidate?.risk?.score)
+    : null;
+  const liquidity =
+    marketVerified
+      ? (finiteOrNullV1076(candidate?.market?.liquidityUsd) ?? 0)
+      : 0;
+
+  let score = 0;
+  if (marketVerified) score += 80;
+  score += Math.min(80, opportunity) * 0.8;
+  score += Math.min(100, confidence) * 0.45;
+  score += Math.min(50, momentum) * 1.4;
+  if (riskVerified && risk !== null) {
+    score += Math.max(0, 60 - risk) * 0.7;
+  }
+  if (liquidity > 0) {
+    score += Math.min(30, Math.log10(Math.max(1, liquidity)) * 6);
+  }
+
+  return Number(score.toFixed(3));
+}
+
+function seedIntelligenceCohortFromAnalysedCandidateV1080(
+  state,
+  watched,
+  candidate
+) {
+  const base = {
+    seeded:false,
+    refreshed:false,
+    address:null,
+    reason:null
+  };
+
+  const token = cohortTokenSafeV1079(watched);
+  const address = normalize(
+    candidate?.address ||
+    watched?.address
+  );
+
+  if (!token || !isAddress(address)) {
+    return {...base,reason:"INVALID_OR_UNSAFE_TOKEN_V1080"};
+  }
+
+  if (!candidateUsefulForCohortV1080(candidate)) {
+    return {...base,address,reason:"CANDIDATE_NOT_USEFUL_FOR_COHORT_V1080"};
+  }
+
+  const cohort = ensureIntelligenceCohortV1079(state);
+  if (!cohort) {
+    return {...base,address,reason:"COHORT_STATE_UNAVAILABLE_V1080"};
+  }
+
+  const nowMs = Date.now();
+  const existingIndex = cohort.entries.findIndex(
+    row => normalize(row?.address) === address
+  );
+  const existing =
+    existingIndex >= 0
+      ? cohort.entries[existingIndex]
+      : null;
+
+  const marketVerified = candidate?.market?.verified === true;
+  const riskVerified = candidate?.risk?.verified === true;
+
+  const next = {
+    address,
+    symbol:
+      candidate?.symbol ||
+      candidate?.validation?.symbol ||
+      token?.metadata?.symbol ||
+      token?.symbol ||
+      existing?.symbol ||
+      null,
+    retainedAt:
+      safeNumber(existing?.retainedAt) || nowMs,
+    lastUsefulAt:nowMs,
+    lastAnalysedAt:nowMs,
+    lastSelectedAt:
+      safeNumber(existing?.lastSelectedAt) || null,
+    retentionScore:candidateRetentionScoreV1080(candidate),
+    observationCount:
+      safeNumber(existing?.observationCount),
+    latestHistoryAt:
+      safeNumber(existing?.latestHistoryAt) || null,
+    marketVerified,
+    opportunityScore:
+      finiteOrNullV1076(candidate?.opportunity?.score),
+    momentumScore:
+      finiteOrNullV1076(candidate?.momentum?.score),
+    confidenceScore:
+      finiteOrNullV1076(candidate?.confidence?.score),
+    riskScore:
+      riskVerified
+        ? finiteOrNullV1076(candidate?.risk?.score)
+        : null,
+    liquidityUsd:
+      marketVerified
+        ? finiteOrNullV1076(candidate?.market?.liquidityUsd)
+        : null,
+    token
+  };
+
+  if (existingIndex >= 0) {
+    cohort.entries[existingIndex] = next;
+  } else {
+    cohort.entries.push(next);
+  }
+
+  cohort.entries = cohort.entries
+    .filter(entry => cohortTokenSafeV1079(entry?.token))
+    .sort((a,b) =>
+      safeNumber(b?.retentionScore) - safeNumber(a?.retentionScore) ||
+      safeNumber(b?.lastUsefulAt) - safeNumber(a?.lastUsefulAt)
+    )
+    .slice(0, INTELLIGENCE_COHORT_MAX_V1079);
+
+  cohort.updatedAt = nowMs;
+
+  return {
+    ...base,
+    seeded:existingIndex < 0,
+    refreshed:existingIndex >= 0,
+    address,
+    reason:
+      existingIndex >= 0
+        ? "COHORT_ENTRY_REFRESHED_FROM_ANALYSIS_V1080"
+        : "COHORT_ENTRY_SEEDED_FROM_ANALYSIS_V1080"
+  };
+}
+
+
 /* ============================================================
    V1079 — DURABLE INTELLIGENCE COHORT
    ============================================================
@@ -185299,6 +185531,8 @@ async function intelligenceCohortStatusV1079(env, state) {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
     diagnostic:"INTELLIGENCE_COHORT_STATUS_V1079",
+    cohortRuntimeVersion:"V1080",
+    directSeedFromAnalysedCandidates:true,
     success:true,
     readOnly:true,
     externalRequestsUsed:0,
