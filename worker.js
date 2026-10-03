@@ -1,5 +1,5 @@
 /**
- * ChainVanta — V1066
+ * ChainVanta — V1067
  * UNISWAP V4 PATH / POOLMANAGER SWAP CROSS-CHECK DIAGNOSTIC
  * Builds directly from confirmed-working V1063.
  * Preserves V1059-V1063 Bitquery diagnostics unchanged.
@@ -8871,7 +8871,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1066"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1067"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184454,6 +184454,189 @@ async function bitqueryV4PathCrosscheckV1066(env,url) {
   };
 }
 
+
+/* ============================================================
+   V1067 — UNISWAP V4 POOL IDENTITY + CORRECT DELTA CROSS-CHECK
+   ============================================================
+   - GET /bitquery-v4-poolkey-crosscheck?token=0x...&limit=25 only.
+   - Builds from V1064 boundary-complete Bitquery data.
+   - Reads representative V4 receipts directly from Robinhood RPC.
+   - Collects the exact PoolIds emitted by PoolManager Swap logs.
+   - Resolves each PoolId through the existing Uniswap V4 Pool Info path so
+     currency identity is established BEFORE interpreting amount0/amount1.
+   - IMPORTANT V4 sign correction, scoped to this diagnostic only:
+       negative candidate BalanceDelta = candidate is input/spent => SELL
+       positive candidate BalanceDelta = candidate is output/received => BUY
+     This is intentionally NOT patched into legacy production V769/V179 logic
+     in this diagnostic build; live scanner behaviour remains unchanged.
+   - Filters to PoolIds whose resolved currencies contain the target token and
+     the Bitquery V4 counter token (USDG/WETH where available).
+   - Compares exact V4 direction + target-token amount against Bitquery.
+   - Diagnostic/read-only only: no scanner/scoring/provider-routing/Telegram/
+     Stripe/D1/KV/Durable Object changes.
+*/
+function collectPoolManagerSwapLogsV1067(receipt) {
+  const rows=[];
+  for (let i=0;i<(Array.isArray(receipt?.logs)?receipt.logs:[]).length;i++) {
+    const log=receipt.logs[i];
+    const topics=Array.isArray(log?.topics)?log.topics:[];
+    if (safeLowerV1063(log?.address)!==safeLowerV1063(POOL_MANAGER)) continue;
+    if (safeLowerV1063(topics[0])!==safeLowerV1063(SWAP_TOPIC) || topics.length<2) continue;
+    const poolId=safeLowerV1063(topics[1]);
+    if (!isBytes32HexV765(poolId)) continue;
+    rows.push({...log,_v1067LogIndex:log?.logIndex?Number(BigInt(log.logIndex)):i,_v1067PoolId:poolId});
+  }
+  return rows.sort((a,b)=>a._v1067LogIndex-b._v1067LogIndex);
+}
+
+function decodeV4SwapWithResolvedPoolV1067(log, token, pool, decimals) {
+  const tokenLc=safeLowerV1063(token);
+  const poolId=safeLowerV1063(log?._v1067PoolId || log?.topics?.[1]);
+  const tokenA=safeLowerV1063(pool?.tokenA);
+  const tokenB=safeLowerV1063(pool?.tokenB);
+  if (!isAddress(tokenLc) || !isBytes32HexV765(poolId) || !isAddress(tokenA) || !isAddress(tokenB) || tokenA===tokenB) {
+    return {verified:false,status:'POOL_IDENTITY_UNVERIFIED_V1067',poolId};
+  }
+  if (tokenLc!==tokenA && tokenLc!==tokenB) {
+    return {verified:false,status:'TARGET_TOKEN_NOT_IN_RESOLVED_POOL_V1067',poolId,tokenA,tokenB};
+  }
+  let currency0=null,currency1=null;
+  try {
+    if (BigInt(tokenA)<BigInt(tokenB)) { currency0=tokenA; currency1=tokenB; }
+    else { currency0=tokenB; currency1=tokenA; }
+  } catch (_) {
+    return {verified:false,status:'CURRENCY_SORT_FAILED_V1067',poolId,tokenA,tokenB};
+  }
+  const amount0=decodeSignedInt128WordV179(abiWordV179(log?.data,0));
+  const amount1=decodeSignedInt128WordV179(abiWordV179(log?.data,1));
+  if (amount0===null || amount1===null) {
+    return {verified:false,status:'SWAP_DELTA_DECODE_FAILED_V1067',poolId,currency0,currency1};
+  }
+  const tokenIs0=tokenLc===currency0;
+  const candidateDelta=tokenIs0?amount0:amount1;
+  const counterDelta=tokenIs0?amount1:amount0;
+  // Uniswap v4 BalanceDelta is caller-relative: input/spent is negative;
+  // output/received is positive. Therefore candidate input = SELL.
+  const direction=candidateDelta<0n?'SELL':(candidateDelta>0n?'BUY':'NEUTRAL');
+  const amount=decimalFromRawV1065(candidateDelta<0n?-candidateDelta:candidateDelta,decimals);
+  return {
+    verified:direction==='BUY'||direction==='SELL',
+    status:(direction==='BUY'||direction==='SELL')?'V4_RESOLVED_POOL_DELTA_VERIFIED_V1067':'ZERO_DELTA_V1067',
+    poolId,tokenA,tokenB,currency0,currency1,
+    candidateCurrencyIndex:tokenIs0?0:1,
+    amount0Raw:amount0.toString(),amount1Raw:amount1.toString(),
+    candidateDeltaRaw:candidateDelta.toString(),counterDeltaRaw:counterDelta.toString(),
+    direction,candidateAmount:amount,
+    logIndex:log?._v1067LogIndex ?? null
+  };
+}
+
+async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
+  const startedAt=Date.now();
+  const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
+  if (!base?.success || base?.completion?.boundaryComplete!==true) {
+    return {...base,version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_V4_POOL_IDENTITY_CROSSCHECK_V1067',success:false,status:'BITQUERY_BASE_NOT_BOUNDARY_COMPLETE_V1067',scannerMutated:false};
+  }
+
+  const token=safeLowerV1063(base?.request?.token);
+  let rpcRequests=0;
+  const decimalsCall=await directRpcCallV1065(env,'eth_call',[{to:token,data:'0x313ce567'},'latest']);
+  rpcRequests += decimalsCall.externalRequestsUsed||0;
+  let decimals=18;
+  if (decimalsCall.ok && typeof decimalsCall.result==='string') {
+    try { const d=Number(BigInt(decimalsCall.result)); if (Number.isInteger(d)&&d>=0&&d<=36) decimals=d; } catch (_) {}
+  }
+
+  const txs=(base?.reconstruction?.transactions||[])
+    .filter(t=>(t?.protocols||[]).some(p=>String(p||'').toLowerCase().includes('uniswap_v4')))
+    .slice(0,3);
+
+  const receiptRows=[];
+  const allPoolIds=new Set();
+  for (const tx of txs) {
+    const rc=await directRpcCallV1065(env,'eth_getTransactionReceipt',[tx.txHash]);
+    rpcRequests += rc.externalRequestsUsed||0;
+    const swaps=rc.ok&&rc.result?collectPoolManagerSwapLogsV1067(rc.result):[];
+    for (const row of swaps) allPoolIds.add(row._v1067PoolId);
+    receiptRows.push({tx,receiptCall:rc,receipt:rc.result||null,swapLogs:swaps});
+  }
+
+  // Independent pool/currency identity via the already-integrated Uniswap V4
+  // pool-info endpoint. One bounded batch covers the PoolIds seen in the chosen
+  // receipts; this diagnostic does not use Bitquery to decide currency order.
+  const poolInfo=await v4PoolInfoBatchV768(env,[...allPoolIds]);
+  const poolMap=new Map((poolInfo?.pools||[]).map(p=>[safeLowerV1063(p?.poolId),p]));
+
+  const checks=[];
+  for (const row of receiptRows) {
+    const tx=row.tx;
+    if (!row.receiptCall?.ok || !row.receipt) {
+      checks.push({txHash:tx.txHash,classification:tx.classification,verdict:'MISMATCH',reason:'RPC_RECEIPT_UNAVAILABLE'});
+      continue;
+    }
+    const v4Legs=(tx?.legs||[]).filter(l=>String(l?.protocol||'').toLowerCase().includes('uniswap_v4'));
+    const expectedQuotes=[...new Set(v4Legs.map(l=>counterAddressFromSymbolV1066(l?.counterSymbol)).filter(Boolean).map(safeLowerV1063))];
+    const expectedSymbols=[...new Set(v4Legs.map(l=>String(l?.counterSymbol||'').toUpperCase()).filter(Boolean))];
+    const decoded=[];
+    const rejected=[];
+    for (const log of row.swapLogs) {
+      const p=poolMap.get(safeLowerV1063(log._v1067PoolId));
+      if (!p) {
+        rejected.push({poolId:log._v1067PoolId,logIndex:log._v1067LogIndex,status:'POOL_INFO_NOT_RETURNED_V1067'});
+        continue;
+      }
+      const a=safeLowerV1063(p?.tokenA),b=safeLowerV1063(p?.tokenB);
+      const containsToken=a===token||b===token;
+      const counter=containsToken?(a===token?b:a):null;
+      const quoteAllowed=!expectedQuotes.length || expectedQuotes.includes(counter);
+      if (!containsToken || !quoteAllowed) {
+        rejected.push({poolId:log._v1067PoolId,logIndex:log._v1067LogIndex,status:!containsToken?'POOL_DOES_NOT_CONTAIN_TARGET_V1067':'COUNTER_TOKEN_MISMATCH_V1067',tokenA:a,tokenB:b,counter});
+        continue;
+      }
+      const d=decodeV4SwapWithResolvedPoolV1067(log,token,p,decimals);
+      if (d?.verified) decoded.push({...d,counterAddress:counter});
+      else rejected.push({...d,logIndex:log._v1067LogIndex});
+    }
+
+    const dirs=[...new Set(decoded.map(d=>d.direction).filter(d=>d==='BUY'||d==='SELL'))];
+    const rpcDirection=dirs.length===1?dirs[0]:(dirs.length>1?'MIXED':'UNKNOWN');
+    const matchingDirectional=decoded.filter(d=>d.direction===rpcDirection);
+    const rpcAmount=matchingDirectional.reduce((a,d)=>a+(Number(d.candidateAmount)||0),0);
+    const bqAmount=v4Legs.reduce((a,l)=>a+(Number(l?.tokenAmount)||0),0);
+    const directionMatch=rpcDirection===String(tx?.direction||'');
+    const denom=Math.max(Math.abs(bqAmount),Math.abs(rpcAmount),1e-18);
+    const amountDiffPct=Math.abs(bqAmount-rpcAmount)/denom*100;
+    const amountMatch=decoded.length>0&&Number.isFinite(amountDiffPct)&&amountDiffPct<=1;
+    const verdict=directionMatch&&amountMatch?'MATCH':(directionMatch?'PARTIAL_MATCH':'MISMATCH');
+    checks.push({
+      txHash:tx.txHash,classification:tx.classification,
+      bitquery:{direction:tx.direction,v4TokenAmount:Number(bqAmount.toFixed(12)),counterSymbols:expectedSymbols},
+      rpc:{provider:row.receiptCall.provider,receiptStatus:row.receipt?.status??null,direction:rpcDirection,v4TokenAmount:Number(rpcAmount.toFixed(12)),poolManager:normalize(POOL_MANAGER),resolvedSwapCount:decoded.length,totalPoolManagerSwapCount:row.swapLogs.length,resolvedSwaps:decoded,rejectedPoolManagerSwaps:rejected},
+      comparison:{directionMatch,amountMatch,amountDiffPct:Number(amountDiffPct.toFixed(6))},
+      verdict,
+      interpretation:'V1067 resolves exact PoolId currency identity before reading the candidate delta. For Uniswap v4 BalanceDelta, negative candidate delta is input/spent (SELL) and positive candidate delta is output/received (BUY).'
+    });
+  }
+
+  const counts={MATCH:0,PARTIAL_MATCH:0,MISMATCH:0};
+  for (const c of checks) counts[c.verdict]=(counts[c.verdict]||0)+1;
+  const overall=checks.length===0?'NO_V4_SAMPLE':(counts.MISMATCH===0&&counts.PARTIAL_MATCH===0?'ALL_MATCH':(counts.MISMATCH===0?'NO_HARD_MISMATCHES':'MISMATCH_DETECTED'));
+  return {
+    agent:'ChainVanta',version:CHAINVANTA_DISPLAY_VERSION,diagnostic:'BITQUERY_V4_POOL_IDENTITY_CROSSCHECK_V1067',
+    success:checks.length>0&&counts.MISMATCH===0,readOnly:true,configured:true,
+    status:overall==='ALL_MATCH'?'BITQUERY_V4_POOL_IDENTITY_ALL_MATCH_V1067':(overall==='NO_HARD_MISMATCHES'?'BITQUERY_V4_POOL_IDENTITY_PARTIAL_V1067':(overall==='NO_V4_SAMPLE'?'NO_V4_SAMPLE_V1067':'BITQUERY_V4_POOL_IDENTITY_MISMATCH_V1067')),
+    request:base.request,bitqueryBoundary:{boundaryComplete:true,completedRowCount:base?.completion?.completedRowCount??null},
+    rpcDecimals:{value:decimals,verified:decimalsCall.ok,provider:decimalsCall.provider},
+    poolIdentity:{provider:'UNISWAP_POOL_INFO',attempted:poolInfo?.attempted===true,ok:poolInfo?.ok===true,httpStatus:poolInfo?.httpStatus??null,poolIdsObserved:allPoolIds.size,poolsResolved:(poolInfo?.pools||[]).length,externalRequestsUsed:poolInfo?.externalRequestsUsed||0,error:poolInfo?.error||null},
+    selectedV4Transactions:checks.length,verdictCounts:counts,overall,checks,
+    externalRequestsUsed:(base.externalRequestsUsed||4)+rpcRequests+(poolInfo?.externalRequestsUsed||0),
+    bitqueryExternalRequestsUsed:base.externalRequestsUsed||4,rpcExternalRequestsUsed:rpcRequests,uniswapExternalRequestsUsed:poolInfo?.externalRequestsUsed||0,
+    scannerMutated:false,authoritative:false,
+    note:'Diagnostic only. V1067 fixes V1066 pool-currency attribution and v4 BalanceDelta sign semantics without changing any live scanner/scoring/provider-routing logic.',
+    elapsedMs:Date.now()-startedAt,timestamp:now()
+  };
+}
+
 async function handleRequest(
   request,
   env,
@@ -184706,6 +184889,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await bitqueryV4PathCrosscheckV1066(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/bitquery-v4-poolkey-crosscheck"
+  ) {
+    return jsonResponse(
+      await bitqueryV4PoolIdentityCrosscheckV1067(env, url)
     );
   }
 
