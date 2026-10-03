@@ -1,5 +1,5 @@
 /**
- * ChainVanta — V1071
+ * ChainVanta — V1072
  * ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
  * Builds directly from confirmed-working V1069.
  * - Preserves the completed V1069 20-sample fresh/current-live Bitquery benchmark unchanged.
@@ -13,7 +13,11 @@
  * - Records a direct comparison against the frozen V1069 fresh-launch recovery result.
  * - Hard-capped to 20 automatic established-token samples; at most one attempt per scheduled scan.
  * - Preserves GET /bitquery-established-shadow-status and adds alias GET /bitquery-rpc-established-shadow-status.
- * - V1071 adds bounded direct-RPC activity evidence beside Bitquery on each new established-token sample.
+ * - V1071 added bounded direct-RPC activity evidence beside Bitquery on each new established-token sample.
+ * - V1072 makes that comparison time-window fair: when Bitquery returns rows, RPC expands back to
+ *   Bitquery's oldest sampled block (subject to a hard safety cap) instead of always using 600 blocks.
+ * - If the matching RPC range would exceed the safety cap, V1072 marks the comparison INCOMPLETE
+ *   rather than falsely calling it a Bitquery-only win.
  * - Remains SHADOW ONLY: no live evidence promotion, scoring mutation, Telegram qualification,
  *   provider routing, Stripe, D1 or Durable Object behaviour changes.
  */
@@ -8920,7 +8924,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1071"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1072"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -184998,17 +185002,22 @@ async function bitqueryShadowStatusV1069(env) {
 
 
 /* ============================================================
-   V1071 — ESTABLISHED-TOKEN RPC ↔ BITQUERY SIDE-BY-SIDE SHADOW
-   - Adds a bounded direct-RPC activity probe to every NEW established sample.
-   - Uses the same selected token and same scheduled scan as Bitquery.
-   - Measures raw token Transfer logs and, when usable pool identity exists,
-     recent exact V3/V4 Swap logs.
-   - Read-only benchmark only: no scoring, Telegram, provider promotion or evidence mutation.
+   V1072 — FAIR-WINDOW ESTABLISHED RPC ↔ BITQUERY SHADOW
+   - Preserves V1071 side-by-side comparison and all prior samples.
+   - When Bitquery has activity, RPC covers the same observed Bitquery block range
+     using V1064's boundary block as the oldest sampled block.
+   - Hard safety cap prevents runaway log ranges. If the Bitquery range is larger
+     than the cap, comparison is explicitly INCOMPLETE rather than declaring a
+     provider winner.
+   - When Bitquery has no rows, RPC retains the recent 600-block probe so RPC-only
+     activity can still be detected cheaply.
+   - Shadow only: no scoring, Telegram, provider promotion or evidence mutation.
    ============================================================ */
-const RPC_ESTABLISHED_LOOKBACK_BLOCKS_V1071 = 600;
-const RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071 = 250;
+const RPC_ESTABLISHED_RECENT_LOOKBACK_BLOCKS_V1072 = 600;
+const RPC_ESTABLISHED_MAX_MATCH_LOOKBACK_BLOCKS_V1072 = 50000;
+const RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1072 = 250;
 
-function rpcEstablishedPoolTargetV1071(state, candidate) {
+function rpcEstablishedPoolTargetV1072(state, candidate) {
   const token = normalize(candidate?.address);
   const exact = token ? exactPoolIdentityFromPriorCompletionV465(state, token) : null;
   const exactId = normalize(exact?.poolId || exact?.pairAddress || exact?.address || '');
@@ -185020,82 +185029,153 @@ function rpcEstablishedPoolTargetV1071(state, candidate) {
   return {available:false,type:null,id:selected,source:exactId?'PRIOR_EXACT_POOL_IDENTITY':'MARKET_PAIR_ID_UNUSABLE'};
 }
 
-async function establishedRpcProbeV1071(env, state, candidate) {
+function bitqueryOldestObservedBlockV1072(bitquery) {
+  const candidates = [
+    bitquery?.seed?.boundaryBlock,
+    bitquery?.completedSummary?.oldestBlock,
+    bitquery?.completedSummary?.minBlock
+  ];
+  for (const v of candidates) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return null;
+}
+
+function bitqueryHasActivityV1072(bitquery) {
+  const tx = safeNumber(bitquery?.reconstruction?.uniqueTransactionCount);
+  const rows = safeNumber(bitquery?.completion?.completedRowCount || bitquery?.seed?.rowCount);
+  return rows > 0 || tx > 0;
+}
+
+async function establishedRpcProbeV1072(env, state, candidate, bitquery) {
   const token = normalize(candidate?.address);
-  const target = rpcEstablishedPoolTargetV1071(state, candidate);
+  const target = rpcEstablishedPoolTargetV1072(state, candidate);
   const startedAt = Date.now();
   let requests = 0;
   const headCall = await directRpcCallV1065(env,'eth_blockNumber',[]);
   requests += safeNumber(headCall?.externalRequestsUsed);
   if (!headCall?.ok || !headCall?.result) {
-    return {success:false,status:'RPC_HEAD_UNAVAILABLE_V1071',externalRequestsUsed:requests,elapsedMs:Date.now()-startedAt,poolTarget:target};
+    return {success:false,status:'RPC_HEAD_UNAVAILABLE_V1072',externalRequestsUsed:requests,elapsedMs:Date.now()-startedAt,poolTarget:target,comparisonWindowComplete:false};
   }
   let head = 0;
   try { head = Number(BigInt(headCall.result)); } catch (_) { head = 0; }
   if (!Number.isFinite(head) || head <= 0) {
-    return {success:false,status:'RPC_HEAD_INVALID_V1071',externalRequestsUsed:requests,elapsedMs:Date.now()-startedAt,poolTarget:target};
+    return {success:false,status:'RPC_HEAD_INVALID_V1072',externalRequestsUsed:requests,elapsedMs:Date.now()-startedAt,poolTarget:target,comparisonWindowComplete:false};
   }
-  const from = Math.max(0, head - RPC_ESTABLISHED_LOOKBACK_BLOCKS_V1071 + 1);
-  const fromHex='0x'+from.toString(16), toHex='0x'+head.toString(16);
 
+  const bqHas = bitqueryHasActivityV1072(bitquery);
+  const bqOldest = bqHas ? bitqueryOldestObservedBlockV1072(bitquery) : null;
+  let from;
+  let requestedFromBlock;
+  let windowSource;
+  let comparisonWindowComplete = true;
+  let windowCapped = false;
+
+  if (bqHas && Number.isFinite(bqOldest) && bqOldest > 0 && bqOldest <= head) {
+    requestedFromBlock = bqOldest;
+    const desiredLookback = head - bqOldest + 1;
+    if (desiredLookback > RPC_ESTABLISHED_MAX_MATCH_LOOKBACK_BLOCKS_V1072) {
+      from = Math.max(0, head - RPC_ESTABLISHED_MAX_MATCH_LOOKBACK_BLOCKS_V1072 + 1);
+      comparisonWindowComplete = false;
+      windowCapped = true;
+      windowSource = 'BITQUERY_BOUNDARY_MATCH_CAPPED_V1072';
+    } else {
+      from = bqOldest;
+      windowSource = 'BITQUERY_BOUNDARY_MATCH_V1072';
+    }
+  } else {
+    from = Math.max(0, head - RPC_ESTABLISHED_RECENT_LOOKBACK_BLOCKS_V1072 + 1);
+    requestedFromBlock = from;
+    windowSource = bqHas ? 'BITQUERY_BOUNDARY_UNAVAILABLE_RECENT_FALLBACK_V1072' : 'RECENT_600_BLOCK_FALLBACK_V1072';
+    if (bqHas) comparisonWindowComplete = false;
+  }
+
+  const fromHex='0x'+from.toString(16), toHex='0x'+head.toString(16);
   let transferLogs=[];
   let transferProvider=null;
+  let transferQueryOk=false;
   const transferCall=await directRpcCallV1065(env,'eth_getLogs',[{address:token,fromBlock:fromHex,toBlock:toHex,topics:[ERC20_TRANSFER_TOPIC_V1065]}]);
   requests += safeNumber(transferCall?.externalRequestsUsed);
   if (transferCall?.ok && Array.isArray(transferCall.result)) {
+    transferQueryOk=true;
     transferProvider=transferCall.provider||null;
-    transferLogs=transferCall.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071);
+    transferLogs=transferCall.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1072);
   }
 
   let swapLogs=[];
   let swapProvider=null;
-  let swapProbeStatus='POOL_IDENTITY_UNAVAILABLE_V1071';
+  let swapQueryOk=false;
+  let swapProbeStatus='POOL_IDENTITY_UNAVAILABLE_V1072';
   if (target.available && target.type==='V3_POOL_ADDRESS') {
     const call=await directRpcCallV1065(env,'eth_getLogs',[{address:target.id,fromBlock:fromHex,toBlock:toHex,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]);
     requests += safeNumber(call?.externalRequestsUsed);
     if (call?.ok && Array.isArray(call.result)) {
-      swapProvider=call.provider||null; swapLogs=call.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071);
-      swapProbeStatus=swapLogs.length?'V3_SWAP_LOGS_FOUND_V1071':'V3_NO_SWAP_LOGS_V1071';
-    } else swapProbeStatus='V3_SWAP_LOG_QUERY_FAILED_V1071';
+      swapQueryOk=true; swapProvider=call.provider||null; swapLogs=call.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1072);
+      swapProbeStatus=swapLogs.length?'V3_SWAP_LOGS_FOUND_V1072':'V3_NO_SWAP_LOGS_V1072';
+    } else swapProbeStatus='V3_SWAP_LOG_QUERY_FAILED_V1072';
   } else if (target.available && target.type==='V4_POOL_ID') {
     const call=await directRpcCallV1065(env,'eth_getLogs',[{address:normalize(POOL_MANAGER),fromBlock:fromHex,toBlock:toHex,topics:[SWAP_TOPIC,target.id]}]);
     requests += safeNumber(call?.externalRequestsUsed);
     if (call?.ok && Array.isArray(call.result)) {
-      swapProvider=call.provider||null; swapLogs=call.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1071);
-      swapProbeStatus=swapLogs.length?'V4_SWAP_LOGS_FOUND_V1071':'V4_NO_SWAP_LOGS_V1071';
-    } else swapProbeStatus='V4_SWAP_LOG_QUERY_FAILED_V1071';
+      swapQueryOk=true; swapProvider=call.provider||null; swapLogs=call.result.slice(0,RPC_ESTABLISHED_MAX_RETURNED_LOGS_V1072);
+      swapProbeStatus=swapLogs.length?'V4_SWAP_LOGS_FOUND_V1072':'V4_NO_SWAP_LOGS_V1072';
+    } else swapProbeStatus='V4_SWAP_LOG_QUERY_FAILED_V1072';
   }
+
+  if (!transferQueryOk && !(target.available && swapQueryOk)) comparisonWindowComplete = false;
 
   const txHashes=new Set();
   for (const row of [...transferLogs,...swapLogs]) { const h=normalize(row?.transactionHash); if(h) txHashes.add(h); }
   const hasActivity=transferLogs.length>0 || swapLogs.length>0;
+  let status=hasActivity?'RPC_ACTIVITY_FOUND_V1072':'RPC_NO_ACTIVITY_IN_PROBED_WINDOW_V1072';
+  if (!comparisonWindowComplete && bqHas) status=hasActivity?'RPC_ACTIVITY_FOUND_PARTIAL_WINDOW_V1072':'RPC_COMPARISON_WINDOW_INCOMPLETE_V1072';
+
   return {
-    success:true,
-    status:hasActivity?'RPC_RECENT_ACTIVITY_FOUND_V1071':'RPC_NO_RECENT_ACTIVITY_V1071',
-    headBlock:head,fromBlock:from,toBlock:head,lookbackBlocks:RPC_ESTABLISHED_LOOKBACK_BLOCKS_V1071,
+    success:true,status,
+    headBlock:head,fromBlock:from,toBlock:head,
+    requestedFromBlock,
+    actualLookbackBlocks:head-from+1,
+    bitqueryOldestObservedBlock:bqOldest,
+    windowSource,
+    windowCapped,
+    comparisonWindowComplete,
+    maxMatchedLookbackBlocks:RPC_ESTABLISHED_MAX_MATCH_LOOKBACK_BLOCKS_V1072,
     poolTarget:target,
     tokenTransferLogs:transferLogs.length,
     exactPoolSwapLogs:swapLogs.length,
     uniqueTransactionCount:txHashes.size,
     swapProbeStatus,
+    transferQueryOk,swapQueryOk,
     transferProvider,swapProvider,
     externalRequestsUsed:requests,
     elapsedMs:Date.now()-startedAt
   };
 }
 
-function compareEstablishedProvidersV1071(bitquery, rpcProbe) {
+function compareEstablishedProvidersV1072(bitquery, rpcProbe) {
   const bqTx=safeNumber(bitquery?.reconstruction?.uniqueTransactionCount);
   const bqRows=safeNumber(bitquery?.completion?.completedRowCount || bitquery?.seed?.rowCount);
   const bqHas=bqRows>0 || bqTx>0;
   const rpcSwaps=safeNumber(rpcProbe?.exactPoolSwapLogs);
   const rpcTransfers=safeNumber(rpcProbe?.tokenTransferLogs);
   const rpcHas=rpcSwaps>0 || rpcTransfers>0;
-  let verdict='NEITHER_FOUND_ACTIVITY_V1071';
-  if (bqHas && rpcHas) verdict='BOTH_FOUND_ACTIVITY_V1071';
-  else if (bqHas) verdict='BITQUERY_ONLY_ACTIVITY_V1071';
-  else if (rpcHas) verdict='RPC_ONLY_ACTIVITY_V1071';
-  return {verdict,bitqueryHasActivity:bqHas,rpcHasActivity:rpcHas,bitqueryRows:bqRows,bitqueryTransactions:bqTx,rpcTransferLogs:rpcTransfers,rpcExactPoolSwapLogs:rpcSwaps};
+  const comparable = bqHas ? rpcProbe?.comparisonWindowComplete === true : true;
+  let verdict='NEITHER_FOUND_ACTIVITY_V1072';
+  if (bqHas && !comparable) verdict='BITQUERY_ACTIVITY_RPC_WINDOW_INCOMPLETE_V1072';
+  else if (bqHas && rpcHas) verdict='BOTH_FOUND_ACTIVITY_V1072';
+  else if (bqHas) verdict='BITQUERY_ONLY_ACTIVITY_V1072';
+  else if (rpcHas) verdict='RPC_ONLY_ACTIVITY_V1072';
+  return {
+    verdict,comparisonFair:comparable,
+    bitqueryHasActivity:bqHas,rpcHasActivity:rpcHas,
+    bitqueryRows:bqRows,bitqueryTransactions:bqTx,
+    bitqueryOldestObservedBlock:bitqueryOldestObservedBlockV1072(bitquery),
+    rpcFromBlock:rpcProbe?.fromBlock??null,rpcToBlock:rpcProbe?.toBlock??null,
+    rpcComparisonWindowComplete:rpcProbe?.comparisonWindowComplete===true,
+    rpcWindowSource:rpcProbe?.windowSource||null,
+    rpcTransferLogs:rpcTransfers,rpcExactPoolSwapLogs:rpcSwaps
+  };
 }
 /* ============================================================
    V1070 — ESTABLISHED-TOKEN BITQUERY SHADOW BENCHMARK
@@ -185281,7 +185361,7 @@ function ensureBitqueryEstablishedStoreV1070(state) {
 
 async function runBitqueryEstablishedShadowV1070(env, state, candidates, scheduled) {
   const store = ensureBitqueryEstablishedStoreV1070(state);
-  store.version = "V1071";
+  store.version = "V1072";
   store.mode = "ESTABLISHED_RPC_VS_BITQUERY_SHADOW_BENCHMARK";
   store.minAgeHours = 24;
   store.maxAutomaticSamples = BITQUERY_ESTABLISHED_TOTAL_SAMPLES_V1070;
@@ -185345,15 +185425,15 @@ async function runBitqueryEstablishedShadowV1070(env, state, candidates, schedul
 
   let rpcProbe;
   try {
-    rpcProbe = await establishedRpcProbeV1071(env, state, candidate);
+    rpcProbe = await establishedRpcProbeV1072(env, state, candidate, result);
   } catch (error) {
-    rpcProbe = {success:false,status:'RPC_ESTABLISHED_SHADOW_EXCEPTION_V1071',externalRequestsUsed:0,error:String(error?.message||error||'UNKNOWN_ERROR').slice(0,240)};
+    rpcProbe = {success:false,status:'RPC_ESTABLISHED_SHADOW_EXCEPTION_V1072',externalRequestsUsed:0,error:String(error?.message||error||'UNKNOWN_ERROR').slice(0,240)};
   }
 
   const sample = compactBitqueryEstablishedSampleV1070(candidate, result, picked.priority);
   if (result?.error) sample.bitquery.error = result.error;
   sample.rpc = rpcProbe;
-  sample.providerComparison = compareEstablishedProvidersV1071(result, rpcProbe);
+  sample.providerComparison = compareEstablishedProvidersV1072(result, rpcProbe);
   store.attemptedSamples = safeNumber(store.attemptedSamples) + 1;
   if (sample.wouldRecoverDirectionalUsdEvidence === true) store.successfulRecoveries = safeNumber(store.successfulRecoveries) + 1;
   store.lastAttemptAt = Date.now();
@@ -185382,7 +185462,7 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"ESTABLISHED_RPC_VS_BITQUERY_SHADOW_STATUS_V1071",
+    diagnostic:"ESTABLISHED_RPC_VS_BITQUERY_FAIR_WINDOW_STATUS_V1072",
     success:true,
     readOnly:true,
     mode:"ESTABLISHED_TOKEN_SHADOW_BENCHMARK",
@@ -185401,17 +185481,18 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
       establishedRecoveryRatePct:establishedRate,
       recoveryRateDeltaPctPoints:freshRate === null ? null : Number((establishedRate - freshRate).toFixed(1))
     },
-    rpcVsBitqueryV1071:(()=>{
+    rpcVsBitqueryV1072:(()=>{
       const rows=Array.isArray(store?.samples)?store.samples:[];
       const compared=rows.filter(x=>x?.providerComparison);
       const count=v=>compared.filter(x=>x?.providerComparison?.verdict===v).length;
       return {
         comparedSamples:compared.length,
-        bothFoundActivity:count('BOTH_FOUND_ACTIVITY_V1071'),
-        bitqueryOnlyActivity:count('BITQUERY_ONLY_ACTIVITY_V1071'),
-        rpcOnlyActivity:count('RPC_ONLY_ACTIVITY_V1071'),
-        neitherFoundActivity:count('NEITHER_FOUND_ACTIVITY_V1071'),
-        note:'V1070 samples created before V1071 have no RPC comparison; only new samples are counted.'
+        bothFoundActivity:count('BOTH_FOUND_ACTIVITY_V1072'),
+        bitqueryOnlyActivity:count('BITQUERY_ONLY_ACTIVITY_V1072'),
+        rpcOnlyActivity:count('RPC_ONLY_ACTIVITY_V1072'),
+        neitherFoundActivity:count('NEITHER_FOUND_ACTIVITY_V1072'),
+        incompleteWindowComparisons:count('BITQUERY_ACTIVITY_RPC_WINDOW_INCOMPLETE_V1072'),
+        note:'V1070 samples have no RPC comparison; V1071 samples used a fixed 600-block window; only V1072 samples are time-window matched when Bitquery has activity.'
       };
     })(),
     lastAttemptAt:store?.lastAttemptAt || null,
@@ -185432,7 +185513,7 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
     telegramQualificationEnabled:false,
     providerPromotionEnabled:false,
     scannerEvidenceMutated:false,
-    note:"V1071 compares Bitquery with a bounded direct-RPC activity probe on the same established-token samples. Existing V1070 samples are preserved; new samples record both providers. It remains shadow-only and cannot change live scoring, Telegram or provider routing.",
+    note:"V1072 makes RPC vs Bitquery time-window fair. When Bitquery returns activity, RPC expands back to Bitquery's oldest sampled block subject to a 50,000-block safety cap; capped/unavailable ranges are marked incomplete rather than false provider wins. Shadow-only; no live scoring, Telegram or provider routing changes.",
     timestamp:now()
   };
 }
@@ -185714,7 +185795,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     path ===
       "/bitquery-established-shadow-status" ||
     path ===
-      "/bitquery-rpc-established-shadow-status"
+      "/bitquery-rpc-established-shadow-status" ||
+      path === "/bitquery-rpc-fair-window-status"
   ) {
     return jsonResponse(
       await bitqueryEstablishedShadowStatusV1070(env)
