@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1077
+ * PERSISTENT INTELLIGENCE WATCHLIST
+ * Builds directly from deployed V1076.
+ * - Uses the existing V1076 D1 history to retain/revisit useful tokens instead of
+ *   recording almost entirely one-off snapshots.
+ * - Selects at most ONE established/intelligence follow-up token per scheduled scan.
+ * - The follow-up must still exist in the existing bounded watched-token set and
+ *   must pass conservative relevance / concentration / risk guards.
+ * - Current/live verified launches, carried completion, holder retry and evidence
+ *   completion lanes keep priority. V1077 never raises MAX_TOKEN_CHECKS or any
+ *   request ceiling; it can only use one existing analysis slot when fresh-launch
+ *   pressure is low.
+ * - Adds /intelligence-watchlist-status as a read-only D1 diagnostic.
+ * - No scoring weights, qualification thresholds, Telegram behaviour, Stripe,
+ *   provider trust rules, hard request ceilings, KV schema or Durable Objects change.
+ */
+
+/**
  * ChainVanta — V1076
  * PERSISTENT COMPACT D1 MARKET HISTORY — PHASE 1
  * Builds directly from deployed V1075.
@@ -8985,7 +9003,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1076"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1077"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -109737,6 +109755,41 @@ for (
       evidenceCompletionRetryTokenV658?.address
     );
 
+  /* V1077: one bounded established-token follow-up slot.
+   * The token comes from existing D1 history and must still be in state.watchedTokens.
+   * It never raises MAX_TOKEN_CHECKS or any request ceiling. */
+  const intelligenceFollowUpSelectionV1077 =
+    await selectIntelligenceFollowUpV1077(
+      env,
+      state,
+      scheduled
+    );
+
+  const intelligenceFollowUpTokenV1077 =
+    intelligenceFollowUpSelectionV1077?.token || null;
+
+  const intelligenceFollowUpAddressV1077 =
+    normalize(intelligenceFollowUpTokenV1077?.address);
+
+  const intelligenceAlreadyInSelectedV1077 =
+    Boolean(
+      intelligenceFollowUpAddressV1077 &&
+      selected.some(token =>
+        normalize(token?.address) === intelligenceFollowUpAddressV1077
+      )
+    );
+
+  const intelligenceFreshLaunchPressureLowV1077 =
+    currentLiveVerifiedLaunchWatchedV621.length <=
+      INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077;
+
+  const intelligenceSlotEligibleV1077 =
+    Boolean(
+      scheduled === true &&
+      intelligenceFollowUpTokenV1077 &&
+      intelligenceFreshLaunchPressureLowV1077
+    );
+
   const analysisSelectedRawV142 =
     marketFreshTarget ||
     protectedCarriedAnalysisTargetV178 ||
@@ -109768,6 +109821,12 @@ for (
             ...(
               pendingDirectionalUsdTokenV176
                 ? [pendingDirectionalUsdTokenV176]
+                : []
+            ),
+            ...(
+              intelligenceSlotEligibleV1077 &&
+              !intelligenceAlreadyInSelectedV1077
+                ? [intelligenceFollowUpTokenV1077]
                 : []
             ),
             ...selected
@@ -109927,6 +109986,27 @@ for (
               )
             )
       );
+
+  const intelligenceFollowUpV1077 = {
+    ...intelligenceFollowUpSelectionV1077,
+    token:undefined,
+    freshLaunchPressureLow:
+      intelligenceFreshLaunchPressureLowV1077,
+    eligibleForExistingSlot:
+      intelligenceSlotEligibleV1077,
+    alreadyOrganicallySelected:
+      intelligenceAlreadyInSelectedV1077,
+    selectedForAnalysis:
+      Boolean(
+        intelligenceFollowUpAddressV1077 &&
+        analysisSelected.some(token =>
+          normalize(token?.address) === intelligenceFollowUpAddressV1077
+        )
+      ),
+    maxTokenChecksUnchanged:MAX_TOKEN_CHECKS,
+    currentLiveVerifiedLaunchesQueued:
+      currentLiveVerifiedLaunchWatchedV621.length
+  };
 
   if (marketFreshTargetAddress) {
     reservePriorityFreshMarket(
@@ -110172,6 +110252,7 @@ for (
     retryQueueAfterAnalysis: null,
     protectedPriorityBoundedAttempts: 0,
     providerConstrainedPriorityAttempts: 0,
+    intelligenceFollowUpV1077,
     freshCandidatePriorityV469: {
       enabled: true,
       analysisBeforeHistoricalCompletion: true,
@@ -184790,6 +184871,303 @@ async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
 
 
 
+
+/* ============================================================
+   V1077 — PERSISTENT INTELLIGENCE WATCHLIST
+   ============================================================
+   Goal:
+   - Turn V1076 from mostly one-off snapshots into repeated observations.
+   - Reuse ONE existing analysis slot only when fresh-launch pressure is low.
+   - Never increase provider/RPC request ceilings.
+*/
+const INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077 = 1;
+const INTELLIGENCE_WATCH_MAX_AGE_MS_V1077 = 48 * 60 * 60 * 1000;
+const INTELLIGENCE_WATCH_MAX_TOP1_PCT_V1077 = 50;
+const INTELLIGENCE_WATCH_MAX_TOP10_PCT_V1077 = 80;
+const INTELLIGENCE_WATCH_MAX_VERIFIED_RISK_V1077 = 60;
+
+function intelligenceWatchRowScoreV1077(row, nowMs = Date.now()) {
+  const marketVerified = Number(row?.market_verified) === 1;
+  const opportunity = finiteOrNullV1076(row?.opportunity_score) ?? 0;
+  const momentum = finiteOrNullV1076(row?.momentum_score) ?? 0;
+  const confidence = finiteOrNullV1076(row?.confidence_score) ?? 0;
+  const riskVerified = Number(row?.risk_verified) === 1;
+  const risk = finiteOrNullV1076(row?.risk_score);
+  const liquidity = finiteOrNullV1076(row?.liquidity_usd) ?? 0;
+  const observations = Math.max(1, safeNumber(row?.observation_count));
+  const lastAt = safeNumber(row?.last_at || row?.captured_at);
+  const ageMs = lastAt > 0 ? Math.max(0, nowMs - lastAt) : INTELLIGENCE_WATCH_MAX_AGE_MS_V1077;
+  const stalenessHours = Math.min(12, ageMs / 3600000);
+
+  let score = 0;
+  if (marketVerified) score += 80;
+  score += Math.min(80, opportunity) * 0.8;
+  score += Math.min(100, confidence) * 0.45;
+  score += Math.min(50, momentum) * 1.4;
+  if (riskVerified && risk !== null) score += Math.max(0, 60 - risk) * 0.7;
+  if (liquidity > 0) score += Math.min(30, Math.log10(Math.max(1, liquidity)) * 6);
+  score += Math.min(20, observations * 4);
+
+  // Oldest useful observation gets a modest rotation bonus so one token cannot
+  // monopolise the follow-up slot forever.
+  score += stalenessHours * 2;
+
+  return Number(score.toFixed(3));
+}
+
+function intelligenceWatchRowEligibleV1077(row, nowMs = Date.now()) {
+  const address = normalize(row?.address);
+  if (!isAddress(address)) return false;
+
+  const lastAt = safeNumber(row?.last_at || row?.captured_at);
+  if (!lastAt || nowMs - lastAt > INTELLIGENCE_WATCH_MAX_AGE_MS_V1077) return false;
+
+  const marketVerified = Number(row?.market_verified) === 1;
+  const opportunity = finiteOrNullV1076(row?.opportunity_score) ?? 0;
+  const momentum = finiteOrNullV1076(row?.momentum_score) ?? 0;
+  const confidence = finiteOrNullV1076(row?.confidence_score) ?? 0;
+  const riskVerified = Number(row?.risk_verified) === 1;
+  const risk = finiteOrNullV1076(row?.risk_score);
+  const top1 = finiteOrNullV1076(row?.top_holder_pct);
+  const top10 = finiteOrNullV1076(row?.top10_pct);
+
+  if (riskVerified && risk !== null && risk > INTELLIGENCE_WATCH_MAX_VERIFIED_RISK_V1077) return false;
+  if (top1 !== null && top1 >= INTELLIGENCE_WATCH_MAX_TOP1_PCT_V1077) return false;
+  if (top10 !== null && top10 >= INTELLIGENCE_WATCH_MAX_TOP10_PCT_V1077) return false;
+
+  // A token must have at least one meaningful reason to retain it.
+  const useful =
+    marketVerified ||
+    opportunity >= 55 ||
+    momentum >= 10 ||
+    confidence >= 65;
+
+  if (!useful) return false;
+
+  // If both market and risk are unverified, require stronger live evidence.
+  if (!marketVerified && !riskVerified && !(opportunity >= 55 && momentum >= 10)) return false;
+
+  return true;
+}
+
+async function intelligenceWatchRowsV1077(env, limit = 50) {
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) return {ok:false,status:ready.status,error:ready.error||null,rows:[]};
+
+  const safeLimit = Math.max(1, Math.min(100, Math.trunc(Number(limit) || 50)));
+
+  try {
+    const result = await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        h.address,
+        h.symbol,
+        h.captured_at,
+        h.market_verified,
+        h.market_source,
+        h.price_usd,
+        h.market_cap_usd,
+        h.liquidity_usd,
+        h.volume_24h_usd,
+        h.opportunity_score,
+        h.momentum_score,
+        h.confidence_score,
+        h.risk_verified,
+        h.risk_score,
+        h.holder_count,
+        h.top_holder_pct,
+        h.top10_pct,
+        h.launch_stage,
+        h.age_hours,
+        s.observation_count,
+        s.first_at,
+        s.last_at
+      FROM ${MARKET_HISTORY_TABLE_V1076} h
+      JOIN (
+        SELECT
+          address,
+          COUNT(*) AS observation_count,
+          MIN(captured_at) AS first_at,
+          MAX(captured_at) AS last_at
+        FROM ${MARKET_HISTORY_TABLE_V1076}
+        GROUP BY address
+      ) s
+        ON s.address = h.address
+       AND s.last_at = h.captured_at
+      ORDER BY s.last_at ASC
+      LIMIT ?
+    `).bind(safeLimit).all();
+
+    return {
+      ok:true,
+      status:'INTELLIGENCE_WATCH_ROWS_OK_V1077',
+      rows:Array.isArray(result?.results) ? result.results : []
+    };
+  } catch (error) {
+    return {
+      ok:false,
+      status:'INTELLIGENCE_WATCH_ROWS_FAILED_V1077',
+      error:errorString(error).slice(0,700),
+      rows:[]
+    };
+  }
+}
+
+async function selectIntelligenceFollowUpV1077(env, state, scheduled) {
+  const base = {
+    enabled:true,
+    version:'V1077',
+    scheduledRun:scheduled === true,
+    selectedAddress:null,
+    selectedSymbol:null,
+    selectedHistoryScore:null,
+    observationCount:0,
+    lastHistoryAt:null,
+    marketVerified:false,
+    opportunityScore:null,
+    momentumScore:null,
+    confidenceScore:null,
+    riskScore:null,
+    liquidityUsd:null,
+    matchedWatchedToken:false,
+    eligibleHistoryRows:0,
+    historyRowsConsidered:0,
+    status:null,
+    error:null,
+    externalRequestsUsed:0,
+    requestCeilingsChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramChanged:false
+  };
+
+  if (scheduled !== true) {
+    return {...base,status:'MANUAL_SCAN_NO_INTELLIGENCE_SLOT_V1077'};
+  }
+
+  const history = await intelligenceWatchRowsV1077(env, 50);
+  if (!history.ok) return {...base,status:history.status,error:history.error||null};
+
+  const nowMs = Date.now();
+  const watched = Array.isArray(state?.watchedTokens) ? state.watchedTokens : [];
+  const watchedByAddress = new Map(
+    watched
+      .map(token => [normalize(token?.address), token])
+      .filter(([address]) => isAddress(address))
+  );
+
+  const ranked = [];
+  base.historyRowsConsidered = history.rows.length;
+
+  for (const row of history.rows) {
+    if (!intelligenceWatchRowEligibleV1077(row, nowMs)) continue;
+
+    const address = normalize(row?.address);
+    const token = watchedByAddress.get(address);
+    if (!token) continue;
+
+    const terminal = terminalPriorityRejectFromWatched(token);
+    const excluded = preMarketExcludedToken(token);
+    if (terminal?.terminal === true || excluded?.excluded === true) continue;
+
+    ranked.push({
+      row,
+      token,
+      score:intelligenceWatchRowScoreV1077(row, nowMs)
+    });
+  }
+
+  base.eligibleHistoryRows = ranked.length;
+  ranked.sort((a,b) =>
+    (b.score - a.score) ||
+    (safeNumber(a?.row?.last_at) - safeNumber(b?.row?.last_at))
+  );
+
+  const selected = ranked[0] || null;
+  if (!selected) {
+    return {...base,status:'NO_ELIGIBLE_PERSISTENT_INTELLIGENCE_TOKEN_V1077'};
+  }
+
+  return {
+    ...base,
+    status:'INTELLIGENCE_FOLLOW_UP_SELECTED_V1077',
+    selectedAddress:normalize(selected?.token?.address),
+    selectedSymbol:
+      selected?.token?.metadata?.symbol ||
+      selected?.token?.symbol ||
+      selected?.row?.symbol ||
+      null,
+    selectedHistoryScore:selected.score,
+    observationCount:safeNumber(selected?.row?.observation_count),
+    lastHistoryAt:safeNumber(selected?.row?.last_at)||null,
+    marketVerified:Number(selected?.row?.market_verified)===1,
+    opportunityScore:finiteOrNullV1076(selected?.row?.opportunity_score),
+    momentumScore:finiteOrNullV1076(selected?.row?.momentum_score),
+    confidenceScore:finiteOrNullV1076(selected?.row?.confidence_score),
+    riskScore:Number(selected?.row?.risk_verified)===1
+      ? finiteOrNullV1076(selected?.row?.risk_score)
+      : null,
+    liquidityUsd:Number(selected?.row?.market_verified)===1
+      ? finiteOrNullV1076(selected?.row?.liquidity_usd)
+      : null,
+    matchedWatchedToken:true,
+    token:selected.token
+  };
+}
+
+async function intelligenceWatchlistStatusV1077(env) {
+  const base = {
+    agent:'ChainVanta',
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:'INTELLIGENCE_WATCHLIST_STATUS_V1077',
+    success:false,
+    readOnly:true,
+    sourceTable:MARKET_HISTORY_TABLE_V1076,
+    maximumFollowUpsPerScheduledScan:1,
+    maximumFreshLaunchPressureForSlot:INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077,
+    externalRequestsUsed:0
+  };
+
+  const history = await intelligenceWatchRowsV1077(env, 100);
+  if (!history.ok) {
+    return {...base,status:history.status,error:history.error||null,timestamp:now()};
+  }
+
+  const nowMs = Date.now();
+  const eligible = history.rows
+    .filter(row => intelligenceWatchRowEligibleV1077(row, nowMs))
+    .map(row => ({
+      address:normalize(row?.address),
+      symbol:row?.symbol||null,
+      observations:safeNumber(row?.observation_count),
+      firstAt:safeNumber(row?.first_at)||null,
+      lastAt:safeNumber(row?.last_at)||null,
+      marketVerified:Number(row?.market_verified)===1,
+      priceUsd:Number(row?.market_verified)===1 ? finiteOrNullV1076(row?.price_usd) : null,
+      liquidityUsd:Number(row?.market_verified)===1 ? finiteOrNullV1076(row?.liquidity_usd) : null,
+      opportunityScore:finiteOrNullV1076(row?.opportunity_score),
+      momentumScore:finiteOrNullV1076(row?.momentum_score),
+      confidenceScore:finiteOrNullV1076(row?.confidence_score),
+      riskScore:Number(row?.risk_verified)===1 ? finiteOrNullV1076(row?.risk_score) : null,
+      topHolderPct:finiteOrNullV1076(row?.top_holder_pct),
+      top10Pct:finiteOrNullV1076(row?.top10_pct),
+      retentionScore:intelligenceWatchRowScoreV1077(row,nowMs)
+    }))
+    .sort((a,b) => (b.retentionScore-a.retentionScore) || (safeNumber(a.lastAt)-safeNumber(b.lastAt)))
+    .slice(0,20);
+
+  return {
+    ...base,
+    success:true,
+    status:'INTELLIGENCE_WATCHLIST_STATUS_OK_V1077',
+    historyTokensConsidered:history.rows.length,
+    eligibleRetainedTokens:eligible.length,
+    retained:eligible,
+    note:'Read-only. Eligibility does not mean BUY or Telegram qualification. It only identifies useful tokens for repeated historical observation.',
+    timestamp:now()
+  };
+}
+
+
 /* ============================================================
    V1076 — PERSISTENT COMPACT D1 MARKET HISTORY — PHASE 1
    ============================================================
@@ -186481,6 +186859,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await marketHistoryTokenV1076(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/intelligence-watchlist-status"
+  ) {
+    return jsonResponse(
+      await intelligenceWatchlistStatusV1077(env)
     );
   }
 
