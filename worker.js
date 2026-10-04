@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1132"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1133"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -192533,6 +192533,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-exact-pool-continuity-status"
+  ) {
+    return jsonResponse(
+      await liveExactPoolContinuityStatusV1133(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -206030,6 +206039,206 @@ async function livePromotionEvidenceProvenanceStatusV1132(env, url){
       bootstrap:"possiblePrePromotionBootstrapGap is diagnostic suspicion only; V1132 does not claim a circular dependency until runtime reachability is proven."
     },
     note:"V1132 is read-only. It adds zero external provider/RPC requests, changes no thresholds, does not alter promotion, and does not mutate Telegram or production behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1133: read-only exact-pool state continuity diagnostic.
+// Traces each near-miss token across the current priority snapshot, directional
+// exact-pool watch, canonical pool registry, prior exact-pool completion state,
+// launchpad metadata, and persisted flow history. This is diagnostic only:
+// no provider/RPC calls, no threshold changes, no state writes, no Telegram.
+async function liveExactPoolContinuityStatusV1133(env, url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const [priority, nearMiss, stateRead] = await Promise.all([
+    livePriorityStatusV1108(env),
+    livePromotionNearMissStatusV1125(env),
+    readState(env)
+  ]);
+  const state=stateRead?.state||{};
+  const priorityRows=Array.isArray(priority?.allCandidates)?priority.allCandidates:[];
+  const nearRows=Array.isArray(nearMiss?.allNonDominantCandidates)
+    ? nearMiss.allNonDominantCandidates
+    : (Array.isArray(nearMiss?.watchCandidates)?nearMiss.watchCandidates:[]);
+  let selected=nearRows.filter(r=>
+    r?.nearMissTier==="TIER_1_MATURING_V1125" ||
+    r?.nearMissTier==="TIER_1_ONE_HARD_GATE_V1125" ||
+    r?.nearMissTier==="PROMOTION_READY_V1125"
+  );
+  if(isAddress(requested)) selected=selected.filter(r=>normalize(r?.address)===requested);
+  else selected=selected.slice(0,6);
+
+  const base={
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_EXACT_POOL_CONTINUITY_STATUS_V1133",
+    success:true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    requestedToken:isAddress(requested)?requested:null,
+    candidatesRequested:selected.length
+  };
+  if(!selected.length) return {...base,success:false,status:"NO_CANDIDATES_TO_TRACE_V1133",candidates:[],timestamp:now()};
+
+  const rawWatchEntries=Object.values(
+    state?.directionalExactPoolWatchV551?.entries && typeof state.directionalExactPoolWatchV551.entries==="object"
+      ? state.directionalExactPoolWatchV551.entries : {}
+  );
+  const registry=state?.poolRegistry && typeof state.poolRegistry==="object" ? state.poolRegistry : {};
+  const quoteSupported=q=>[ZERO,CANONICAL_WETH_V179,CANONICAL_USDG_V179].includes(normalize(q||""));
+  const results=[];
+
+  for(const candidate of selected){
+    const address=normalize(candidate?.address||"");
+    if(!isAddress(address)) continue;
+    const pRow=priorityRows.find(r=>normalize(r?.address||"")===address)||null;
+    const currentIdentity=priorityLiveExactPoolIdentityV1112(state,address);
+    const priorCompletion=exactPoolIdentityFromPriorCompletionV465(state,address);
+    const completionRaw=state?.completeExactPoolCompletionV460?.[address]||null;
+    const watched=Array.isArray(state?.watchedTokens)
+      ? state.watchedTokens.find(r=>normalize(r?.address||r?.token?.address||"")===address)||null
+      : null;
+    const launchpadPoolId=normalize(watched?.token?.launchpadV215?.v4PoolId||"");
+    const launchpadVerified=watched?.token?.launchpadV215?.v4PoolVerified===true && /^0x[a-f0-9]{64}$/.test(launchpadPoolId);
+
+    const watchRows=rawWatchEntries.filter(r=>normalize(r?.tokenAddress||"")===address).map(r=>{
+      const poolId=normalize(r?.poolId||"");
+      const quote=normalize(r?.quoteTokenAddress||"");
+      const reg=registry?.[poolId]||null;
+      const c0=normalize(reg?.currency0||reg?.token0||"");
+      const c1=normalize(reg?.currency1||reg?.token1||"");
+      const registryContainsToken=c0===address||c1===address;
+      const registryQuote=registryContainsToken?(c0===address?c1:c0):null;
+      return {
+        poolId:/^0x[a-f0-9]{64}$/.test(poolId)?poolId:null,
+        quoteTokenAddress:isAddress(quote)?quote:null,
+        quoteSupported:quoteSupported(quote),
+        registryPresent:!!reg,
+        registryContainsToken,
+        registryQuoteTokenAddress:registryQuote,
+        registryQuoteSupported:quoteSupported(registryQuote),
+        lastQualifiedAt:safeNumber(r?.lastQualifiedAt)||null,
+        lastCollectedAt:safeNumber(r?.lastCollectedAt)||null,
+        successfulRanges:safeNumber(r?.successfulRanges),
+        exactUsdTrades:safeNumber(r?.exactUsdTrades)
+      };
+    });
+
+    const registryMatches=Object.entries(registry).map(([rawPoolId,reg])=>{
+      const poolId=normalize(rawPoolId||"");
+      const c0=normalize(reg?.currency0||reg?.token0||"");
+      const c1=normalize(reg?.currency1||reg?.token1||"");
+      if(c0!==address&&c1!==address) return null;
+      const quote=c0===address?c1:c0;
+      return {
+        poolId:/^0x[a-f0-9]{64}$/.test(poolId)?poolId:null,
+        currency0:isAddress(c0)?c0:null,currency1:isAddress(c1)?c1:null,
+        quoteTokenAddress:isAddress(quote)?quote:null,
+        quoteSupported:quoteSupported(quote),
+        blockNumber:blockNumberFromAnyV180(reg?.blockNumber??reg?.initializeBlock??reg?.createdBlock)||null
+      };
+    }).filter(Boolean).slice(0,12);
+
+    const hist=await accumulationRowsForAddressV1078(env,address,288);
+    const histRows=(Array.isArray(hist?.rows)?hist.rows:[])
+      .filter(r=>normalize(r?.address)===address)
+      .sort((a,b)=>safeNumber(a?.captured_at)-safeNumber(b?.captured_at));
+    const recentFlow=histRows.slice(-12).map(r=>({
+      capturedAt:safeNumber(r?.captured_at)||null,
+      flowVerified:Number(r?.flow_verified)===1,
+      flowStatus:r?.flow_status||null,
+      flowPoolCount:safeNumber(r?.flow_pool_count),
+      flowRecordCount:safeNumber(r?.flow_record_count),
+      trades1h:finiteOrNullV1076(r?.flow_1h_trades)
+    }));
+
+    const priorityIdentity=pRow?.exactPoolLiveIdentityV1112||null;
+    const priorityAvailable=!!(priorityIdentity?.verified===true||priorityIdentity?.poolId);
+    const nearMissAvailable=candidate?.exactPoolIdentityAvailable===true;
+    const currentAvailable=!!(currentIdentity?.verified===true||currentIdentity?.poolId);
+    const watchValid=watchRows.filter(r=>r.poolId&&r.quoteSupported&&(r.registryContainsToken?r.registryQuoteSupported:true));
+    const supportedRegistry=registryMatches.filter(r=>r.poolId&&r.quoteSupported);
+
+    const poolIds=[
+      priorityIdentity?.poolId,currentIdentity?.poolId,priorCompletion?.poolId,
+      completionRaw?.poolId,launchpadVerified?launchpadPoolId:null,
+      ...watchRows.map(r=>r.poolId),...supportedRegistry.map(r=>r.poolId)
+    ].map(normalize).filter(v=>/^0x[a-f0-9]{64}$/.test(v));
+    const uniquePoolIds=[...new Set(poolIds)];
+
+    let assessment="NO_EXACT_POOL_EVIDENCE_CURRENTLY_V1133";
+    if(currentAvailable&&priorityAvailable&&nearMissAvailable) assessment="EXACT_POOL_CONTINUITY_PRESENT_V1133";
+    else if(priorityAvailable!==currentAvailable||nearMissAvailable!==currentAvailable) assessment="SNAPSHOT_STATE_DIVERGENCE_V1133";
+    else if(!currentAvailable&&watchRows.length>0) assessment="WATCH_PRESENT_BUT_CURRENT_IDENTITY_INVALID_V1133";
+    else if(!currentAvailable&&supportedRegistry.length>0) assessment="REGISTRY_PRESENT_WATCH_MISSING_V1133";
+    else if(!currentAvailable&&priorCompletion?.verified===true) assessment="PRIOR_COMPLETION_PRESENT_CURRENT_WATCH_MISSING_V1133";
+    else if(currentAvailable) assessment="CURRENT_EXACT_POOL_PRESENT_V1133";
+
+    const likelyCause = assessment==="SNAPSHOT_STATE_DIVERGENCE_V1133"
+      ? "CURRENT_PRIORITY_AND_STATE_SNAPSHOTS_DISAGREE"
+      : assessment==="WATCH_PRESENT_BUT_CURRENT_IDENTITY_INVALID_V1133"
+        ? "DIRECTIONAL_WATCH_ROW_EXISTS_BUT_FAILS_CURRENT_IDENTITY_VALIDATION"
+        : assessment==="REGISTRY_PRESENT_WATCH_MISSING_V1133"
+          ? "CANONICAL_POOL_REGISTRY_HAS_SUPPORTED_POOL_BUT_DIRECTIONAL_WATCH_HAS_NO_USABLE_ROW"
+          : assessment==="PRIOR_COMPLETION_PRESENT_CURRENT_WATCH_MISSING_V1133"
+            ? "PRIOR_COMPLETION_POOL_EXISTS_BUT_CURRENT_DIRECTIONAL_WATCH_DOES_NOT_RETAIN_IT"
+            : assessment==="NO_EXACT_POOL_EVIDENCE_CURRENTLY_V1133"
+              ? "NO_CURRENT_SUPPORTED_EXACT_POOL_SOURCE"
+              : "NO_CONTINUITY_FAULT_VISIBLE";
+
+    results.push({
+      address,symbol:candidate?.symbol||pRow?.symbol||null,rank:candidate?.rank??null,
+      storedObservations:safeNumber(candidate?.storedObservations),assessment,likelyCause,
+      snapshots:{
+        nearMissExactPoolAvailable:nearMissAvailable,
+        priorityExactPoolAvailable:priorityAvailable,
+        currentStateExactPoolAvailable:currentAvailable,
+        samePoolAcrossPriorityAndCurrent:priorityAvailable&&currentAvailable&&normalize(priorityIdentity?.poolId)===normalize(currentIdentity?.poolId)
+      },
+      prioritySnapshot:priorityIdentity?{
+        verified:priorityIdentity?.verified===true,poolId:priorityIdentity?.poolId||null,
+        source:priorityIdentity?.source||null,lastQualifiedAt:safeNumber(priorityIdentity?.lastQualifiedAt)||null,
+        lastCollectedAt:safeNumber(priorityIdentity?.lastCollectedAt)||null
+      }:null,
+      currentStateIdentity:currentIdentity?{
+        verified:currentIdentity?.verified===true,poolId:currentIdentity?.poolId||null,
+        source:currentIdentity?.source||null,lastQualifiedAt:safeNumber(currentIdentity?.lastQualifiedAt)||null,
+        lastCollectedAt:safeNumber(currentIdentity?.lastCollectedAt)||null
+      }:null,
+      directionalWatch:{entries:watchRows.length,validIdentityRows:watchValid.length,rows:watchRows.slice(0,12)},
+      canonicalPoolRegistry:{matchingPools:registryMatches.length,supportedQuotePools:supportedRegistry.length,rows:registryMatches},
+      priorCompletion:priorCompletion?{verified:true,poolId:priorCompletion?.poolId||null,source:priorCompletion?.status||priorCompletion?.sourceV465||null}:null,
+      rawCompletionPointer:completionRaw?{poolId:normalize(completionRaw?.poolId)||null,status:completionRaw?.status||null,completedAt:safeNumber(completionRaw?.completedAt||completionRaw?.updatedAt)||null}:null,
+      launchpadIdentity:{verified:launchpadVerified,poolId:launchpadVerified?launchpadPoolId:null},
+      uniquePoolIdsObserved:uniquePoolIds,
+      conflictingPoolIds:uniquePoolIds.length>1,
+      persistedFlow:{rowsLoaded:histRows.length,verifiedRows:histRows.filter(r=>Number(r?.flow_verified)===1).length,recentRows:recentFlow},
+      nextAction:assessment==="EXACT_POOL_CONTINUITY_PRESENT_V1133"||assessment==="CURRENT_EXACT_POOL_PRESENT_V1133"
+        ? "NO_POOL_CONTINUITY_FIX_REQUIRED_V1133"
+        : assessment==="SNAPSHOT_STATE_DIVERGENCE_V1133"
+          ? "TRACE_STATE_READ_TIMING_AND_PERSISTENCE_V1133"
+          : assessment==="REGISTRY_PRESENT_WATCH_MISSING_V1133"||assessment==="PRIOR_COMPLETION_PRESENT_CURRENT_WATCH_MISSING_V1133"
+            ? "TRACE_DIRECTIONAL_WATCH_REGISTRATION_RETENTION_V1133"
+            : assessment==="WATCH_PRESENT_BUT_CURRENT_IDENTITY_INVALID_V1133"
+              ? "TRACE_WATCH_IDENTITY_VALIDATION_FIELDS_V1133"
+              : "WAIT_FOR_OR_TRACE_EXACT_POOL_DISCOVERY_V1133"
+    });
+  }
+
+  const counts={};
+  for(const r of results) counts[r.assessment]=(counts[r.assessment]||0)+1;
+  const continuityFaults=results.filter(r=>!["EXACT_POOL_CONTINUITY_PRESENT_V1133","CURRENT_EXACT_POOL_PRESENT_V1133"].includes(r.assessment)).length;
+  return {
+    ...base,success:results.length>0,
+    status:continuityFaults>0?"EXACT_POOL_CONTINUITY_REVIEW_NEEDED_V1133":"EXACT_POOL_CONTINUITY_OK_V1133",
+    summary:{continuityFaults,statusCounts:counts},candidates:results,
+    interpretation:{
+      snapshots:"Compares the near-miss/priority snapshot with a fresh read of the same persisted ChainVanta state so transient snapshot disagreement is visible.",
+      directionalWatch:"Shows exact-pool watch rows used by V1112 and whether their token/quote/registry fields can validate today.",
+      registry:"Shows supported canonical registry pools containing the token even when the directional watch is missing.",
+      priorCompletion:"Shows whether older verified exact-pool completion state can still prove an identity even if the current watch does not retain it."
+    },
+    note:"V1133 is read-only. It performs no external provider/RPC requests, changes no thresholds or promotion logic, writes no state, and does not mutate Telegram.",
     timestamp:now()
   };
 }
