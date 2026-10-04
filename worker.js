@@ -1,16 +1,14 @@
 /**
- * ChainVanta — V1152
- * V1152: monotonic cursor protection through same-scan watch refresh/re-registration.
- * - V1151 proved the dedicated watch state hydrates correctly, but a later same-scan registration
- *   path could still replace a completed V551 cursor with older registration/recovery state.
- * - Captures the hydrated exact-pool watch progress at scan start and reapplies only monotonic
- *   progress fields after V551 watch registration/handoff refresh.
- * - For the same token+exact-pool key, lastCollectedBlock/successfulRanges/exactUsdTrades/
- *   returnedLogs/lastCollectedAt/coverageEndBlock can never move backwards during the scan.
- * - Metadata, identity, qualification, activity, promotion and registration-source refreshes remain
- *   free to update normally; this protects only already-proven collector progress.
- * - Adds zero provider/RPC requests and changes no request ceilings, collection slots, scoring,
- *   promotion, watch capacity, risk, or Telegram behavior.
+ * ChainVanta — V1153
+ * V1153: final collector-boundary cursor floor.
+ * - V1152 protected hydrated progress after watch registration, but the final V551 collector could
+ *   still see a stale same-scan watch copy after later scanner work.
+ * - Immediately before every V551 selection, reapplies the hydrated V1151 progress snapshot to the
+ *   authoritative watch root, then selects from that corrected root.
+ * - This protects both scheduling priority and the fromBlock calculation: a completed exact-pool
+ *   range cannot be requested again from an older cursor for the same token+pool.
+ * - Uses the existing in-memory snapshot only; adds zero KV/provider/RPC requests and changes no
+ *   request ceilings, collection slots, scoring, promotion, watch capacity, risk, or Telegram behavior.
  *
  * Historical source-lineage changelog follows below.
  *
@@ -9741,7 +9739,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1152"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1153"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -92928,8 +92926,27 @@ async function advanceDirectionalWatchV551({
   wethUsdGReference,
   env,
   excludedPoolIdsV558 = null,
-  preferredPoolIdV561 = null
+  preferredPoolIdV561 = null,
+  cursorFloorSnapshotV1153 = null
 }) {
+  /*
+   * V1153: last possible protection point before scheduling and fromBlock are
+   * derived. Reapply the hydrated progress floor here so later same-scan work
+   * cannot make V551 select or request from an older cursor.
+   */
+  const finalCollectorBoundaryProtectionV1153 =
+    cursorFloorSnapshotV1153
+      ? reapplyDirectionalWatchProgressV1152(
+          state,
+          cursorFloorSnapshotV1153
+        )
+      : {
+          enabled:false,
+          status:"NO_CURSOR_FLOOR_SNAPSHOT_V1153",
+          restored:0,
+          externalRequestsAdded:0
+        };
+
   const root = pruneDirectionalWatchV551(state);
   const candidate = selectDirectionalWatchCandidateV551(
     state,
@@ -92965,6 +92982,12 @@ async function advanceDirectionalWatchV551({
     scoringChanged:false,
     qualificationChanged:false,
     telegramThresholdChanged:false,
+    finalCollectorBoundaryProtectionV1153:{
+      ...finalCollectorBoundaryProtectionV1153,
+      appliedImmediatelyBeforeSelection:true,
+      cursorFloorSnapshotCapturedAt:
+        safeNumber(cursorFloorSnapshotV1153?.capturedAt) || null
+    },
     creditEfficiencyV958:{
       validationCloudFirstForV551:true,
       validationCloudMaxBlocks:V958_VALIDATION_CLOUD_V551_MAX_BLOCKS,
@@ -122864,7 +122887,9 @@ for (
       latestNumber,
       wethUsdGReference: directionalWatchQuoteReferenceV554,
       env,
-      excludedPoolIdsV558: directionalPoolsAdvancedThisScanV558
+      excludedPoolIdsV558: directionalPoolsAdvancedThisScanV558,
+      cursorFloorSnapshotV1153:
+        directionalWatchProgressSnapshotV1152
     });
 
   if (
@@ -123039,7 +123064,9 @@ for (
         wethUsdGReference: directionalWatchQuoteReferenceV554,
         env,
         excludedPoolIdsV558: exclusionsForChunkV561,
-        preferredPoolIdV561: finishPoolIdV561
+        preferredPoolIdV561: finishPoolIdV561,
+        cursorFloorSnapshotV1153:
+          directionalWatchProgressSnapshotV1152
       });
 
     directionalCatchupChunksV554.push(extraChunkV554);
@@ -123491,6 +123518,9 @@ for (
       },
       directionalWatchMonotonicProtectionV1152:
         directionalWatchMonotonicReapplyV1152 || null,
+      finalCollectorBoundaryProtectionV1153:
+        continuousDirectionalWatchThisScanV551
+          ?.finalCollectorBoundaryProtectionV1153 || null,
       externalRequestsAdded:0,
       diagnosticStateWritesAdded:1,
       extraCollectionSlotsAdded:0,
@@ -209092,6 +209122,8 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       trace?.directionalWatchPersistenceV1151 || null,
     directionalWatchMonotonicProtectionV1152:
       trace?.directionalWatchMonotonicProtectionV1152 || null,
+    finalCollectorBoundaryProtectionV1153:
+      trace?.finalCollectorBoundaryProtectionV1153 || null,
     requestedToken:isAddress(requested)?requested:null,
     status:trace?"EXACT_POOL_FLOW_COLLECTION_CLASSIFIED_V1140":"NO_V1140_FLOW_COLLECTION_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
     trace:trace?{
@@ -209108,7 +209140,7 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
       zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
     },
-    note:"V1152 keeps V1151 durable watch-state hydration/checkpointing and reapplies hydrated V551 progress after same-scan watch registration so an identical token+pool cursor cannot move backwards. Adds zero provider/RPC requests.",
+    note:"V1153 keeps V1151/V1152 persistence protections and reapplies the hydrated cursor floor again at the final V551 collector boundary before selection and fromBlock calculation. Adds zero KV/provider/RPC requests.",
     timestamp:now()
   };
 }
