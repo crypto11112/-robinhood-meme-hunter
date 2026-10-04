@@ -1,14 +1,16 @@
 /**
- * ChainVanta — V1151
- * V1151: durable V551 directional-watch cursor persistence.
- * - Persists the compact directional exact-pool watch root immediately after V551/V554 collection.
- * - Rehydrates that dedicated watch state at the start of the next scan before reserve selection/pruning.
- * - Prevents successfulRanges/lastCollectedBlock/lastCollectedAt/exactUsdTrades from reverting when
- *   a later main-state write or handoff refresh carries older watch data.
- * - Preserves V1150 fairness: once a bootstrap watch completes its first successful range it stays
- *   out of Tier 6 on the next scan and the next oldest waiting bootstrap watch gets the turn.
- * - Adds one compact KV watch-state write per normal scan, zero provider/RPC requests, and changes
- *   no request ceilings, collection slots, scoring, promotion, watch capacity, risk, or Telegram behavior.
+ * ChainVanta — V1152
+ * V1152: monotonic cursor protection through same-scan watch refresh/re-registration.
+ * - V1151 proved the dedicated watch state hydrates correctly, but a later same-scan registration
+ *   path could still replace a completed V551 cursor with older registration/recovery state.
+ * - Captures the hydrated exact-pool watch progress at scan start and reapplies only monotonic
+ *   progress fields after V551 watch registration/handoff refresh.
+ * - For the same token+exact-pool key, lastCollectedBlock/successfulRanges/exactUsdTrades/
+ *   returnedLogs/lastCollectedAt/coverageEndBlock can never move backwards during the scan.
+ * - Metadata, identity, qualification, activity, promotion and registration-source refreshes remain
+ *   free to update normally; this protects only already-proven collector progress.
+ * - Adds zero provider/RPC requests and changes no request ceilings, collection slots, scoring,
+ *   promotion, watch capacity, risk, or Telegram behavior.
  *
  * Historical source-lineage changelog follows below.
  *
@@ -9739,7 +9741,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1151"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1152"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -26433,6 +26435,199 @@ async function hydrateDirectionalWatchStateV1151(env,state) {
       preservedMainNewer:0
     };
   }
+}
+
+
+/*
+ * V1152: same-scan registration/handoff code is allowed to refresh metadata,
+ * but already-proven V551 cursor progress must be monotonic for an identical
+ * token+exact-pool key.
+ */
+function snapshotDirectionalWatchProgressV1152(state) {
+  const root = directionalWatchRootV551(state);
+  const rows = {};
+  for (const [key,row] of Object.entries(root?.entries || {})) {
+    if (!row || typeof row !== "object") continue;
+    rows[key] = {
+      tokenAddress:normalize(row?.tokenAddress) || null,
+      poolId:normalize(row?.poolId) || null,
+      coverageStartBlock:Number.isFinite(Number(row?.coverageStartBlock))
+        ? Number(row.coverageStartBlock) : null,
+      coverageEndBlock:Number.isFinite(Number(row?.coverageEndBlock))
+        ? Number(row.coverageEndBlock) : null,
+      lastCollectedBlock:Number.isFinite(Number(row?.lastCollectedBlock))
+        ? Number(row.lastCollectedBlock) : null,
+      lastCollectedAt:safeNumber(row?.lastCollectedAt) || null,
+      successfulRanges:safeNumber(row?.successfulRanges),
+      exactUsdTrades:safeNumber(row?.exactUsdTrades),
+      returnedLogs:safeNumber(row?.returnedLogs),
+      adaptiveBlockSpan:safeNumber(row?.adaptiveBlockSpan) || null,
+      saturatedAttempts:safeNumber(row?.saturatedAttempts),
+      gapDetected:row?.gapDetected === true,
+      lastStatus:row?.lastStatus || null,
+      registeredAt:safeNumber(row?.registeredAt) || null
+    };
+  }
+  return {capturedAt:Date.now(),entries:rows};
+}
+
+function reapplyDirectionalWatchProgressV1152(state,snapshot) {
+  const root = directionalWatchRootV551(state);
+  const priorEntries =
+    snapshot?.entries && typeof snapshot.entries === "object"
+      ? snapshot.entries
+      : {};
+
+  let examined = 0;
+  let restored = 0;
+  let missingCurrent = 0;
+  let currentAlreadyNewer = 0;
+  const restoredRows = [];
+
+  for (const [key,prior] of Object.entries(priorEntries)) {
+    if (!prior || typeof prior !== "object") continue;
+    examined++;
+
+    const current = root.entries?.[key];
+    if (!current || typeof current !== "object") {
+      missingCurrent++;
+      continue;
+    }
+
+    if (
+      normalize(current?.tokenAddress) !== normalize(prior?.tokenAddress) ||
+      normalize(current?.poolId) !== normalize(prior?.poolId)
+    ) {
+      continue;
+    }
+
+    const priorBlock = Number(prior?.lastCollectedBlock);
+    const currentBlock = Number(current?.lastCollectedBlock);
+    const priorRanges = safeNumber(prior?.successfulRanges);
+    const currentRanges = safeNumber(current?.successfulRanges);
+    const priorAt = safeNumber(prior?.lastCollectedAt);
+    const currentAt = safeNumber(current?.lastCollectedAt);
+
+    const priorIsAhead = Boolean(
+      (Number.isFinite(priorBlock) && (!Number.isFinite(currentBlock) || priorBlock > currentBlock)) ||
+      (
+        Number.isFinite(priorBlock) &&
+        Number.isFinite(currentBlock) &&
+        priorBlock === currentBlock &&
+        (
+          priorRanges > currentRanges ||
+          (priorRanges === currentRanges && priorAt > currentAt)
+        )
+      )
+    );
+
+    if (!priorIsAhead) {
+      currentAlreadyNewer++;
+      continue;
+    }
+
+    const before = {
+      lastCollectedBlock:Number.isFinite(currentBlock) ? currentBlock : null,
+      successfulRanges:currentRanges,
+      lastCollectedAt:currentAt || null
+    };
+
+    if (Number.isFinite(priorBlock)) current.lastCollectedBlock = priorBlock;
+
+    const priorCoverageEnd = Number(prior?.coverageEndBlock);
+    const currentCoverageEnd = Number(current?.coverageEndBlock);
+    if (
+      Number.isFinite(priorCoverageEnd) &&
+      (!Number.isFinite(currentCoverageEnd) || priorCoverageEnd > currentCoverageEnd)
+    ) {
+      current.coverageEndBlock = priorCoverageEnd;
+    }
+
+    const priorCoverageStart = Number(prior?.coverageStartBlock);
+    const currentCoverageStart = Number(current?.coverageStartBlock);
+    if (
+      Number.isFinite(priorCoverageStart) &&
+      (!Number.isFinite(currentCoverageStart) || priorCoverageStart < currentCoverageStart)
+    ) {
+      current.coverageStartBlock = priorCoverageStart;
+    }
+
+    current.successfulRanges = Math.max(
+      safeNumber(current?.successfulRanges),
+      priorRanges
+    );
+    current.exactUsdTrades = Math.max(
+      safeNumber(current?.exactUsdTrades),
+      safeNumber(prior?.exactUsdTrades)
+    );
+    current.returnedLogs = Math.max(
+      safeNumber(current?.returnedLogs),
+      safeNumber(prior?.returnedLogs)
+    );
+    current.lastCollectedAt = Math.max(
+      safeNumber(current?.lastCollectedAt),
+      priorAt
+    ) || null;
+
+    if (safeNumber(prior?.adaptiveBlockSpan) > 0) {
+      current.adaptiveBlockSpan = safeNumber(prior.adaptiveBlockSpan);
+    }
+    current.saturatedAttempts = Math.max(
+      safeNumber(current?.saturatedAttempts),
+      safeNumber(prior?.saturatedAttempts)
+    );
+    if (prior?.gapDetected === true) current.gapDetected = true;
+
+    if (
+      prior?.lastStatus &&
+      (
+        String(current?.lastStatus || "").includes("REGISTERED_FORWARD_ONLY") ||
+        String(current?.lastStatus || "").includes("RE_REGISTERED_PROVEN_CANONICAL_POOL_CONTINUITY")
+      )
+    ) {
+      current.lastStatus = prior.lastStatus;
+    }
+
+    const currentRegisteredAt = safeNumber(current?.registeredAt);
+    const priorRegisteredAt = safeNumber(prior?.registeredAt);
+    if (priorRegisteredAt > 0) {
+      current.registeredAt =
+        currentRegisteredAt > 0
+          ? Math.min(currentRegisteredAt, priorRegisteredAt)
+          : priorRegisteredAt;
+    }
+
+    current.monotonicCursorProtectedV1152 = true;
+    current.monotonicCursorProtectedAtV1152 = Date.now();
+    restored++;
+
+    restoredRows.push({
+      tokenAddress:normalize(current?.tokenAddress) || null,
+      poolId:normalize(current?.poolId) || null,
+      before,
+      restoredTo:{
+        lastCollectedBlock:current?.lastCollectedBlock ?? null,
+        successfulRanges:safeNumber(current?.successfulRanges),
+        lastCollectedAt:safeNumber(current?.lastCollectedAt) || null
+      }
+    });
+  }
+
+  if (restored > 0) root.updatedAt = Date.now();
+
+  return {
+    enabled:true,
+    capturedAt:safeNumber(snapshot?.capturedAt) || null,
+    appliedAt:Date.now(),
+    examined,
+    restored,
+    missingCurrent,
+    currentAlreadyNewer,
+    sameExactPoolOnly:true,
+    restoredRows:restoredRows.slice(0,12),
+    externalRequestsAdded:0,
+    requestCeilingsChanged:false
+  };
 }
 
 async function persistExactPoolFlowTraceV1149(env, trace) {
@@ -109701,6 +109896,9 @@ async function scan(
       state
     );
 
+  const directionalWatchProgressSnapshotV1152 =
+    snapshotDirectionalWatchProgressV1152(state);
+
   /*
    * V664: reset only the diagnostic trace for this scanner run. It is persisted
    * later in the normal existing state write and does not consume a request.
@@ -121443,6 +121641,15 @@ for (
         bestVerifiedWethUsdGReferenceV195(state)
     );
 
+  const directionalWatchMonotonicReapplyV1152 =
+    reapplyDirectionalWatchProgressV1152(
+      state,
+      directionalWatchProgressSnapshotV1152
+    );
+
+  directionalWatchRegistrationV551.v1152MonotonicCursorProtection =
+    directionalWatchMonotonicReapplyV1152;
+
   directionalWatchRegistrationV551.v1145DurableFirstRangeRecovery = {
     enabled:true,
     considered:directionalDurableCohortRecoveryCandidatesV1145.length,
@@ -123282,6 +123489,8 @@ for (
         key:DIRECTIONAL_WATCH_STATE_KEY_V1151,
         monotonicCursorMerge:true
       },
+      directionalWatchMonotonicProtectionV1152:
+        directionalWatchMonotonicReapplyV1152 || null,
       externalRequestsAdded:0,
       diagnosticStateWritesAdded:1,
       extraCollectionSlotsAdded:0,
@@ -208881,6 +209090,8 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
     dedicatedTraceReadErrorV1149:dedicatedReadV1149?.error || null,
     directionalWatchPersistenceV1151:
       trace?.directionalWatchPersistenceV1151 || null,
+    directionalWatchMonotonicProtectionV1152:
+      trace?.directionalWatchMonotonicProtectionV1152 || null,
     requestedToken:isAddress(requested)?requested:null,
     status:trace?"EXACT_POOL_FLOW_COLLECTION_CLASSIFIED_V1140":"NO_V1140_FLOW_COLLECTION_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
     trace:trace?{
@@ -208897,7 +209108,7 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
       zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
     },
-    note:"V1151 keeps V1149 diagnostic persistence and additionally checkpoints the compact V551 directional-watch cursor to a dedicated KV key after collection, then hydrates it before the next scan. Adds one compact watch-state KV write per normal scan and zero provider/RPC requests.",
+    note:"V1152 keeps V1151 durable watch-state hydration/checkpointing and reapplies hydrated V551 progress after same-scan watch registration so an identical token+pool cursor cannot move backwards. Adds zero provider/RPC requests.",
     timestamp:now()
   };
 }
