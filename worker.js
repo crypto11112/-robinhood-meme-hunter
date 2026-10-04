@@ -1,4 +1,29 @@
 /**
+ * ChainVanta — V1102
+ * WEAKENING / EXIT INTELLIGENCE — SHADOW V1
+ * Builds directly from deployed V1101.
+ * - Adds the sell-side lifecycle layer after accumulation + breakout.
+ * - Reuses ONLY stored D1 history and the proven V1092/V1101 intelligence:
+ *   verified V212 flow, verified V438/provider price sequence, Momentum,
+ *   accumulation/distribution and existing safety warnings.
+ * - No new RPC/provider calls and no scanner-budget increase.
+ * - Conservative states:
+ *     BUILDING_WEAKENING_HISTORY
+ *     HEALTHY_OR_UNCONFIRMED
+ *     WEAKENING
+ *     DISTRIBUTION
+ *     BREAKDOWN_WATCH
+ *     EXIT_RISK
+ *     CAUTION
+ * - A large price fall with thin flow can become BREAKDOWN_WATCH but NOT
+ *   EXIT_RISK; EXIT_RISK requires stronger corroboration such as material
+ *   verified flow/distribution or a verified safety failure.
+ * - Adds /weakening-status and /weakening?token=0x...
+ * - Shadow/read-only only. No Opportunity/Momentum/Confidence/Risk mutation,
+ *   no Telegram qualification/call changes, and no automatic sell command.
+ */
+
+/**
  * ChainVanta — V1101
  * BREAKOUT PRICE-BASELINE INTEGRITY FIX
  * Builds directly from deployed V1100.
@@ -9407,7 +9432,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1101"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1102"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -188360,9 +188385,12 @@ function breakoutFromRowsV1094(address, rows) {
       baselineAt:firstChanged?.captured_at || null,
       latestChangedAt:latestChanged?.captured_at || null,
       firstChangedAt:firstChanged?.captured_at || null,
-      baselineUsd:firstPrice,
-      firstUsd:firstPrice,
-      latestUsd:latestPrice,
+      baselineUsd:
+        firstChanged ? firstPrice : null,
+      firstUsd:
+        firstChanged ? firstPrice : null,
+      latestUsd:
+        latestChanged ? latestPrice : null,
       changePct:
         verifiedChangedPricePct === null
           ? null
@@ -188610,6 +188638,444 @@ async function breakoutStatusV1094(env) {
     ).length,
     tokens:results,
     note:"Shadow only. Breakout requires materially sized verified V212 flow plus genuinely changed verified provider or V438 on-chain execution-price evidence; stale/cache repeats do not count.",
+    timestamp:now()
+  };
+}
+
+
+/* ============================================================
+   V1102 — WEAKENING / EXIT INTELLIGENCE — SHADOW V1
+   ============================================================ */
+function weakeningFromRowsV1102(address, rows) {
+  const normalizedAddress = normalize(address);
+  const ordered = (Array.isArray(rows) ? rows : [])
+    .filter(row => normalize(row?.address) === normalizedAddress)
+    .sort((a,b) => safeNumber(a?.captured_at) - safeNumber(b?.captured_at));
+
+  const breakout = breakoutFromRowsV1094(normalizedAddress, ordered);
+  const accumulation =
+    flowAwareAccumulationFromRowsV1092(normalizedAddress, ordered);
+
+  const latestFlow = accumulation?.flow?.latest1h || null;
+  const latestNetUsd = finiteOrNullV1076(latestFlow?.netUsd);
+  const latestBuyPressurePct =
+    finiteOrNullV1076(latestFlow?.buyPressurePct);
+  const latestTrades = finiteOrNullV1076(latestFlow?.trades);
+  const latestGrossUsd =
+    latestFlow
+      ? (
+          Math.max(0, safeNumber(latestFlow?.buyUsd)) +
+          Math.max(0, safeNumber(latestFlow?.sellUsd))
+        )
+      : null;
+
+  const priceChangePct =
+    finiteOrNullV1076(breakout?.verifiedPrice?.changePct);
+  const priceEvidenceReady =
+    breakout?.marketEvidenceReady === true;
+  const materialFlowReady =
+    breakout?.flowEvidenceReady === true;
+
+  const accumulationState =
+    accumulation?.accumulationState || null;
+
+  const longitudinalDistribution =
+    accumulationState === "DISTRIBUTION";
+
+  const latestFlowNegative =
+    latestNetUsd !== null && latestNetUsd < 0;
+
+  const latestFlowStronglyNegative =
+    latestFlowNegative &&
+    latestBuyPressurePct !== null &&
+    latestBuyPressurePct <= 35;
+
+  const latestFlowMaterialV1102 =
+    latestTrades !== null &&
+    latestTrades >= 5 &&
+    latestGrossUsd !== null &&
+    latestGrossUsd >= 250;
+
+  const momentumLatest =
+    finiteOrNullV1076(breakout?.momentum?.latest);
+  const momentumDelta =
+    finiteOrNullV1076(breakout?.momentum?.delta);
+  const momentumWeakening =
+    momentumDelta !== null && momentumDelta <= -15;
+
+  const verifiedPriceBreakdown =
+    priceEvidenceReady &&
+    priceChangePct !== null &&
+    priceChangePct <= -7;
+
+  const severePriceBreakdown =
+    priceEvidenceReady &&
+    priceChangePct !== null &&
+    priceChangePct <= -20;
+
+  const verifiedSafetyFailure =
+    breakout?.safetyWarning === true;
+
+  const warnings = [];
+  const reasons = [];
+
+  let weakeningScore = 0;
+
+  if (verifiedPriceBreakdown) {
+    weakeningScore += severePriceBreakdown ? 35 : 24;
+    reasons.push(
+      severePriceBreakdown
+        ? "SEVERE_VERIFIED_PRICE_BREAKDOWN"
+        : "VERIFIED_PRICE_BREAKDOWN"
+    );
+  } else if (
+    priceEvidenceReady &&
+    priceChangePct !== null &&
+    priceChangePct <= -3
+  ) {
+    weakeningScore += 14;
+    reasons.push("VERIFIED_PRICE_WEAKENING");
+  } else if (
+    priceEvidenceReady &&
+    priceChangePct !== null &&
+    priceChangePct > 0
+  ) {
+    weakeningScore -= 8;
+  }
+
+  if (longitudinalDistribution) {
+    weakeningScore += 25;
+    reasons.push("LONGITUDINAL_DISTRIBUTION");
+  }
+
+  if (latestFlowStronglyNegative) {
+    weakeningScore += latestFlowMaterialV1102 ? 22 : 12;
+    reasons.push(
+      latestFlowMaterialV1102
+        ? "MATERIAL_VERIFIED_SELL_FLOW"
+        : "LATEST_VERIFIED_SELL_FLOW"
+    );
+  } else if (latestFlowNegative) {
+    weakeningScore += latestFlowMaterialV1102 ? 14 : 7;
+    reasons.push("LATEST_VERIFIED_NET_FLOW_NEGATIVE");
+  } else if (latestNetUsd !== null && latestNetUsd > 0) {
+    weakeningScore -= 6;
+  }
+
+  if (momentumWeakening) {
+    weakeningScore += 12;
+    reasons.push("MOMENTUM_WEAKENING");
+  } else if (
+    momentumDelta !== null &&
+    momentumDelta >= 15
+  ) {
+    // Momentum improvement cannot erase a verified collapse, but it can reduce
+    // weak deterioration evidence when price/flow do not corroborate it.
+    weakeningScore -= verifiedPriceBreakdown ? 0 : 6;
+  }
+
+  if (verifiedSafetyFailure) {
+    weakeningScore += 30;
+    reasons.push("VERIFIED_SAFETY_FAILURE");
+  }
+
+  weakeningScore = clampScoreV1078(weakeningScore);
+
+  const anyVerifiedWeakeningEvidence =
+    verifiedPriceBreakdown ||
+    longitudinalDistribution ||
+    latestFlowNegative ||
+    momentumWeakening ||
+    verifiedSafetyFailure;
+
+  const evidenceReady =
+    priceEvidenceReady ||
+    materialFlowReady ||
+    verifiedSafetyFailure;
+
+  let weakeningState = "BUILDING_WEAKENING_HISTORY";
+
+  if (verifiedSafetyFailure) {
+    weakeningState = "CAUTION";
+  } else if (
+    severePriceBreakdown &&
+    (
+      materialFlowReady &&
+      (
+        longitudinalDistribution ||
+        latestFlowNegative
+      )
+    )
+  ) {
+    weakeningState = "EXIT_RISK";
+  } else if (
+    verifiedPriceBreakdown &&
+    (
+      latestFlowNegative ||
+      longitudinalDistribution
+    )
+  ) {
+    weakeningState =
+      materialFlowReady
+        ? "EXIT_RISK"
+        : "BREAKDOWN_WATCH";
+  } else if (
+    severePriceBreakdown
+  ) {
+    weakeningState = "BREAKDOWN_WATCH";
+  } else if (
+    materialFlowReady &&
+    longitudinalDistribution
+  ) {
+    weakeningState = "DISTRIBUTION";
+  } else if (
+    evidenceReady &&
+    (
+      momentumWeakening ||
+      latestFlowNegative ||
+      (
+        priceChangePct !== null &&
+        priceChangePct <= -3
+      )
+    )
+  ) {
+    weakeningState = "WEAKENING";
+  } else if (evidenceReady) {
+    weakeningState = "HEALTHY_OR_UNCONFIRMED";
+  }
+
+  if (!priceEvidenceReady) {
+    warnings.push("VERIFIED_PRICE_SEQUENCE_NOT_READY");
+  }
+  if (!materialFlowReady) {
+    warnings.push("MATERIAL_FLOW_NOT_READY");
+  }
+  if (
+    severePriceBreakdown &&
+    latestFlowNegative &&
+    !materialFlowReady
+  ) {
+    warnings.push("BREAKDOWN_PRESENT_BUT_FLOW_TOO_THIN_FOR_EXIT_RISK");
+  }
+  if (
+    momentumLatest !== null &&
+    momentumLatest >= 30 &&
+    verifiedPriceBreakdown
+  ) {
+    warnings.push("MOMENTUM_CONFLICTS_WITH_VERIFIED_PRICE_BREAKDOWN");
+  }
+
+  return {
+    version:CHAINVANTA_DISPLAY_VERSION,
+    shadowOnly:true,
+    actionable:false,
+    automaticSell:false,
+    address:normalizedAddress,
+    symbol:ordered[ordered.length - 1]?.symbol || null,
+    evidenceReady,
+    weakeningScore,
+    weakeningState,
+    evidence:{
+      priceEvidenceReady,
+      materialFlowReady,
+      verifiedSafetyFailure,
+      anyVerifiedWeakeningEvidence
+    },
+    verifiedPrice:{
+      source:
+        breakout?.priceEvidenceSourceV1095 || null,
+      observations:
+        safeNumber(breakout?.verifiedPriceObservationsV1101),
+      baselineAt:
+        breakout?.verifiedPrice?.baselineAt || null,
+      latestChangedAt:
+        breakout?.verifiedPrice?.latestChangedAt || null,
+      baselineUsd:
+        finiteOrNullV1076(breakout?.verifiedPrice?.baselineUsd),
+      latestUsd:
+        finiteOrNullV1076(breakout?.verifiedPrice?.latestUsd),
+      changePct:
+        priceChangePct
+    },
+    verifiedFlow:{
+      accumulationState,
+      latestTrades,
+      latestGrossUsd:
+        latestGrossUsd === null
+          ? null
+          : Number(latestGrossUsd.toFixed(2)),
+      latestNetUsd,
+      latestBuyPressurePct,
+      latestFlowMaterialV1102,
+      latestFlowNegative,
+      longitudinalDistribution
+    },
+    momentum:{
+      latest:momentumLatest,
+      delta:momentumDelta,
+      weakening:momentumWeakening
+    },
+    reasons:[...new Set(reasons)],
+    warnings:[...new Set(warnings)],
+    interpretation:
+      weakeningState === "EXIT_RISK"
+        ? "Multiple verified deterioration signals align. This is a shadow exit-risk warning, not an automatic sell instruction."
+        : weakeningState === "BREAKDOWN_WATCH"
+          ? "A verified price breakdown is present, but corroborating material flow is not yet strong enough for EXIT_RISK."
+          : weakeningState === "DISTRIBUTION"
+            ? "Material verified longitudinal flow is predominantly distributive even without a confirmed price breakdown."
+            : weakeningState === "WEAKENING"
+              ? "Verified deterioration is developing, but the evidence does not yet meet the stronger breakdown/exit-risk conditions."
+              : weakeningState === "CAUTION"
+                ? "Verified safety/risk evidence requires caution regardless of price direction."
+                : weakeningState === "HEALTHY_OR_UNCONFIRMED"
+                  ? "Enough evidence exists to assess weakening, but no meaningful deterioration is currently confirmed."
+                  : "More verified price/flow history is required before weakening can be assessed reliably.",
+    methodology:{
+      priceBreakdownPct:-7,
+      severePriceBreakdownPct:-20,
+      materialLatestFlowMinimumTrades:5,
+      materialLatestFlowMinimumGrossUsd:250,
+      exitRiskRequiresCorroboration:true,
+      thinFlowCannotCreateExitRiskByItself:true,
+      automaticSell:false,
+      productionImpact:false
+    },
+    productionImpact:{
+      opportunityChanged:false,
+      momentumChanged:false,
+      confidenceChanged:false,
+      riskChanged:false,
+      telegramQualificationChanged:false,
+      telegramCallsChanged:false,
+      automaticSellChanged:false
+    }
+  };
+}
+
+async function weakeningTokenDiagnosticV1102(env, url) {
+  const token = normalize(url.searchParams.get("token"));
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"WEAKENING_TOKEN_V1102",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0,
+    token
+  };
+
+  if (!isAddress(token)) {
+    return {
+      ...base,
+      status:"INVALID_TOKEN_ADDRESS_V1102",
+      timestamp:now()
+    };
+  }
+
+  const history = await accumulationRowsForAddressV1078(
+    env,
+    token,
+    288
+  );
+
+  if (!history.ok) {
+    return {
+      ...base,
+      status:history.status,
+      error:history.error || null,
+      timestamp:now()
+    };
+  }
+
+  return {
+    ...base,
+    success:true,
+    status:"WEAKENING_TOKEN_OK_V1102",
+    result:weakeningFromRowsV1102(token, history.rows),
+    timestamp:now()
+  };
+}
+
+async function weakeningStatusV1102(env) {
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"WEAKENING_STATUS_V1102",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0
+  };
+
+  const stateRead = await readState(env);
+  const cohort = ensureIntelligenceCohortV1079(
+    stateRead?.state || {}
+  );
+
+  const addresses = [...new Set(
+    (cohort?.entries || [])
+      .map(entry => normalize(entry?.address))
+      .filter(isAddress)
+  )];
+
+  const results = [];
+
+  for (const address of addresses.slice(0,20)) {
+    const history = await accumulationRowsForAddressV1078(
+      env,
+      address,
+      288
+    );
+    if (!history.ok) continue;
+    results.push(
+      weakeningFromRowsV1102(address, history.rows)
+    );
+  }
+
+  results.sort((a,b) =>
+    safeNumber(b?.weakeningScore) -
+    safeNumber(a?.weakeningScore)
+  );
+
+  return {
+    ...base,
+    success:true,
+    status:"WEAKENING_STATUS_OK_V1102",
+    evaluated:results.length,
+    evidenceReady:
+      results.filter(r => r.evidenceReady).length,
+    exitRisk:
+      results.filter(
+        r => r.weakeningState === "EXIT_RISK"
+      ).length,
+    breakdownWatch:
+      results.filter(
+        r => r.weakeningState === "BREAKDOWN_WATCH"
+      ).length,
+    distribution:
+      results.filter(
+        r => r.weakeningState === "DISTRIBUTION"
+      ).length,
+    weakening:
+      results.filter(
+        r => r.weakeningState === "WEAKENING"
+      ).length,
+    healthyOrUnconfirmed:
+      results.filter(
+        r => r.weakeningState === "HEALTHY_OR_UNCONFIRMED"
+      ).length,
+    caution:
+      results.filter(
+        r => r.weakeningState === "CAUTION"
+      ).length,
+    buildingHistory:
+      results.filter(
+        r => r.weakeningState === "BUILDING_WEAKENING_HISTORY"
+      ).length,
+    tokens:results,
+    note:"Shadow only. Weakening/exit intelligence uses stored verified price, flow, distribution, momentum and safety evidence. It does not issue automatic sell commands or change production Telegram calls.",
     timestamp:now()
   };
 }
@@ -191166,6 +191632,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await onChainPriceHistoryStatusV1095(env)
+    );
+  }
+
+  if (
+    path ===
+      "/weakening-status"
+  ) {
+    return jsonResponse(
+      await weakeningStatusV1102(env)
+    );
+  }
+
+  if (
+    path ===
+      "/weakening"
+  ) {
+    return jsonResponse(
+      await weakeningTokenDiagnosticV1102(env, url)
     );
   }
 
