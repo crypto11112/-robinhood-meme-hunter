@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1108
+ * LIVE PRIORITY HISTORY TELEMETRY INTEGRITY FIX
+ * Builds directly from deployed V1107.
+ * - Fixes /live-priority-status reporting cohortEvidence.observations as 0 because
+ *   V1107 read a non-existent transient entry.observations field.
+ * - Reuses the existing V1081 targeted D1 cohort-history summary as the
+ *   authoritative stored observation count for each retained address.
+ * - Confirms the priority evaluator is already consuming D1 history through
+ *   accumulationRowsForAddressV1078; V1108 does not alter promotion thresholds.
+ * - Adds storedObservations, priorityHistoryRowsLoaded, priorityObservationsUsed,
+ *   historyReadMatched and historyHandoffStatus telemetry per candidate.
+ * - Emits PRIORITY_HISTORY_HANDOFF_MISMATCH_V1108 if the targeted stored count
+ *   and the rows loaded by priority disagree within the bounded history window.
+ * - ZERO new provider/RPC requests; read-only D1 telemetry only. No production
+ *   Telegram, scoring, qualification, payment or five-minute scanner changes.
+ */
+
+/**
  * ChainVanta — V1107
  * ESTABLISHED-TOKEN LIVE PRIORITY PROMOTION — SHADOW V1
  * Builds directly from deployed V1106.
@@ -9515,7 +9533,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1107"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1108"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -188792,15 +188810,15 @@ async function breakoutStatusV1094(env) {
 
 
 /* ============================================================
-   V1107 — ESTABLISHED-TOKEN LIVE PRIORITY PROMOTION — SHADOW V1
+   V1108 — LIVE PRIORITY HISTORY TELEMETRY INTEGRITY FIX
    ============================================================ */
 const LIVE_PRIORITY_MAX_TOKENS_V1107 = 3;
 
-async function livePriorityStatusV1107(env) {
+async function livePriorityStatusV1108(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_STATUS_V1107",
+    diagnostic:"LIVE_PRIORITY_STATUS_V1108",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188813,6 +188831,20 @@ async function livePriorityStatusV1107(env) {
   const stateRead = await readState(env);
   const cohort = ensureIntelligenceCohortV1079(stateRead?.state || {});
   const entries = Array.isArray(cohort?.entries) ? cohort.entries : [];
+
+  // V1108: read the same authoritative targeted cohort summary used by
+  // /intelligence-cohort-status. V1107's displayed entry.observations field
+  // does not exist on the durable cohort entry and therefore rendered as zero.
+  const cohortHistoryV1108 = await cohortHistorySummariesV1081(
+    env,
+    entries.map(entry => entry?.address)
+  );
+  const cohortHistoryByAddressV1108 = new Map(
+    (cohortHistoryV1108?.ok ? cohortHistoryV1108.rows : [])
+      .map(row => [normalize(row?.address), row])
+      .filter(([address]) => isAddress(address))
+  );
+
   const rows = [];
 
   for (const entry of entries.slice(0, 20)) {
@@ -188821,6 +188853,28 @@ async function livePriorityStatusV1107(env) {
 
     const history = await accumulationRowsForAddressV1078(env, address, 288);
     if (!history?.ok) continue;
+
+    const targetedCohortRowV1108 =
+      cohortHistoryByAddressV1108.get(address) || null;
+    const storedObservationsV1108 = targetedCohortRowV1108
+      ? safeNumber(targetedCohortRowV1108?.observation_count)
+      : safeNumber(entry?.observationCount);
+    const priorityHistoryRowsLoadedV1108 = Array.isArray(history?.rows)
+      ? history.rows.length
+      : 0;
+    // The priority models below consume history.rows directly. Because that read
+    // is intentionally capped at 288 rows, exact equality is expected while the
+    // durable count is <=288; above that, a full 288-row window is healthy.
+    const expectedRowsLoadedV1108 = Math.min(288, storedObservationsV1108);
+    const historyReadMatchedV1108 =
+      cohortHistoryV1108?.ok === true &&
+      priorityHistoryRowsLoadedV1108 === expectedRowsLoadedV1108;
+    const historyHandoffStatusV1108 =
+      cohortHistoryV1108?.ok !== true
+        ? "TARGETED_COHORT_HISTORY_UNAVAILABLE_V1108"
+        : historyReadMatchedV1108
+          ? "PRIORITY_HISTORY_HANDOFF_MATCH_V1108"
+          : "PRIORITY_HISTORY_HANDOFF_MISMATCH_V1108";
 
     const breakout = breakoutFromRowsV1094(address, history.rows);
     const accumulation = flowAwareAccumulationFromRowsV1092(address, history.rows);
@@ -188950,7 +189004,12 @@ async function livePriorityStatusV1107(env) {
         opportunityScore:opportunity,
         confidenceScore:confidence,
         riskScore:risk,
-        observations:safeNumber(entry?.observations)
+        observations:storedObservationsV1108,
+        storedObservations:storedObservationsV1108,
+        priorityHistoryRowsLoaded:priorityHistoryRowsLoadedV1108,
+        priorityObservationsUsed:priorityHistoryRowsLoadedV1108,
+        historyReadMatched:historyReadMatchedV1108,
+        historyHandoffStatus:historyHandoffStatusV1108
       },
       reasons:[...new Set(reasons)],
       blockers:[...new Set(blockers)]
@@ -188973,13 +189032,26 @@ async function livePriorityStatusV1107(env) {
   return {
     ...base,
     success:true,
-    status:"LIVE_PRIORITY_STATUS_OK_V1107",
+    status:"LIVE_PRIORITY_STATUS_OK_V1108",
     cohortEntries:entries.length,
     evaluated:rows.length,
     eligibleForPromotion:rows.filter(row => row?.promote === true).length,
     promotedCount:promoted.length,
     promoted,
     allCandidates:rows,
+    historyHandoffV1108:{
+      targetedHistoryLookupOk:cohortHistoryV1108?.ok === true,
+      targetedHistoryLookupStatus:cohortHistoryV1108?.status || null,
+      targetedHistoryMatchedAddresses:safeNumber(cohortHistoryV1108?.rows?.length),
+      matchedCandidates:rows.filter(row =>
+        row?.cohortEvidence?.historyReadMatched === true
+      ).length,
+      mismatchedCandidates:rows.filter(row =>
+        row?.cohortEvidence?.historyHandoffStatus ===
+          "PRIORITY_HISTORY_HANDOFF_MISMATCH_V1108"
+      ).length,
+      note:"V1108 verifies that live-priority consumes the same durable D1 history represented by the intelligence cohort. Promotion thresholds are unchanged."
+    },
     methodology:{
       maximumPriorityTokens:LIVE_PRIORITY_MAX_TOKENS_V1107,
       safetyOrRisk60PlusBlocks:true,
@@ -188991,7 +189063,7 @@ async function livePriorityStatusV1107(env) {
       externalRequestsAdded:0
     },
     nextStage:
-      "After live calibration, promoted tokens can be wired into a lightweight faster exact-pool polling lane without accelerating the full five-minute scanner.",
+      "After V1108 history-handoff telemetry is clean and live calibration produces legitimate promotions, promoted tokens can be wired into a lightweight faster exact-pool polling lane without accelerating the full five-minute scanner.",
     timestamp:now()
   };
 }
@@ -191994,7 +192066,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       "/live-priority-status"
   ) {
     return jsonResponse(
-      await livePriorityStatusV1107(env)
+      await livePriorityStatusV1108(env)
     );
   }
 
