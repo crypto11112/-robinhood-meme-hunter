@@ -9727,7 +9727,20 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1127"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1128"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1128 — FAIR COHORT EVIDENCE REFRESH
+ * - Preserves V1079/V1100 normal DEPTH/BREADTH selection unchanged.
+ * - Only when that selector has no normally eligible cohort token, allows one
+ *   retained, quality-safe, stale-but-promising cohort token to use the same
+ *   already-existing cohort analysis slot for evidence maturation.
+ * - Does not increase MAX_TOKEN_CHECKS, provider ceilings, promotion thresholds,
+ *   scoring thresholds, fast-lane size, or Telegram behavior.
+ * - Prevents a retained token with sparse evidence from becoming permanently
+ *   unobservable merely because its old row cannot satisfy the normal follow-up
+ *   eligibility rule needed to collect fresher evidence.
+ */
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -110661,6 +110674,12 @@ for (
       intelligenceFollowUpSelectionV1077?.selectedSymbol || null,
     selectedFromDurableCohort:
       intelligenceFollowUpSelectionV1077?.selectedFromDurableCohort === true,
+    selectionPurposeV1100:
+      intelligenceFollowUpSelectionV1077?.selectionPurposeV1100 || null,
+    fairnessFallbackV1128:
+      intelligenceFollowUpSelectionV1077?.fairnessFallbackV1128 === true,
+    fairnessReasonV1128:
+      intelligenceFollowUpSelectionV1077?.fairnessReasonV1128 || null,
     cohortEntries:
       safeNumber(intelligenceFollowUpSelectionV1077?.cohortEntries),
     freshVerifiedLaunches:
@@ -186792,6 +186811,14 @@ const INTELLIGENCE_COHORT_MAX_V1079 = 8;
 const INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 = 7 * 24 * 60 * 60 * 1000; // V1105: 7-day inactivity retention
 const INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 = 4 * 60 * 1000;
 
+// V1128: conservative fallback only; this is evidence collection, never promotion.
+const INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128 = 60 * 60 * 1000;
+const INTELLIGENCE_COHORT_FAIRNESS_RESELECT_MS_V1128 = 60 * 60 * 1000;
+const INTELLIGENCE_COHORT_FAIRNESS_MAX_OBSERVATIONS_V1128 = 16;
+const INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128 = 55;
+const INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128 = 65;
+const INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128 = 60;
+
 function ensureIntelligenceCohortV1079(state) {
   if (!state || typeof state !== "object") return null;
 
@@ -186996,6 +187023,10 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
     depthEligibleCandidatesV1100:0,
     selectedOnChainPriceRowsV1100:0,
     selectedChangedPriceRowsV1100:0,
+    fairnessFallbackV1128:false,
+    fairnessCandidatesV1128:0,
+    fairnessReasonV1128:null,
+    fairnessHistoryAgeMsV1128:null,
     status:null,
     error:null,
     externalRequestsUsed:0,
@@ -187111,10 +187142,82 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
     );
   }
 
-  const selected =
+  let selected =
     (preferDepthV1100 ? depthEligibleV1100[0] : ranked[0]) || null;
-  const selectionPurposeV1100 =
+  let selectionPurposeV1100 =
     selected ? (preferDepthV1100 ? "DEPTH" : "BREADTH") : null;
+
+  // V1128: if normal V1079/V1100 eligibility yields nobody, do not strand a
+  // retained sparse-evidence token forever. Re-use the same one cohort slot for
+  // a conservative evidence-refresh candidate. This does NOT make the token
+  // promotion-eligible and does not relax any production gate.
+  if (!selected) {
+    const fairnessCandidatesV1128 = [];
+
+    for (const entry of cohort.entries) {
+      const address = normalize(entry?.address);
+      const token = cohortTokenSafeV1079(entry?.token);
+      const row = historyByAddress.get(address) || null;
+      if (!token || !row || !isAddress(address)) continue;
+
+      const lastAt = safeNumber(row?.last_at || row?.captured_at);
+      const historyAgeMs = lastAt > 0 ? Math.max(0, nowMs - lastAt) : 0;
+      const lastSelectedAt = safeNumber(entry?.lastSelectedAt);
+      const selectedAgeMs = lastSelectedAt > 0 ? Math.max(0, nowMs - lastSelectedAt) : Number.POSITIVE_INFINITY;
+      if (historyAgeMs < INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128) continue;
+      if (selectedAgeMs < INTELLIGENCE_COHORT_FAIRNESS_RESELECT_MS_V1128) continue;
+
+      const quality = intelligenceCohortQualityDecisionV1082(row);
+      if (quality?.keep !== true) continue;
+
+      const opportunity = finiteOrNullV1076(row?.opportunity_score) ?? finiteOrNullV1076(entry?.opportunityScore) ?? 0;
+      const confidence = finiteOrNullV1076(row?.confidence_score) ?? finiteOrNullV1076(entry?.confidenceScore) ?? 0;
+      const riskVerified = Number(row?.risk_verified) === 1;
+      const risk = riskVerified ? finiteOrNullV1076(row?.risk_score) : null;
+      const observations = safeNumber(row?.observation_count);
+      const onChainPriceVerified = safeNumber(row?.onchain_price_verified_count);
+      const onChainPriceChanged = safeNumber(row?.onchain_price_changed_count);
+
+      if (opportunity < INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128) continue;
+      if (confidence < INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128) continue;
+      if (riskVerified && risk !== null && risk > INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128) continue;
+      if (observations > INTELLIGENCE_COHORT_FAIRNESS_MAX_OBSERVATIONS_V1128 && onChainPriceVerified > 0) continue;
+
+      fairnessCandidatesV1128.push({
+        entry, row, token,
+        historyScore:intelligenceWatchRowScoreV1077(row, nowMs),
+        observationCount:observations,
+        onChainPriceVerifiedCountV1100:onChainPriceVerified,
+        onChainPriceChangedCountV1100:onChainPriceChanged,
+        lastOnChainPriceObservedAtV1100:safeNumber(row?.last_onchain_price_observed_at),
+        lastSelectedAt,
+        historyAgeMs,
+        opportunity, confidence, risk
+      });
+    }
+
+    fairnessCandidatesV1128.sort((a,b) =>
+      (safeNumber(a?.onChainPriceVerifiedCountV1100) > 0 ? 1 : 0) -
+        (safeNumber(b?.onChainPriceVerifiedCountV1100) > 0 ? 1 : 0) ||
+      safeNumber(a?.observationCount) - safeNumber(b?.observationCount) ||
+      safeNumber(b?.historyAgeMs) - safeNumber(a?.historyAgeMs) ||
+      safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
+      safeNumber(b?.historyScore) - safeNumber(a?.historyScore)
+    );
+
+    base.fairnessCandidatesV1128 = fairnessCandidatesV1128.length;
+    selected = fairnessCandidatesV1128[0] || null;
+    if (selected) {
+      selectionPurposeV1100 = "FAIRNESS_EVIDENCE_REFRESH";
+      base.fairnessFallbackV1128 = true;
+      base.fairnessReasonV1128 =
+        safeNumber(selected?.onChainPriceVerifiedCountV1100) === 0
+          ? "STALE_SPARSE_TOKEN_NEEDS_ONCHAIN_EVIDENCE_V1128"
+          : "STALE_SPARSE_TOKEN_NEEDS_FRESH_EVIDENCE_V1128";
+      base.fairnessHistoryAgeMsV1128 = safeNumber(selected?.historyAgeMs);
+    }
+  }
+
   if (!selected) {
     return {
       ...base,
@@ -187239,10 +187342,16 @@ function commitIntelligenceFollowUpAdmissionV1086(
   cohort.lastSelectionPurposeV1100 =
     selection?.selectionPurposeV1100 === "DEPTH"
       ? "DEPTH"
-      : "BREADTH";
+      : selection?.selectionPurposeV1100 === "FAIRNESS_EVIDENCE_REFRESH"
+        ? "FAIRNESS_EVIDENCE_REFRESH"
+        : "BREADTH";
   if (cohort.lastSelectionPurposeV1100 === "DEPTH") {
     cohort.lastDepthSelectedAddressV1100 = address;
     cohort.lastDepthSelectedAtV1100 = at;
+  }
+  if (cohort.lastSelectionPurposeV1100 === "FAIRNESS_EVIDENCE_REFRESH") {
+    cohort.lastFairnessSelectedAddressV1128 = address;
+    cohort.lastFairnessSelectedAtV1128 = at;
   }
   cohort.updatedAt = at;
 
@@ -192374,6 +192483,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await liveCohortObservationRoutingStatusV1127(env, url)
+    );
+  }
+
+  if (
+    path ===
+      "/live-cohort-fairness-status"
+  ) {
+    return jsonResponse(
+      await liveCohortFairnessStatusV1128(env, url)
     );
   }
 
@@ -197684,6 +197802,77 @@ async function liveCohortObservationRoutingStatusV1127(env, url){
       noAutoFix:"V1127 is diagnostic only. It does not relax gates, force a token into analysis, or write synthetic observations."
     },
     note:"V1127 traces durable-cohort selection/admission/history freshness using existing state and D1 only. Zero new provider/RPC traffic.",
+    timestamp:now()
+  };
+}
+
+// V1128: read-only view of the conservative fairness evidence-refresh path.
+async function liveCohortFairnessStatusV1128(env, url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const cohort=ensureIntelligenceCohortV1079(state);
+  let simulation=null;
+  try{
+    const clonedState=typeof structuredClone==="function"
+      ? structuredClone(state)
+      : JSON.parse(JSON.stringify(state));
+    simulation=await selectIntelligenceFollowUpV1079(env,clonedState,true);
+  }catch(error){
+    simulation={status:"FAIRNESS_SIMULATION_FAILED_V1128",error:errorString(error).slice(0,700)};
+  }
+  const selectedAddress=normalize(simulation?.selectedAddress);
+  const requestedMatches=!isAddress(requested)||requested===selectedAddress;
+  const fairness=simulation?.selectionPurposeV1100==="FAIRNESS_EVIDENCE_REFRESH";
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_COHORT_FAIRNESS_STATUS_V1128",
+    success:stateRead?.ok!==false,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    promotionThresholdsChanged:false,
+    scoringThresholdsChanged:false,
+    maxTokenChecksChanged:false,
+    providerRequestCeilingsChanged:false,
+    telegramMutation:false,
+    fairnessFallbackEnabledV1128:true,
+    policy:{
+      onlyWhenNormalSelectorEmpty:true,
+      minimumHistoryAgeMinutes:INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128/(60*1000),
+      minimumReselectAgeMinutes:INTELLIGENCE_COHORT_FAIRNESS_RESELECT_MS_V1128/(60*1000),
+      maximumSparseObservations:INTELLIGENCE_COHORT_FAIRNESS_MAX_OBSERVATIONS_V1128,
+      minimumOpportunity:INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128,
+      minimumConfidence:INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128,
+      maximumVerifiedRisk:INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128,
+      sameExistingCohortSlot:true
+    },
+    simulatedSelection:{
+      status:simulation?.status||null,
+      address:selectedAddress||null,
+      symbol:simulation?.selectedSymbol||null,
+      purpose:simulation?.selectionPurposeV1100||null,
+      fairnessFallback:fairness,
+      fairnessCandidates:safeNumber(simulation?.fairnessCandidatesV1128),
+      fairnessReason:simulation?.fairnessReasonV1128||null,
+      fairnessHistoryAgeMs:finiteOrNullV1076(simulation?.fairnessHistoryAgeMsV1128),
+      observationCount:safeNumber(simulation?.observationCount),
+      onChainPriceRows:safeNumber(simulation?.selectedOnChainPriceRowsV1100),
+      requestedToken:isAddress(requested)?requested:null,
+      requestedMatchesSelection:requestedMatches
+    },
+    latestPersistedAdmissionAttempt:cohort?.lastAdmissionAttemptV1090||null,
+    lastCommittedSelection:{
+      purpose:cohort?.lastSelectionPurposeV1100||null,
+      address:cohort?.lastSelectedAddress||null,
+      at:cohort?.lastSelectedAt||null,
+      fairnessAddress:cohort?.lastFairnessSelectedAddressV1128||null,
+      fairnessAt:cohort?.lastFairnessSelectedAtV1128||null
+    },
+    interpretation:fairness
+      ? "The normal V1079/V1100 selector currently has no eligible token, so V1128 would use the same bounded cohort slot to refresh one retained sparse-evidence candidate. This is evidence collection only, not promotion."
+      : "Normal cohort selection currently has precedence, or no conservative V1128 fairness candidate qualifies.",
     timestamp:now()
   };
 }
