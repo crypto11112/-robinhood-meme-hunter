@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1133"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1134"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -192542,6 +192542,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-directional-watch-registration-status"
+  ) {
+    return jsonResponse(
+      await liveDirectionalWatchRegistrationStatusV1134(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -206239,6 +206248,170 @@ async function liveExactPoolContinuityStatusV1133(env, url){
       priorCompletion:"Shows whether older verified exact-pool completion state can still prove an identity even if the current watch does not retain it."
     },
     note:"V1133 is read-only. It performs no external provider/RPC requests, changes no thresholds or promotion logic, writes no state, and does not mutate Telegram.",
+    timestamp:now()
+  };
+}
+
+
+// V1134: read-only directional-watch registration/retention diagnostic.
+// Traces registry-backed near-miss candidates through the existing admission surfaces
+// and watch-retention state. No provider/RPC calls, no writes, no threshold changes.
+async function liveDirectionalWatchRegistrationStatusV1134(env, url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const [continuity,stateRead,priority] = await Promise.all([
+    liveExactPoolContinuityStatusV1133(env,url),
+    readState(env),
+    livePriorityStatusV1108(env)
+  ]);
+  const state=stateRead?.state||{};
+  const continuityRows=Array.isArray(continuity?.candidates)?continuity.candidates:[];
+  const priorityRows=Array.isArray(priority?.allCandidates)?priority.allCandidates:[];
+  let selected=continuityRows.filter(r=>
+    r?.assessment==="REGISTRY_PRESENT_WATCH_MISSING_V1133" ||
+    r?.assessment==="PRIOR_COMPLETION_PRESENT_CURRENT_WATCH_MISSING_V1133" ||
+    r?.assessment==="WATCH_PRESENT_BUT_CURRENT_IDENTITY_INVALID_V1133"
+  );
+  if(isAddress(requested)) selected=continuityRows.filter(r=>normalize(r?.address)===requested);
+  else selected=selected.slice(0,8);
+
+  const watchRoot=state?.directionalExactPoolWatchV551&&typeof state.directionalExactPoolWatchV551==="object"
+    ? state.directionalExactPoolWatchV551 : {};
+  const watchEntries=Object.values(watchRoot?.entries&&typeof watchRoot.entries==="object"?watchRoot.entries:{});
+  const telemetry=state?.poolWatchTelemetryV741&&typeof state.poolWatchTelemetryV741==="object"
+    ? state.poolWatchTelemetryV741 : {};
+  const upstream=state?.rawLaneUpstreamTraceV761&&typeof state.rawLaneUpstreamTraceV761==="object"
+    ? state.rawLaneUpstreamTraceV761 : {};
+  const upstreamRows=Array.isArray(upstream?.rows)?upstream.rows:[];
+  const cohortHandoff=state?.lastCohortExactPoolHandoffV1088||state?.intelligenceCohortV1079?.lastCohortExactPoolHandoffV1088||null;
+  const recentRawAdmissions=[
+    ...(Array.isArray(state?.rawAdmissionTelemetryV756?.recentEventsV760)?state.rawAdmissionTelemetryV756.recentEventsV760:[]),
+    ...(Array.isArray(telemetry?.rawRemovalEventsV753)?telemetry.rawRemovalEventsV753:[])
+  ];
+  const maxEntries=typeof DIRECTIONAL_WATCH_MAX_ENTRIES_V551!=="undefined"?DIRECTIONAL_WATCH_MAX_ENTRIES_V551:24;
+
+  const base={
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_DIRECTIONAL_WATCH_REGISTRATION_STATUS_V1134",
+    success:true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    requestedToken:isAddress(requested)?requested:null,
+    candidatesRequested:selected.length
+  };
+  if(!selected.length) return {...base,success:false,status:"NO_WATCH_CONTINUITY_FAULTS_TO_TRACE_V1134",candidates:[],timestamp:now()};
+
+  const results=[];
+  for(const row of selected){
+    const address=normalize(row?.address||"");
+    if(!isAddress(address)) continue;
+    const pRow=priorityRows.find(r=>normalize(r?.address||"")===address)||null;
+    const upstreamRow=upstreamRows.find(r=>normalize(r?.address||"")===address)||null;
+    const tokenWatchRows=watchEntries.filter(r=>normalize(r?.tokenAddress||"")===address);
+    const supportedRegistryRows=Array.isArray(row?.canonicalPoolRegistry?.rows)
+      ? row.canonicalPoolRegistry.rows.filter(r=>r?.quoteSupported===true&&r?.poolId)
+      : [];
+    const cohortMatches=normalize(cohortHandoff?.admittedAddress||"")===address;
+    const rawEvents=recentRawAdmissions.filter(e=>normalize(e?.tokenAddress||"")===address).slice(-8);
+    const priorityIdentity=pRow?.exactPoolLiveIdentityV1112||null;
+    const candidateIdentityAvailable=!!(priorityIdentity?.verified===true||priorityIdentity?.poolId||row?.snapshots?.priorityExactPoolAvailable===true);
+    const watchAtCapacity=watchEntries.length>=maxEntries;
+    const lastPrune=watchRoot?.lastPruneV565||null;
+    const rawRemovalForToken=rawEvents.filter(e=>String(e?.reason||"").includes("PRUNED_")||String(e?.reason||"").includes("REMOV")||String(e?.reason||"").includes("MIGRATED"));
+    const rawRejectForToken=rawEvents.filter(e=>e?.accepted===false);
+
+    let stage="UNKNOWN_V1134";
+    let likelyCause="INSUFFICIENT_PERSISTED_REGISTRATION_TELEMETRY_V1134";
+    if(tokenWatchRows.length>0){
+      stage="WATCH_PRESENT_V1134";
+      likelyCause="CURRENT_WATCH_ROW_EXISTS_REVIEW_IDENTITY_VALIDATION_V1134";
+    }else if(!candidateIdentityAvailable && supportedRegistryRows.length>0){
+      stage="REGISTRY_TO_CANDIDATE_IDENTITY_GAP_V1134";
+      likelyCause="SUPPORTED_REGISTRY_POOL_EXISTS_BUT_CURRENT_PRIORITY_CANDIDATE_HAS_NO_EXACT_POOL_IDENTITY_V1134";
+    }else if(rawRejectForToken.length>0){
+      stage="REGISTRATION_REJECTED_V1134";
+      likelyCause="PERSISTED_RAW_ADMISSION_REJECTION_VISIBLE_V1134";
+    }else if(rawRemovalForToken.length>0){
+      stage="REGISTERED_THEN_REMOVED_V1134";
+      likelyCause="PERSISTED_WATCH_REMOVAL_EVENT_VISIBLE_V1134";
+    }else if(watchAtCapacity && supportedRegistryRows.length>0){
+      stage="CAPACITY_RETENTION_SUSPECT_V1134";
+      likelyCause="WATCH_AT_CAPACITY_WITH_SUPPORTED_REGISTRY_POOL_AND_NO_CURRENT_ROW_V1134";
+    }else if(candidateIdentityAvailable && supportedRegistryRows.length>0){
+      stage="REGISTRATION_HANDOFF_SUSPECT_V1134";
+      likelyCause="CANDIDATE_IDENTITY_AND_REGISTRY_POOL_EXIST_BUT_NO_WATCH_ROW_OR_PERSISTED_REJECTION_V1134";
+    }
+
+    results.push({
+      address,symbol:row?.symbol||pRow?.symbol||null,rank:row?.rank??null,
+      continuityAssessment:row?.assessment||null,
+      stage,likelyCause,
+      registry:{supportedPools:supportedRegistryRows.length,rows:supportedRegistryRows.slice(0,8)},
+      candidateIdentity:{
+        available:candidateIdentityAvailable,
+        verified:priorityIdentity?.verified===true,
+        poolId:normalize(priorityIdentity?.poolId||"")||null,
+        source:priorityIdentity?.source||null
+      },
+      registrationSurfaces:{
+        rawLaneUpstreamSeen:!!upstreamRow,
+        rawLaneUpstream:upstreamRow,
+        cohortHandoffMatches:cohortMatches,
+        cohortHandoff:cohortMatches?cohortHandoff:null,
+        recentRawAdmissionOrRemovalEvents:rawEvents
+      },
+      watchRetention:{
+        currentWatchRows:tokenWatchRows.length,
+        watchCount:watchEntries.length,
+        maxEntries,
+        atCapacity:watchAtCapacity,
+        lastPrune:lastPrune?{
+          at:safeNumber(lastPrune?.at)||null,
+          beforeCount:safeNumber(lastPrune?.beforeCount),
+          eligibleCount:safeNumber(lastPrune?.eligibleCount),
+          keptCount:safeNumber(lastPrune?.keptCount),
+          droppedCount:safeNumber(lastPrune?.droppedCount),
+          reservedRawKeptV743:safeNumber(lastPrune?.reservedRawKeptV743),
+          reservedCohortKeptV1091:safeNumber(lastPrune?.reservedCohortKeptV1091)
+        }:null
+      },
+      telemetryContext:{
+        registrationCandidatesSeen:safeNumber(telemetry?.registrationCandidatesSeen),
+        standardRegistered:safeNumber(telemetry?.standardRegistered),
+        standardRefreshed:safeNumber(telemetry?.standardRefreshed),
+        rawRegistered:safeNumber(telemetry?.rawRegistered),
+        rawRefreshed:safeNumber(telemetry?.rawRefreshed),
+        prunedExpired:safeNumber(telemetry?.prunedExpired),
+        prunedInvalidIdentity:safeNumber(telemetry?.prunedInvalidIdentity),
+        prunedCapacity:safeNumber(telemetry?.prunedCapacity),
+        registrationRejected:telemetry?.registrationRejected||{}
+      },
+      nextAction:stage==="REGISTRY_TO_CANDIDATE_IDENTITY_GAP_V1134"
+        ? "TRACE_REGISTRY_TO_ONCHAIN_POOL_IDENTITY_HANDOFF_V1134"
+        : stage==="REGISTRATION_HANDOFF_SUSPECT_V1134"
+          ? "TRACE_CANDIDATE_TO_REGISTER_DIRECTIONAL_WATCH_INPUT_V1134"
+          : stage==="CAPACITY_RETENTION_SUSPECT_V1134"
+            ? "TRACE_RETENTION_RANK_AND_CAPACITY_EVICTION_V1134"
+            : stage==="REGISTERED_THEN_REMOVED_V1134"
+              ? "REVIEW_TOKEN_SPECIFIC_REMOVAL_REASON_V1134"
+              : stage==="REGISTRATION_REJECTED_V1134"
+                ? "REVIEW_TOKEN_SPECIFIC_REGISTRATION_REJECTION_V1134"
+                : "REVIEW_CURRENT_WATCH_VALIDATION_V1134"
+    });
+  }
+
+  const counts={};
+  for(const r of results) counts[r.stage]=(counts[r.stage]||0)+1;
+  return {
+    ...base,success:results.length>0,
+    status:"DIRECTIONAL_WATCH_REGISTRATION_CLASSIFIED_V1134",
+    summary:{watchCount:watchEntries.length,maxEntries,atCapacity:watchEntries.length>=maxEntries,statusCounts:counts},
+    candidates:results,
+    interpretation:{
+      registryToCandidate:"A supported canonical registry pool existing without current candidate exact-pool identity means the watch helper cannot register that pool yet, because V551 consumes candidate.onChainPoolIdentityV153 rather than the registry directly.",
+      registration:"If candidate identity exists but no watch row/rejection is persisted, the next trace belongs at construction of directionalWatchRegistrationCandidatesV555 and the V551 helper input.",
+      retention:"Capacity is only treated as a suspect when the watch is actually full; V1134 does not infer an eviction without persisted evidence."
+    },
+    note:"V1134 is read-only. It adds zero provider/RPC requests, writes no state, changes no thresholds, promotion rules, budgets, or Telegram behavior.",
     timestamp:now()
   };
 }
