@@ -1,4 +1,26 @@
 /**
+ * ChainVanta — V1101
+ * BREAKOUT PRICE-BASELINE INTEGRITY FIX
+ * Builds directly from deployed V1100.
+ * - Fixes a semantic bug exposed by SHROOM: V1095 counted only rows already
+ *   marked "changed", so the first changed row was compared with itself and
+ *   incorrectly displayed 0% price change / 0-minute span.
+ * - A changed row already proves a newer verified price differs from a prior
+ *   verified price. V1101 therefore evaluates the source-specific VERIFIED
+ *   baseline immediately before the first changed row plus the changed rows.
+ * - Market-price evidence becomes ready with:
+ *     >=2 verified observations,
+ *     >=1 genuine changed snapshot,
+ *     >=5 minutes from verified baseline to latest changed observation.
+ * - Provider and V438 on-chain evidence remain separate; whichever has the
+ *   stronger valid sequence is selected.
+ * - Does not weaken the material-flow requirement. Breakout still requires
+ *   V1093 flow evidence before becoming evidenceReady/actionable.
+ * - Shadow/read-only only. No scoring, qualification, Telegram, scanner,
+ *   provider/RPC cadence or request-budget changes.
+ */
+
+/**
  * ChainVanta — V1100
  * ESTABLISHED-TOKEN PRICE DEPTH ROTATION
  * Builds directly from deployed V1099.
@@ -9385,7 +9407,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1100"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1101"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -187950,55 +187972,179 @@ function breakoutFromRowsV1094(address, rows) {
   const accumulation =
     flowAwareAccumulationFromRowsV1092(normalizedAddress, ordered);
 
-  const changedProviderMarketRowsV1095 = ordered.filter(row =>
+  const verifiedProviderMarketRowsV1101 = ordered.filter(row =>
     Number(row?.market_verified) === 1 &&
-    Number(row?.market_snapshot_changed) === 1 &&
     finiteOrNullV1076(row?.price_usd) !== null &&
     finiteOrNullV1076(row?.price_usd) > 0
   );
 
-  const changedOnChainPriceRowsV1095 = ordered.filter(row =>
+  const changedProviderMarketRowsV1095 =
+    verifiedProviderMarketRowsV1101.filter(row =>
+      Number(row?.market_snapshot_changed) === 1
+    );
+
+  const verifiedOnChainPriceRowsV1101 = ordered.filter(row =>
     Number(row?.onchain_price_verified) === 1 &&
-    Number(row?.onchain_price_snapshot_changed) === 1 &&
     finiteOrNullV1076(row?.onchain_price_usd) !== null &&
     finiteOrNullV1076(row?.onchain_price_usd) > 0
   );
 
+  const changedOnChainPriceRowsV1095 =
+    verifiedOnChainPriceRowsV1101.filter(row =>
+      Number(row?.onchain_price_snapshot_changed) === 1
+    );
+
+  const buildPriceSequenceV1101 = (
+    verifiedRows,
+    changedRows,
+    priceField,
+    source
+  ) => {
+    const firstChangedRow = changedRows[0] || null;
+    const latestChangedRow =
+      changedRows[changedRows.length - 1] || null;
+
+    if (!firstChangedRow || !latestChangedRow) {
+      return {
+        source,
+        verifiedRows,
+        changedRows,
+        baseline:null,
+        latest:null,
+        observationCount:verifiedRows.length,
+        changedCount:changedRows.length,
+        spanMs:0,
+        firstPrice:null,
+        latestPrice:null,
+        changePct:null,
+        ready:false
+      };
+    }
+
+    const firstChangedAt =
+      safeNumber(firstChangedRow?.captured_at);
+
+    const priorVerified = verifiedRows
+      .filter(row =>
+        safeNumber(row?.captured_at) < firstChangedAt
+      )
+      .slice(-1)[0] || null;
+
+    const baseline = priorVerified || firstChangedRow;
+    const latest = latestChangedRow;
+
+    const baselineAt = safeNumber(baseline?.captured_at);
+    const latestAt = safeNumber(latest?.captured_at);
+    const spanMs = Math.max(0, latestAt - baselineAt);
+
+    const firstPrice =
+      finiteOrNullV1076(baseline?.[priceField]);
+    const latestPrice =
+      finiteOrNullV1076(latest?.[priceField]);
+
+    const changePct =
+      firstPrice !== null &&
+      latestPrice !== null &&
+      firstPrice > 0
+        ? ((latestPrice - firstPrice) / firstPrice) * 100
+        : null;
+
+    const distinctVerifiedObservations =
+      baseline && latest &&
+      safeNumber(latest?.captured_at) >
+        safeNumber(baseline?.captured_at)
+        ? 2
+        : 1;
+
+    const ready =
+      changedRows.length >= 1 &&
+      distinctVerifiedObservations >= 2 &&
+      spanMs >= BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094;
+
+    return {
+      source,
+      verifiedRows,
+      changedRows,
+      baseline,
+      latest,
+      observationCount:verifiedRows.length,
+      changedCount:changedRows.length,
+      spanMs,
+      firstPrice,
+      latestPrice,
+      changePct,
+      ready
+    };
+  };
+
+  const providerSequenceV1101 =
+    buildPriceSequenceV1101(
+      verifiedProviderMarketRowsV1101,
+      changedProviderMarketRowsV1095,
+      "price_usd",
+      "VERIFIED_PROVIDER_MARKET_HISTORY"
+    );
+
+  const onChainSequenceV1101 =
+    buildPriceSequenceV1101(
+      verifiedOnChainPriceRowsV1101,
+      changedOnChainPriceRowsV1095,
+      "onchain_price_usd",
+      "VERIFIED_V438_ONCHAIN_EXECUTION_PRICE_HISTORY"
+    );
+
+  const sequenceRankV1101 = sequence => [
+    sequence?.ready === true ? 1 : 0,
+    safeNumber(sequence?.changedCount),
+    safeNumber(sequence?.spanMs),
+    safeNumber(sequence?.observationCount)
+  ];
+
+  const compareSequenceRankV1101 = (a,b) => {
+    const ar = sequenceRankV1101(a);
+    const br = sequenceRankV1101(b);
+    for(let i=0;i<ar.length;i++){
+      if(ar[i] !== br[i]) return ar[i] - br[i];
+    }
+    return 0;
+  };
+
+  const selectedPriceSequenceV1101 =
+    compareSequenceRankV1101(
+      onChainSequenceV1101,
+      providerSequenceV1101
+    ) >= 0
+      ? onChainSequenceV1101
+      : providerSequenceV1101;
+
   const useOnChainPriceV1095 =
-    changedOnChainPriceRowsV1095.length >
-    changedProviderMarketRowsV1095.length;
+    selectedPriceSequenceV1101?.source ===
+    "VERIFIED_V438_ONCHAIN_EXECUTION_PRICE_HISTORY";
 
-  const changedMarketRows = useOnChainPriceV1095
-    ? changedOnChainPriceRowsV1095
-    : changedProviderMarketRowsV1095;
+  const changedMarketRows =
+    selectedPriceSequenceV1101?.changedRows || [];
 
-  const priceFieldV1095 =
-    useOnChainPriceV1095 ? "onchain_price_usd" : "price_usd";
-
-  const firstChanged = changedMarketRows[0] || null;
+  const firstChanged =
+    selectedPriceSequenceV1101?.baseline || null;
   const latestChanged =
-    changedMarketRows[changedMarketRows.length - 1] || null;
+    selectedPriceSequenceV1101?.latest || null;
 
   const changedMarketSpanMs =
-    firstChanged && latestChanged
-      ? Math.max(
-          0,
-          safeNumber(latestChanged?.captured_at) -
-          safeNumber(firstChanged?.captured_at)
-        )
-      : 0;
+    safeNumber(selectedPriceSequenceV1101?.spanMs);
 
   const firstPrice =
-    finiteOrNullV1076(firstChanged?.[priceFieldV1095]);
+    finiteOrNullV1076(
+      selectedPriceSequenceV1101?.firstPrice
+    );
   const latestPrice =
-    finiteOrNullV1076(latestChanged?.[priceFieldV1095]);
+    finiteOrNullV1076(
+      selectedPriceSequenceV1101?.latestPrice
+    );
 
   const verifiedChangedPricePct =
-    firstPrice !== null &&
-    latestPrice !== null &&
-    firstPrice > 0
-      ? ((latestPrice - firstPrice) / firstPrice) * 100
-      : null;
+    finiteOrNullV1076(
+      selectedPriceSequenceV1101?.changePct
+    );
 
   const momentumRows = ordered
     .map(row => ({
@@ -188030,8 +188176,7 @@ function breakoutFromRowsV1094(address, rows) {
     finiteOrNullV1076(latestFlow?.netUsd) > 0;
 
   const marketEvidenceReady =
-    changedMarketRows.length >= BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094 &&
-    changedMarketSpanMs >= BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094;
+    selectedPriceSequenceV1101?.ready === true;
 
   const flowEvidenceReady = accumulation?.evidenceReady === true;
 
@@ -188194,30 +188339,40 @@ function breakoutFromRowsV1094(address, rows) {
     breakoutScore,
     breakoutState,
     verifiedChangedMarketRows:changedMarketRows.length,
+    verifiedPriceObservationsV1101:
+      safeNumber(selectedPriceSequenceV1101?.observationCount),
+    providerVerifiedPriceRowsV1101:
+      verifiedProviderMarketRowsV1101.length,
     providerChangedMarketRowsV1095:
       changedProviderMarketRowsV1095.length,
+    onChainVerifiedPriceRowsV1101:
+      verifiedOnChainPriceRowsV1101.length,
     onChainChangedPriceRowsV1095:
       changedOnChainPriceRowsV1095.length,
     priceEvidenceSourceV1095:
-      changedMarketRows.length
-        ? (
-            useOnChainPriceV1095
-              ? "VERIFIED_V438_ONCHAIN_EXECUTION_PRICE_HISTORY"
-              : "VERIFIED_PROVIDER_MARKET_HISTORY"
-          )
+      selectedPriceSequenceV1101?.changedCount > 0
+        ? selectedPriceSequenceV1101.source
         : null,
     changedMarketSpanMinutes:Number(
       (changedMarketSpanMs / 60000).toFixed(1)
     ),
     verifiedPrice:{
-      firstChangedAt:firstChanged?.captured_at || null,
+      baselineAt:firstChanged?.captured_at || null,
       latestChangedAt:latestChanged?.captured_at || null,
+      firstChangedAt:firstChanged?.captured_at || null,
+      baselineUsd:firstPrice,
       firstUsd:firstPrice,
       latestUsd:latestPrice,
       changePct:
         verifiedChangedPricePct === null
           ? null
-          : Number(verifiedChangedPricePct.toFixed(2))
+          : Number(verifiedChangedPricePct.toFixed(2)),
+      baselineIntegrityV1101:
+        firstChanged && latestChanged &&
+        safeNumber(latestChanged?.captured_at) >
+          safeNumber(firstChanged?.captured_at)
+          ? "VERIFIED_PRIOR_BASELINE_TO_CHANGED_OBSERVATION"
+          : "INSUFFICIENT_SEQUENCE"
     },
     momentum:{
       latest:latestMomentum,
@@ -188258,10 +188413,14 @@ function breakoutFromRowsV1094(address, rows) {
       staleOrUnchangedSnapshotsCountAsPriceMovement:false,
       verifiedOnChainExecutionPriceCanConfirmMovementV1095:true,
       providerAndOnChainPriceEvidenceKeptSeparate:true,
-      changedMarketRowsRequired:
+      verifiedPriceObservationsRequiredV1101:2,
+      genuineChangedSnapshotsRequiredV1101:1,
+      changedMarketRowsRequiredLegacyV1094:
         BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094,
       changedMarketSpanMinutesRequired:
         BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094 / 60000,
+      baselineSemanticsV1101:
+        "PRIOR_VERIFIED_BASELINE_TO_LATEST_CHANGED_OBSERVATION",
       requiresMaterialFlowAccumulationEvidence:true,
       productionImpact:false
     },
@@ -188350,7 +188509,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_TOKEN_V1095",
+    diagnostic:"BREAKOUT_TOKEN_V1101",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188384,7 +188543,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_TOKEN_OK_V1095",
+    status:"BREAKOUT_TOKEN_OK_V1101",
     result:breakoutFromRowsV1094(token, history.rows),
     timestamp:now()
   };
@@ -188394,7 +188553,7 @@ async function breakoutStatusV1094(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_STATUS_V1095",
+    diagnostic:"BREAKOUT_STATUS_V1101",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188431,7 +188590,7 @@ async function breakoutStatusV1094(env) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_STATUS_OK_V1095",
+    status:"BREAKOUT_STATUS_OK_V1101",
     evaluated:results.length,
     evidenceReady:results.filter(r => r.evidenceReady).length,
     confirmed:results.filter(
