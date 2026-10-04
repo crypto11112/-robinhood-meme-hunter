@@ -1,5 +1,6 @@
 /**
- * ChainVanta — V1118
+ * ChainVanta — V1119
+ * V1119: audit evaluator integrity + read-time legacy pending projection.
  * TARGET-AWARE OUTCOME FREEZER + PENDING REASON TELEMETRY — SHADOW V1
  * Builds directly from deployed V1117.
  * - Fixes a V1117 handoff edge case where a still-fresh but pre-target provider snapshot
@@ -9712,7 +9713,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1118"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1119"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -195672,14 +195673,14 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
       row.lastDecisionAuditStateV1117=decisionState;
       if(PRIORITY_LIVE_DECISION_AUDIT_STATES_V1117.has(decisionState)){
         const snap=priorityLivePriceSnapshotV1117(row,nowMs,0);
-        const horizons={}; for(const key of Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)) horizons[key]={status:"PENDING",targetAt:nowMs+PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117[key],targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1118"};
+        const horizons={}; for(const key of Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)) horizons[key]={status:"PENDING",targetAt:nowMs+PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117[key],targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1119",evaluatorProcessedAtV1119:nowMs};
         records.push({
           id:`${address}:${decisionState}:${nowMs}`,address,symbol:row?.symbol||null,state:decisionState,decisionAt:nowMs,
           confidence:decision?.confidence||null,evidenceCoveragePct:safeNumber(decision?.evidenceCoveragePct),
           controlledShadowTest:row?.controlledShadowTestV1110===true,genuinePromotion:row?.controlledShadowTestV1110!==true&&!!row?.promotedAt,
           baseline:snap?.verified===true?snap:{verified:false,status:snap?.status||"DECISION_BASELINE_PRICE_UNAVAILABLE_V1118",observedAt:null,priceUsd:null,marketCap:null},
           decisionEvidence:{bullishPillars:Array.isArray(decision?.bullishPillars)?decision.bullishPillars:[],bearishPillars:Array.isArray(decision?.bearishPillars)?decision.bearishPillars:[],blockers:Array.isArray(decision?.blockers)?decision.blockers:[],reasons:Array.isArray(decision?.reasons)?decision.reasons:[]},
-          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1118"
+          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1119"
         });
         newRecords++; changed=true;
       }
@@ -195693,32 +195694,88 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
       const targetAt=safeNumber(h.targetAt||rec.decisionAt+ms);
       const targetPassed=nowMs>=targetAt;
       if(!targetPassed){
-        const next={...h,targetAt,targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1118"};
+        const next={...h,targetAt,targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1119",evaluatorProcessedAtV1119:nowMs};
         if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
         continue;
       }
       if(!row){
-        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"TOKEN_NOT_CURRENTLY_OBSERVABLE_IN_LIVE_LANE_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null};
+        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"TARGET_PASSED_TOKEN_NOT_CURRENTLY_OBSERVABLE_V1119",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,evaluatorProcessedAtV1119:nowMs};
         if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
         continue;
       }
       if(baseline?.verified!==true||!(Number(baseline?.priceUsd)>0)){
-        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"DECISION_BASELINE_UNVERIFIED_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null};
+        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"DECISION_BASELINE_UNVERIFIED_V1119",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,evaluatorProcessedAtV1119:nowMs};
         if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
         continue;
       }
       const snap=priorityLivePriceSnapshotV1117(row,nowMs,targetAt);
       if(snap?.verified===true&&safeNumber(snap?.observedAt)>=targetAt){
-        rec.horizons[key]={status:"FROZEN",targetAt,targetPassed:true,freezeEligible:true,pendingReason:null,capturedAt:nowMs,observationAt:snap.observedAt,latestEligibleObservationAt:snap.observedAt,latestEligiblePrice:snap.priceUsd,observationSource:snap.source,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),priceUsd:snap.priceUsd,marketCap:snap.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,snap.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,snap.marketCap),source:snap.source,priceBasis:snap.priceBasis||null,targetAwareV1118:true};
+        rec.horizons[key]={status:"FROZEN",targetAt,targetPassed:true,freezeEligible:true,pendingReason:null,capturedAt:nowMs,observationAt:snap.observedAt,latestEligibleObservationAt:snap.observedAt,latestEligiblePrice:snap.priceUsd,observationSource:snap.source,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),priceUsd:snap.priceUsd,marketCap:snap.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,snap.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,snap.marketCap),source:snap.source,priceBasis:snap.priceBasis||null,targetAwareV1118:true,evaluatorProcessedAtV1119:nowMs,evaluatorVersion:"V1119"};
         outcomesFrozen++; changed=true;
       }else{
-        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:snap?.status||"TARGET_PASSED_NO_POST_TARGET_VERIFIED_PRICE_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,latestSeenObservationAt:snap?.latestSeenObservedAt||null,latestSeenPrice:snap?.latestSeenPriceUsd||null,latestSeenSource:snap?.latestSeenSource||null,targetAwareV1118:true};
+        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:snap?.status||"TARGET_PASSED_NO_POST_TARGET_VERIFIED_PRICE_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,latestSeenObservationAt:snap?.latestSeenObservedAt||null,latestSeenPrice:snap?.latestSeenPriceUsd||null,latestSeenSource:snap?.latestSeenSource||null,targetAwareV1118:true,evaluatorProcessedAtV1119:nowMs,evaluatorVersion:"V1119"};
         if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
       }
     }
   }
   if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
-  return {audit:{version:"V1118",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
+  return {audit:{version:"V1119",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119"},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
+}
+
+// V1119: read-time audit projection. This is deliberately read-only: it never
+// freezes or rewrites historical outcomes. Its job is to make legacy V1117/V1118
+// pending rows truthful at status-read time even when the live-lane alarm has not
+// run since deploy/expiry. The normal evaluator remains authoritative for freezing.
+function priorityDecisionAuditReadProjectionV1119(audit, liveRows, nowMs=Date.now()){
+  const state=(audit&&typeof audit==="object"&&!Array.isArray(audit))?audit:{};
+  const sourceRecords=Array.isArray(state.records)?state.records:[];
+  const records=sourceRecords.map(r=>({
+    ...r,
+    horizons:Object.fromEntries(Object.entries(r?.horizons||{}).map(([k,v])=>[k,{...v}]))
+  }));
+  const rowMap=new Map((Array.isArray(liveRows)?liveRows:[]).map(r=>[normalize(r?.address||""),r]));
+  let legacyHorizonsProjected=0,duePendingProjected=0,freezeEligibleProjected=0;
+  for(const rec of records){
+    const row=rowMap.get(normalize(rec?.address||""));
+    const baseline=rec?.baseline;
+    for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
+      const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN") continue;
+      const targetAt=safeNumber(h.targetAt||safeNumber(rec?.decisionAt)+ms);
+      const targetPassed=nowMs>=targetAt;
+      const wasLegacy=!("targetPassed" in h)||!("pendingReason" in h)||!h?.pendingReason||String(h.pendingReason).startsWith("LEGACY_");
+      if(wasLegacy) legacyHorizonsProjected++;
+      if(!targetPassed){
+        rec.horizons[key]={...h,targetAt,targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1119",readProjectionV1119:true};
+        continue;
+      }
+      duePendingProjected++;
+      if(!row){
+        rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"TARGET_PASSED_TOKEN_NOT_CURRENTLY_OBSERVABLE_V1119",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,readProjectionV1119:true};
+        continue;
+      }
+      if(baseline?.verified!==true||!(Number(baseline?.priceUsd)>0)){
+        rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"DECISION_BASELINE_UNVERIFIED_V1119",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,readProjectionV1119:true};
+        continue;
+      }
+      const snap=priorityLivePriceSnapshotV1117(row,nowMs,targetAt);
+      if(snap?.verified===true&&safeNumber(snap?.observedAt)>=targetAt){
+        freezeEligibleProjected++;
+        rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:true,pendingReason:"POST_TARGET_VERIFIED_PRICE_AVAILABLE_AWAITING_EVALUATOR_V1119",latestEligibleObservationAt:snap.observedAt,latestEligiblePrice:snap.priceUsd,observationSource:snap.source,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),readProjectionV1119:true};
+      }else{
+        rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:snap?.status||"TARGET_PASSED_NO_POST_TARGET_VERIFIED_PRICE_V1119",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,latestSeenObservationAt:snap?.latestSeenObservedAt||null,latestSeenPrice:snap?.latestSeenPriceUsd||null,latestSeenSource:snap?.latestSeenSource||null,readProjectionV1119:true};
+      }
+    }
+  }
+  return {
+    ...state,
+    version:"V1119",
+    records,
+    readProjectionV1119:true,
+    projectionEvaluatedAt:nowMs,
+    legacyHorizonsProjected,
+    duePendingProjected,
+    freezeEligibleProjected
+  };
 }
 
 // V1116 combined decision layer. This is deliberately downstream of all existing
@@ -196752,9 +196809,10 @@ async function livePriorityLaneStatusV1109(env) {
       decisionStatesV1116:["BUILDING_EVIDENCE","ENTRY_FORMING","ENTRY_READY","HOLD","CAUTION","EXIT_RISK"],
       decisionOutcomeAuditV1117:"FORWARD_ONLY_1M_5M_15M_30M_1H_2H_4H_NO_NEW_REQUESTS",
       outcomeFreezerIntegrityV1118:"TARGET_AWARE_MULTI_SOURCE_PRICE_SELECTION_PLUS_PENDING_REASON_TELEMETRY",
+      auditEvaluatorIntegrityV1119:"READ_TIME_LEGACY_PROJECTION_PLUS_EXPLICIT_EVALUATOR_STAMPS_NO_HISTORY_MUTATION",
       telegramMutation:false
     },
-    nextStage:"V1118 proves due outcomes freeze from the first verified post-target observation and explains every pending horizon. After this passes, let multiple audited decisions mature before threshold calibration or Telegram activation.",
+    nextStage:"V1119 proves legacy pending horizons report truthfully even between evaluator cycles, then a fresh controlled test must demonstrate an actual post-target freeze before longer calibration or Telegram activation.",
     timestamp:now()
   };
 }
@@ -196773,15 +196831,27 @@ async function readLiveDecisionAuditV1117(env){
 async function liveDecisionAuditStatusV1117(env){
   const snap=await readLiveDecisionAuditV1117(env);
   const records=Array.isArray(snap?.records)?snap.records:[];
-  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0,duePendingOutcomes=0; const pendingReasonCounts={};
+  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0,duePendingOutcomes=0,freezeEligiblePending=0; const pendingReasonCounts={};
   for(const r of records){
     stateCounts[r?.state]=(stateCounts[r?.state]||0)+1;
     for(const h of Object.values(r?.horizons||{})){
       if(h?.status==="FROZEN") frozenOutcomes++;
-      else if(h?.status==="PENDING"){ pendingOutcomes++; if(h?.targetPassed===true) duePendingOutcomes++; const reason=h?.pendingReason||"LEGACY_PENDING_NO_V1118_REASON"; pendingReasonCounts[reason]=(pendingReasonCounts[reason]||0)+1; }
+      else if(h?.status==="PENDING"){
+        pendingOutcomes++;
+        if(h?.targetPassed===true) duePendingOutcomes++;
+        if(h?.freezeEligible===true) freezeEligiblePending++;
+        const reason=h?.pendingReason||"LEGACY_PENDING_PROJECTED_AT_READ_V1119";
+        pendingReasonCounts[reason]=(pendingReasonCounts[reason]||0)+1;
+      }
     }
   }
-  return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1118",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,duePendingOutcomes,pendingReasonCounts,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),note:"V1118 evaluates all existing verified price candidates against each target. A due horizon freezes only from an observation at/after its target; otherwise pendingReason states exactly why it remains pending. No hindsight backfill or new provider requests.",timestamp:now()};
+  return {
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1119",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,readProjectionV1119:snap?.readProjectionV1119===true,
+    projectionEvaluatedAt:snap?.projectionEvaluatedAt||null,legacyHorizonsProjected:safeNumber(snap?.legacyHorizonsProjected),duePendingProjected:safeNumber(snap?.duePendingProjected),freezeEligibleProjected:safeNumber(snap?.freezeEligibleProjected),
+    records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
+    note:"V1119 projects legacy pending horizons at read time without mutating history, so targetPassed/pendingReason remain truthful even when no alarm has run. Only the live evaluator may freeze an outcome, and only from a verified observation at/after the target. No hindsight backfill or new provider requests.",timestamp:now()
+  };
 }
 
 async function readLiveHorizonSnapshotsV413(env) {
@@ -198521,7 +198591,18 @@ export class V3LiveCollectorV363 {
 
   async priorityDecisionAuditSnapshotV1117(){
     const audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
-    return {version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1118",forwardOnly:true,hindsightBackfillAllowed:false,records:Array.isArray(audit?.records)?audit.records:[],lastUpdatedAt:audit?.lastUpdatedAt||null};
+    const entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
+    const liveRows=Object.values(entries||{});
+    const projected=priorityDecisionAuditReadProjectionV1119(audit,liveRows,Date.now());
+    return {
+      version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1119",
+      forwardOnly:true,hindsightBackfillAllowed:false,readProjectionV1119:true,
+      projectionEvaluatedAt:projected?.projectionEvaluatedAt||null,
+      legacyHorizonsProjected:safeNumber(projected?.legacyHorizonsProjected),
+      duePendingProjected:safeNumber(projected?.duePendingProjected),
+      freezeEligibleProjected:safeNumber(projected?.freezeEligibleProjected),
+      records:Array.isArray(projected?.records)?projected.records:[],lastUpdatedAt:audit?.lastUpdatedAt||null
+    };
   }
 
   async priorityLiveRpcBatchV1112(liveRows, nowMs=Date.now()) {
