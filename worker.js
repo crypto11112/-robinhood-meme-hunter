@@ -2,7 +2,7 @@
  * ChainVanta — V1121
  * V1121: outcome quality guard + valuation-basis integrity — shadow V1.
  * - Adds horizon-specific maximum observation lag so late freezes remain recorded but cannot contaminate performance statistics.
- * - Distinguishes EXACT / ACCEPTABLE_LAG / STALE outcome quality and exposes performanceEligible per horizon.
+ * - Distinguishes EXACT / NEAR_EXACT / ACCEPTABLE_LAG / STALE timing quality; EXACT is now <=3s after target.
  * - Prevents provider market-cap snapshots from being compared with RPC supply-derived market caps as if they used the same valuation basis.
  * - Keeps price returns usable when verified even when market-cap bases are incomparable.
  * - Projects quality onto legacy V1117–V1120 frozen outcomes read-only; no historical decision or raw observation is rewritten.
@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1121"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1122"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -195711,7 +195711,10 @@ const PRIORITY_OUTCOME_MAX_LAG_MS_V1121 = Object.freeze({
   m1:2*60*1000, m5:3*60*1000, m15:5*60*1000, m30:10*60*1000,
   h1:15*60*1000, h2:20*60*1000, h4:30*60*1000
 });
-const PRIORITY_OUTCOME_EXACT_LAG_MS_V1121 = 15*1000;
+// V1122: precision timing grades. "EXACT" is reserved for observations no more than 3s after target.
+// 3-10s is NEAR_EXACT; >10s but within the horizon-specific V1121 allowance is ACCEPTABLE_LAG.
+const PRIORITY_OUTCOME_EXACT_LAG_MS_V1122 = 3*1000;
+const PRIORITY_OUTCOME_NEAR_EXACT_LAG_MS_V1122 = 10*1000;
 
 function priorityValuationBasisV1121(snapshot){
   const source=String(snapshot?.source||snapshot?.observationSource||"").toUpperCase();
@@ -195726,15 +195729,18 @@ function priorityOutcomeQualityV1121(key,baseline,outcome){
   const maxLag=safeNumber(PRIORITY_OUTCOME_MAX_LAG_MS_V1121?.[key]);
   const priceVerified=Number.isFinite(Number(outcome?.priceUsd))&&Number(outcome?.priceUsd)>0&&Number.isFinite(Number(baseline?.priceUsd))&&Number(baseline?.priceUsd)>0;
   let quality="STALE";
-  if(priceVerified&&lag<=PRIORITY_OUTCOME_EXACT_LAG_MS_V1121) quality="EXACT";
+  if(priceVerified&&lag<=PRIORITY_OUTCOME_EXACT_LAG_MS_V1122) quality="EXACT";
+  else if(priceVerified&&lag<=PRIORITY_OUTCOME_NEAR_EXACT_LAG_MS_V1122) quality="NEAR_EXACT";
   else if(priceVerified&&maxLag>0&&lag<=maxLag) quality="ACCEPTABLE_LAG";
-  const performanceEligible=priceVerified&&(quality==="EXACT"||quality==="ACCEPTABLE_LAG");
+  const performanceEligible=priceVerified&&(quality==="EXACT"||quality==="NEAR_EXACT"||quality==="ACCEPTABLE_LAG");
   const baselineValuationBasis=priorityValuationBasisV1121(baseline);
   const outcomeValuationBasis=priorityValuationBasisV1121(outcome);
   const marketCapsPresent=Number.isFinite(Number(baseline?.marketCap))&&Number(baseline?.marketCap)>0&&Number.isFinite(Number(outcome?.marketCap))&&Number(outcome?.marketCap)>0;
   const marketCapComparable=marketCapsPresent&&baselineValuationBasis!=="UNKNOWN_VALUATION_BASIS_V1121"&&baselineValuationBasis===outcomeValuationBasis;
   return {
     performanceQualityV1121:quality,performanceEligibleV1121:performanceEligible,
+    performanceTimingGradeV1122:quality,performanceEligibleV1122:performanceEligible,
+    exactMaxLagMsV1122:PRIORITY_OUTCOME_EXACT_LAG_MS_V1122,nearExactMaxLagMsV1122:PRIORITY_OUTCOME_NEAR_EXACT_LAG_MS_V1122,
     maxAcceptedLagMsV1121:maxLag||null,baselineValuationBasisV1121:baselineValuationBasis,
     outcomeValuationBasisV1121:outcomeValuationBasis,marketCapComparableV1121:marketCapComparable,
     marketCapComparisonStatusV1121:marketCapComparable?"COMPARABLE_V1121":(marketCapsPresent?"INCOMPARABLE_VALUATION_BASIS_V1121":"MARKET_CAP_UNAVAILABLE_V1121")
@@ -195819,7 +195825,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
     }
   }
   if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
-  return {audit:{version:"V1121",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119",outcomeObserverV1120:true,outcomeQualityGuardV1121:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
+  return {audit:{version:"V1122",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119",outcomeObserverV1120:true,outcomeQualityGuardV1121:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
 }
 
 // V1119: read-time audit projection. This is deliberately read-only: it never
@@ -196965,11 +196971,11 @@ async function liveDecisionAuditStatusV1117(env){
     }
   }
   return {
-    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1121",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
-    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,lightweightOutcomeObserverV1120:true,outcomeQualityGuardV1121:true,valuationBasisIntegrityV1121:true,readProjectionV1119:snap?.readProjectionV1119===true,
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1122",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,lightweightOutcomeObserverV1120:true,outcomeQualityGuardV1121:true,valuationBasisIntegrityV1121:true,precisionTimingGradesV1122:true,exactMaxLagMsV1122:PRIORITY_OUTCOME_EXACT_LAG_MS_V1122,nearExactMaxLagMsV1122:PRIORITY_OUTCOME_NEAR_EXACT_LAG_MS_V1122,readProjectionV1119:snap?.readProjectionV1119===true,
     projectionEvaluatedAt:snap?.projectionEvaluatedAt||null,legacyHorizonsProjected:safeNumber(snap?.legacyHorizonsProjected),duePendingProjected:safeNumber(snap?.duePendingProjected),freezeEligibleProjected:safeNumber(snap?.freezeEligibleProjected),
     outcomeObserverV1120:snap?.outcomeObserverV1120||null,records:records.length,stateCounts,frozenOutcomes,performanceEligibleOutcomes,staleFrozenOutcomes,incomparableMarketCapOutcomes,performanceQualityCounts,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,maxAcceptedLagMsV1121:PRIORITY_OUTCOME_MAX_LAG_MS_V1121,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
-    note:"V1121 preserves every frozen observation but only timely outcomes are performance-eligible. Market-cap returns are suppressed when baseline/outcome valuation bases differ; verified price returns remain available. No hindsight backfill or extra requests.",timestamp:now()
+    note:"V1122 tightens timing labels: EXACT <=3s, NEAR_EXACT >3s to 10s, ACCEPTABLE_LAG thereafter within the horizon allowance, STALE beyond it. V1121 performance and valuation-integrity rules remain unchanged; no hindsight backfill or extra requests.",timestamp:now()
   };
 }
 
@@ -198823,7 +198829,7 @@ export class V3LiveCollectorV363 {
       if(touchedRecord) recordsObserved++;
     }
     if(changed){
-      audit={...audit,version:"V1121",records:audit.records,lastUpdatedAt:observedAt,outcomeObserverV1120:true,outcomeQualityGuardV1121:true};
+      audit={...audit,version:"V1122",records:audit.records,lastUpdatedAt:observedAt,outcomeObserverV1120:true,outcomeQualityGuardV1121:true};
       await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,audit);
     }
     await this.priorityLiveRecordPollV1111({externalRequests:1,verifiedObservations:outcomesFrozen,httpStatus});
