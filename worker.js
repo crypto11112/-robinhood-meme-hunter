@@ -1,11 +1,11 @@
 /**
- * ChainVanta — V1149
- * V1149: durable latest-flow-trace persistence.
- * - Persists the latest V551/V958 flow-collection trace immediately after directional collection,
- *   instead of relying only on the much later main-state write.
- * - Uses a compact dedicated KV key so early-return / later-state-write paths cannot leave the
- *   flow diagnostic frozen on an older scan while the main scanner continues advancing.
- * - The live flow endpoint reads the newest of the dedicated V1149 trace and legacy main-state trace.
+ * ChainVanta — V1150
+ * V1150: first-range bootstrap collection fairness.
+ * - Keeps the existing V1142 highest priority tier for promotion-evidence watches with zero
+ *   successful ranges, but makes equal-tier scheduling starvation-safe.
+ * - Within Tier 6 only, the oldest waiting watch is selected first; if equally old, the watch
+ *   furthest behind head wins. After its first successful range it automatically leaves Tier 6.
+ * - Applies the same ordering to V553 reserve targeting and V551 collection selection.
  * - Adds zero provider/RPC requests, changes no request ceilings, collection slots, scoring,
  *   promotion, watch capacity, risk, or Telegram behavior.
  *
@@ -9738,7 +9738,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1149"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1150"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -92183,6 +92183,86 @@ function directionalWatchPriorityTierV567(row) {
   return 0;
 }
 
+
+function directionalWatchBootstrapWaitAtV1150(row) {
+  const lastCollectedAt = safeNumber(row?.lastCollectedAt);
+  if (lastCollectedAt > 0) return lastCollectedAt;
+  const registeredAt = safeNumber(row?.registeredAt);
+  if (registeredAt > 0) return registeredAt;
+  const lastQualifiedAt = safeNumber(row?.lastQualifiedAt);
+  if (lastQualifiedAt > 0) return lastQualifiedAt;
+  return 0;
+}
+
+function compareDirectionalWatchCandidatesV1150(a,b,head) {
+  const aTier = directionalWatchPriorityTierV567(a);
+  const bTier = directionalWatchPriorityTierV567(b);
+  const tierDelta = bTier - aTier;
+  if (tierDelta !== 0) return tierDelta;
+
+  /*
+   * V1150: Tier 6 is the temporary promotion-evidence first-range bootstrap.
+   * The previous generic comparator preferred the pool closest to head, so an
+   * older bootstrap watch could repeatedly lose to another Tier-6 watch.
+   * Use oldest waiting first; if tied, most behind first. Once a successful
+   * range exists, the row leaves Tier 6 automatically and normal V567 ordering
+   * resumes unchanged.
+   */
+  if (aTier === 6 && bTier === 6) {
+    const aWaitAt = directionalWatchBootstrapWaitAtV1150(a);
+    const bWaitAt = directionalWatchBootstrapWaitAtV1150(b);
+    if (aWaitAt !== bWaitAt) {
+      if (aWaitAt <= 0) return -1;
+      if (bWaitAt <= 0) return 1;
+      return aWaitAt - bWaitAt;
+    }
+
+    const aBehind = Math.max(0, safeNumber(head) - safeNumber(a?.lastCollectedBlock));
+    const bBehind = Math.max(0, safeNumber(head) - safeNumber(b?.lastCollectedBlock));
+    if (aBehind !== bBehind) return bBehind - aBehind;
+
+    const aRegistered = safeNumber(a?.registeredAt);
+    const bRegistered = safeNumber(b?.registeredAt);
+    if (aRegistered !== bRegistered) return aRegistered - bRegistered;
+
+    return String(a?.poolId || "").localeCompare(String(b?.poolId || ""));
+  }
+
+  /* Preserve the pre-V1150 V567 ordering for every non-bootstrap tier. */
+  const aBehind = Math.max(0, safeNumber(head) - safeNumber(a?.lastCollectedBlock));
+  const bBehind = Math.max(0, safeNumber(head) - safeNumber(b?.lastCollectedBlock));
+  if (aBehind !== bBehind) return aBehind - bBehind;
+
+  const rangeDelta =
+    safeNumber(b?.successfulRanges) -
+    safeNumber(a?.successfulRanges);
+  if (rangeDelta !== 0) return rangeDelta;
+
+  const exactUsdDelta =
+    safeNumber(b?.exactUsdTrades) -
+    safeNumber(a?.exactUsdTrades);
+  if (exactUsdDelta !== 0) return exactUsdDelta;
+
+  const swapDelta =
+    safeNumber(b?.poolSpecificSwapsV555) -
+    safeNumber(a?.poolSpecificSwapsV555);
+  if (swapDelta !== 0) return swapDelta;
+
+  const liquidityDelta =
+    safeNumber(b?.poolSpecificLiquidityEventsV556) -
+    safeNumber(a?.poolSpecificLiquidityEventsV556);
+  if (liquidityDelta !== 0) return liquidityDelta;
+
+  const aLast = safeNumber(a?.lastCollectedAt || a?.registeredAt);
+  const bLast = safeNumber(b?.lastCollectedAt || b?.registeredAt);
+  if (aLast !== bLast) return bLast - aLast;
+
+  return (
+    safeNumber(b?.lastCollectedBlock) -
+    safeNumber(a?.lastCollectedBlock)
+  );
+}
+
 function selectDirectionalWatchCandidateV551(
   state,
   latestNumber,
@@ -92248,54 +92328,7 @@ function selectDirectionalWatchCandidateV551(
   }
 
   return pool
-    .sort((a,b) => {
-      const tierDelta =
-        directionalWatchPriorityTierV567(b) -
-        directionalWatchPriorityTierV567(a);
-      if (tierDelta !== 0) return tierDelta;
-
-      /*
-       * V567: within the strongest available tier, closest to head first.
-       * This lets expansion-ready pools use V566's larger span before
-       * spending scarce requests building another new 600-block watch.
-       */
-      const aBehind =
-        Math.max(0, head - safeNumber(a?.lastCollectedBlock));
-      const bBehind =
-        Math.max(0, head - safeNumber(b?.lastCollectedBlock));
-      if (aBehind !== bBehind) return aBehind - bBehind;
-
-      const rangeDelta =
-        safeNumber(b?.successfulRanges) -
-        safeNumber(a?.successfulRanges);
-      if (rangeDelta !== 0) return rangeDelta;
-
-      const exactUsdDelta =
-        safeNumber(b?.exactUsdTrades) -
-        safeNumber(a?.exactUsdTrades);
-      if (exactUsdDelta !== 0) return exactUsdDelta;
-
-      const swapDelta =
-        safeNumber(b?.poolSpecificSwapsV555) -
-        safeNumber(a?.poolSpecificSwapsV555);
-      if (swapDelta !== 0) return swapDelta;
-
-      const liquidityDelta =
-        safeNumber(b?.poolSpecificLiquidityEventsV556) -
-        safeNumber(a?.poolSpecificLiquidityEventsV556);
-      if (liquidityDelta !== 0) return liquidityDelta;
-
-      const aLast =
-        safeNumber(a?.lastCollectedAt || a?.registeredAt);
-      const bLast =
-        safeNumber(b?.lastCollectedAt || b?.registeredAt);
-      if (aLast !== bLast) return bLast - aLast;
-
-      return (
-        safeNumber(b?.lastCollectedBlock) -
-        safeNumber(a?.lastCollectedBlock)
-      );
-    })[0] || null;
+    .sort((a,b) => compareDirectionalWatchCandidatesV1150(a,b,head))[0] || null;
 }
 
 function configureDirectionalWatchReserveV553(state,budget,latestNumber,env=null) {
@@ -92318,43 +92351,7 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber,env=null
               last < head
             );
           })
-          .sort((a,b) => {
-            const tierDelta =
-              directionalWatchPriorityTierV567(b) -
-              directionalWatchPriorityTierV567(a);
-            if (tierDelta !== 0) return tierDelta;
-
-            const aBehind =
-              Math.max(0, head - safeNumber(a?.lastCollectedBlock));
-            const bBehind =
-              Math.max(0, head - safeNumber(b?.lastCollectedBlock));
-            if (aBehind !== bBehind) return aBehind - bBehind;
-
-            const rangeDelta =
-              safeNumber(b?.successfulRanges) -
-              safeNumber(a?.successfulRanges);
-            if (rangeDelta !== 0) return rangeDelta;
-
-            const exactUsdDelta =
-              safeNumber(b?.exactUsdTrades) -
-              safeNumber(a?.exactUsdTrades);
-            if (exactUsdDelta !== 0) return exactUsdDelta;
-
-            const swapDelta =
-              safeNumber(b?.poolSpecificSwapsV555) -
-              safeNumber(a?.poolSpecificSwapsV555);
-            if (swapDelta !== 0) return swapDelta;
-
-            const liquidityDelta =
-              safeNumber(b?.poolSpecificLiquidityEventsV556) -
-              safeNumber(a?.poolSpecificLiquidityEventsV556);
-            if (liquidityDelta !== 0) return liquidityDelta;
-
-            return (
-              safeNumber(b?.lastCollectedBlock) -
-              safeNumber(a?.lastCollectedBlock)
-            );
-          })
+          .sort((a,b) => compareDirectionalWatchCandidatesV1150(a,b,head))
       : [];
 
   const candidate = behindRowsV559[0] || null;
@@ -92500,6 +92497,18 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber,env=null
   reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
   reserve.selectionPriorityTierV567 =
     candidate ? directionalWatchPriorityTierV567(candidate) : null;
+  reserve.bootstrapFairnessV1150 =
+    candidate ? directionalWatchPriorityTierV567(candidate) === 6 : false;
+  reserve.bootstrapWaitAtV1150 =
+    candidate ? directionalWatchBootstrapWaitAtV1150(candidate) || null : null;
+  reserve.bootstrapWaitAgeMsV1150 =
+    candidate && directionalWatchPriorityTierV567(candidate) === 6
+      ? Math.max(0, Date.now() - directionalWatchBootstrapWaitAtV1150(candidate))
+      : null;
+  reserve.bootstrapBlocksBehindV1150 =
+    candidate && Number.isFinite(Number(latestNumber))
+      ? Math.max(0, Number(latestNumber) - safeNumber(candidate?.lastCollectedBlock))
+      : null;
   reserve.promotionEvidenceFirstRangePriorityV1142 =
     candidate ? directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(candidate) : false;
   reserve.promotionEvidenceDurableBridgeV1143 =
@@ -122925,6 +122934,13 @@ for (
             Number.isFinite(lastCollectedBlock) &&
             lastCollectedBlock < head,
           selectionPriorityTierV567:directionalWatchPriorityTierV567(row),
+          bootstrapFairnessEligibleV1150:
+            directionalWatchPriorityTierV567(row) === 6,
+          bootstrapWaitAtV1150:directionalWatchBootstrapWaitAtV1150(row) || null,
+          bootstrapWaitAgeMsV1150:
+            directionalWatchPriorityTierV567(row) === 6
+              ? Math.max(0, Date.now() - directionalWatchBootstrapWaitAtV1150(row))
+              : null,
           promotionEvidenceFirstRangePriorityV1142:
             directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row),
           promotionEvidenceBootstrapV1142:row?.promotionEvidenceBootstrapV1142 || null,
@@ -123030,6 +123046,14 @@ for (
           directionalWatchReserveV553?.v1148BudgetAfterFallback || null,
         promotionEvidenceFirstRangePriorityV1142:
           directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
+        bootstrapFairnessV1150:
+          directionalWatchReserveV553?.bootstrapFairnessV1150 === true,
+        bootstrapWaitAtV1150:
+          directionalWatchReserveV553?.bootstrapWaitAtV1150 || null,
+        bootstrapWaitAgeMsV1150:
+          safeNumber(directionalWatchReserveV553?.bootstrapWaitAgeMsV1150) || null,
+        bootstrapBlocksBehindV1150:
+          safeNumber(directionalWatchReserveV553?.bootstrapBlocksBehindV1150) || null,
         promotionEvidenceDurableBridgeV1143:
           directionalWatchReserveV553?.promotionEvidenceDurableBridgeV1143 === true,
         promotionEvidenceDurablePromotionBridgeV1143:
