@@ -1,4 +1,24 @@
 /**
+ * ChainVanta — V1096
+ * FORWARD-ONLY 1-MINUTE CALL PERFORMANCE
+ * Builds directly from deployed V1095.
+ * - Keeps the already-existing V620 5m/15m/30m/1h/6h/12h/24h price-growth
+ *   outcomes unchanged; does not duplicate those horizons.
+ * - Adds the missing 1m frozen performance checkpoint for NEW V1096-era
+ *   successful Telegram calls only.
+ * - Reuses the already-running V413 60-second live horizon poll; zero new
+ *   provider requests and no faster polling cadence.
+ * - Captures first verified observation at/after +1m with observation lag,
+ *   market-cap multiple and, when entry/current price are verified, price growth.
+ * - Never backfills pre-V1096 calls and never retrofits an already-active
+ *   pre-deploy live-horizon row.
+ * - Surfaces 1m outcome in /horizon, /call and aggregate /performance coverage.
+ * - Existing ATH/max-gain and forward-only drawdown systems remain authoritative.
+ * - No scoring, qualification, Telegram threshold, scanner cadence or request
+ *   budget changes.
+ */
+
+/**
  * ChainVanta — V1095
  * VERIFIED ON-CHAIN EXECUTION PRICE HISTORY
  * Builds directly from deployed V1094.
@@ -9301,7 +9321,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1095"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1096"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -138585,6 +138605,22 @@ function callPerformanceMessageV271(
     ? `${telegramMoneyV271(lowestMcV407)} (${telegramMultipleV271(lowestXV407)})`
     : "UNVERIFIED";
 
+  const oneMinuteV1096 = record?.oneMinuteOutcomeV1096 || null;
+  const oneMinuteOutcomeV1096 = oneMinuteV1096?.outcome || null;
+  const oneMinuteTextV1096 =
+    oneMinuteOutcomeV1096?.verified === true &&
+    oneMinuteOutcomeV1096?.frozen === true
+      ? `${telegramMultipleV271(oneMinuteOutcomeV1096?.multipleByMarketCap)} MC${
+          Number.isFinite(Number(oneMinuteOutcomeV1096?.priceGrowthPct))
+            ? ` | ${Number(oneMinuteOutcomeV1096.priceGrowthPct)>=0?"+":""}${Number(oneMinuteOutcomeV1096.priceGrowthPct).toFixed(2)}% price`
+            : ""
+        }`
+      : (
+          oneMinuteV1096?.version === "V1096"
+            ? "PENDING/UNVERIFIED"
+            : "PRE-V1096 — NOT TRACKED"
+        );
+
   return [
     `📊 <b>${symbol} — Call Performance</b>`,
     "",
@@ -138598,6 +138634,7 @@ function callPerformanceMessageV271(
     `📉 Drawdown from ATH: <b>${drawdown}</b>`,
     `↗️ Ever above entry: <b>${entryOutcomeV407}</b>`,
     `⬇️ Lowest verified MC (V407+): <b>${lowestTextV407}</b>`,
+    `⏱ 1m performance: <b>${oneMinuteTextV1096}</b>`,
     record?.drawdownTrackerV407?.forwardOnly === true
       ? "<i>Lowest-MC tracking is forward-only from V407; historical lows are never backfilled.</i>"
       : "<i>Lowest-MC tracking: not initialised yet.</i>",
@@ -138782,6 +138819,43 @@ function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
     }
     lines.push(`   Reason: <code>${escapeHtml(reason)}</code>`);
   }
+
+  lines.push("");
+
+  const oneMinuteTrackerV1096 = record?.oneMinuteOutcomeV1096 || null;
+  const oneMinuteOutcomeV1096 = oneMinuteTrackerV1096?.outcome || null;
+  const oneMinuteTargetAtV1096 =
+    Number.isFinite(entryAt) && entryAt > 0
+      ? entryAt + (60 * 1000)
+      : null;
+  const oneMinuteMatureV1096 =
+    Number.isFinite(oneMinuteTargetAtV1096)
+      ? nowMs >= oneMinuteTargetAtV1096
+      : false;
+  let oneMinuteReasonV1096 = "CAPTURED";
+  if(
+    oneMinuteOutcomeV1096?.verified !== true ||
+    oneMinuteOutcomeV1096?.frozen !== true
+  ){
+    if(oneMinuteTrackerV1096?.version !== "V1096")
+      oneMinuteReasonV1096 = "PRE_V1096_OR_NOT_INITIALISED";
+    else if(!oneMinuteMatureV1096)
+      oneMinuteReasonV1096 = "TARGET_NOT_REACHED_YET";
+    else
+      oneMinuteReasonV1096 = "WAITING_FOR_FIRST_VERIFIED_POST_TARGET_LIVE_OBSERVATION";
+  }
+  lines.push(
+    "⏱ <b>1m horizon — V1096 forward-only</b>",
+    `   Target: <b>${fmtTime(oneMinuteTargetAtV1096)}</b> | Reached: <b>${oneMinuteMatureV1096 ? "YES" : "NO"}</b>`,
+    `   Captured: <b>${oneMinuteOutcomeV1096?.verified===true&&oneMinuteOutcomeV1096?.frozen===true?"YES":"NO"}</b>`
+  );
+  if(oneMinuteOutcomeV1096?.verified===true&&oneMinuteOutcomeV1096?.frozen===true){
+    lines.push(
+      `   Observed: <b>${fmtTime(oneMinuteOutcomeV1096?.observedAt)}</b> | MC <b>${fmtMc(oneMinuteOutcomeV1096?.marketCap)}</b> | ${telegramMultipleV271(oneMinuteOutcomeV1096?.multipleByMarketCap)}`,
+      `   Price move: <b>${Number.isFinite(Number(oneMinuteOutcomeV1096?.priceGrowthPct))?`${Number(oneMinuteOutcomeV1096.priceGrowthPct)>=0?"+":""}${Number(oneMinuteOutcomeV1096.priceGrowthPct).toFixed(2)}%`:"UNVERIFIED"}</b> | Lag: <b>${compactCallAgeV307(safeNumber(oneMinuteOutcomeV1096?.observationLagMs))}</b>`
+    );
+  }
+  lines.push(`   Reason: <code>${escapeHtml(oneMinuteReasonV1096)}</code>`);
 
   lines.push("");
 
@@ -139237,6 +139311,29 @@ function performanceSummaryV271(
         value >= 10
     ).length;
 
+  const oneMinuteRowsV1096 = entries
+    .map(record => record?.oneMinuteOutcomeV1096?.outcome || null)
+    .filter(outcome =>
+      outcome?.verified === true &&
+      outcome?.frozen === true &&
+      Number.isFinite(Number(outcome?.multipleByMarketCap)) &&
+      Number(outcome.multipleByMarketCap) > 0
+    );
+  const oneMinuteMultiplesV1096 =
+    oneMinuteRowsV1096
+      .map(outcome => Number(outcome.multipleByMarketCap))
+      .sort((a,b)=>a-b);
+  const oneMinuteMedianV1096 = oneMinuteMultiplesV1096.length
+    ? (
+        oneMinuteMultiplesV1096.length % 2
+          ? oneMinuteMultiplesV1096[Math.floor(oneMinuteMultiplesV1096.length/2)]
+          : (
+              oneMinuteMultiplesV1096[(oneMinuteMultiplesV1096.length/2)-1] +
+              oneMinuteMultiplesV1096[oneMinuteMultiplesV1096.length/2]
+            ) / 2
+      )
+    : null;
+
   const best =
     verifiedAth
       .slice()
@@ -139266,6 +139363,7 @@ function performanceSummaryV271(
     `Reached 2x+: <b>${reached2x}</b>`,
     `Reached 5x+: <b>${reached5x}</b>`,
     `Reached 10x+: <b>${reached10x}</b>`,
+    `⏱ V1096 1m captured: <b>${oneMinuteRowsV1096.length}</b> | Median 1m MC: <b>${telegramMultipleV271(oneMinuteMedianV1096)}</b>`,
     best
       ? `Best call: <b>${escapeHtml(
           best?.symbol ||
@@ -194246,7 +194344,8 @@ async function registerLiveHorizonV413(env, registration) {
             : null,
         entryHolderSourceV620:registration?.entryHolderSourceV620||null,
         telegramMessageId: Number(entryProof.messageId),
-        registeredAt: Date.now()
+        registeredAt: Date.now(),
+        oneMinutePerformanceV1096: true
       })
     });
     const result = await response.json().catch(() => ({}));
@@ -194306,6 +194405,52 @@ async function mergeLiveHorizonSnapshotsV413(state, env) {
       tracker.outcomes = tracker.outcomes && typeof tracker.outcomes === "object" ? tracker.outcomes : {h1:null,h6:null,h24:null};
       if (!tracker.outcomes[key] && outcome?.verified === true && outcome?.frozen === true) {
         tracker.outcomes[key] = { ...outcome };
+        outcomesMerged++;
+        touched = true;
+      }
+    }
+
+    const liveOneMinuteV1096 =
+      live?.oneMinuteOutcomeV1096 &&
+      typeof live.oneMinuteOutcomeV1096 === "object"
+        ? live.oneMinuteOutcomeV1096
+        : null;
+    if(
+      liveOneMinuteV1096?.version === "V1096" &&
+      liveOneMinuteV1096?.forwardOnly === true &&
+      liveOneMinuteV1096?.hindsightBackfillAllowed === false
+    ){
+      const currentOneMinuteV1096 =
+        record?.oneMinuteOutcomeV1096 &&
+        typeof record.oneMinuteOutcomeV1096 === "object"
+          ? record.oneMinuteOutcomeV1096
+          : null;
+
+      if(!currentOneMinuteV1096){
+        record.oneMinuteOutcomeV1096 = {
+          version:"V1096",
+          forwardOnly:true,
+          hindsightBackfillAllowed:false,
+          entryTimestamp:Number(record.entryTimestamp),
+          targetAt:Number(record.entryTimestamp)+(60*1000),
+          outcome:
+            liveOneMinuteV1096?.outcome?.verified === true &&
+            liveOneMinuteV1096?.outcome?.frozen === true
+              ? {...liveOneMinuteV1096.outcome}
+              : null
+        };
+        if(record.oneMinuteOutcomeV1096.outcome) outcomesMerged++;
+        touched = true;
+      }else if(
+        !currentOneMinuteV1096?.outcome &&
+        liveOneMinuteV1096?.outcome?.verified === true &&
+        liveOneMinuteV1096?.outcome?.frozen === true
+      ){
+        currentOneMinuteV1096.outcome = {
+          ...liveOneMinuteV1096.outcome
+        };
+        currentOneMinuteV1096.targetAt =
+          Number(record.entryTimestamp)+(60*1000);
         outcomesMerged++;
         touched = true;
       }
@@ -195542,6 +195687,17 @@ export class V3LiveCollectorV363 {
         telegramMessageId,
         registeredAt: Number(body?.registeredAt) || Date.now(),
         latestObservation: null,
+        oneMinuteOutcomeV1096:
+          body?.oneMinutePerformanceV1096 === true
+            ? {
+                version:"V1096",
+                forwardOnly:true,
+                hindsightBackfillAllowed:false,
+                entryTimestamp,
+                targetAt:entryTimestamp+(60*1000),
+                outcome:null
+              }
+            : null,
         outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h12:null,h24:null},
         growthOutcomesV620:{
           version:"V620",
@@ -195729,6 +195885,51 @@ export class V3LiveCollectorV363 {
         row.rollingMarketV414 = historyV414.slice(-LIVE_ROLLING_MAX_POINTS_V414);
         row.liveSignalsV414 = computeLiveSignalsV414(row.rollingMarketV414, row.liveSignalsV414);
         updateBreakoutLearningV414(row, observedAt, marketCap);
+
+        const oneMinuteV1096 =
+          row?.oneMinuteOutcomeV1096 &&
+          typeof row.oneMinuteOutcomeV1096 === "object"
+            ? row.oneMinuteOutcomeV1096
+            : null;
+        if(
+          oneMinuteV1096?.version === "V1096" &&
+          oneMinuteV1096?.forwardOnly === true &&
+          oneMinuteV1096?.hindsightBackfillAllowed === false &&
+          !oneMinuteV1096?.outcome
+        ){
+          const oneMinuteTargetAt =
+            Number(row.entryTimestamp) + (60 * 1000);
+          oneMinuteV1096.targetAt = oneMinuteTargetAt;
+          if(observedAt >= oneMinuteTargetAt){
+            const entryMcV1096 = Number(row.entryMarketCap);
+            const entryPriceV1096 = Number(row.entryPriceUsd);
+            oneMinuteV1096.outcome = {
+              verified:true,
+              frozen:true,
+              targetAt:oneMinuteTargetAt,
+              observedAt,
+              observationLagMs:observedAt-oneMinuteTargetAt,
+              marketCap,
+              multipleByMarketCap:
+                Number.isFinite(entryMcV1096) && entryMcV1096 > 0
+                  ? marketCap / entryMcV1096
+                  : null,
+              entryPriceUsd:
+                Number.isFinite(entryPriceV1096) && entryPriceV1096 > 0
+                  ? entryPriceV1096
+                  : null,
+              priceUsd:observedPriceV620,
+              priceGrowthPct:
+                observedPriceV620 !== null &&
+                Number.isFinite(entryPriceV1096) &&
+                entryPriceV1096 > 0
+                  ? ((observedPriceV620-entryPriceV1096)/entryPriceV1096)*100
+                  : null,
+              source:"DEXSCREENER_LIVE_HORIZON_V1096_REUSED_V413"
+            };
+          }
+          row.oneMinuteOutcomeV1096 = oneMinuteV1096;
+        }
 
         row.growthOutcomesV620=
           row?.growthOutcomesV620&&typeof row.growthOutcomesV620==="object"
