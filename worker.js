@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1126"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1127"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192367,6 +192367,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     );
   }
 
+
+  if (
+    path ===
+      "/live-cohort-observation-routing-status"
+  ) {
+    return jsonResponse(
+      await liveCohortObservationRoutingStatusV1127(env, url)
+    );
+  }
+
   if (
     path ===
       "/live-decision-observer-start"
@@ -197479,6 +197489,201 @@ async function livePromotionEvidenceProgressionV1126(env, url){
       noAutoFix:"V1126 is diagnostic only. It does not promote the token or modify safety/quality gates."
     },
     note:"V1126 diagnoses why a maturing near-miss is not progressing using only ChainVanta state and durable D1 history. No external provider/RPC requests are added.",
+    timestamp:now()
+  };
+}
+
+
+// V1127: cohort observation-selection/write-routing diagnostic.
+// Read-only: simulates the current durable-cohort selector on a cloned state,
+// joins persisted cohort timestamps with D1 market-history freshness, and
+// exposes the latest admission attempt. It makes no provider/RPC requests and
+// does not write state, D1, scoring, promotion, Telegram, or live-lane data.
+async function liveCohortObservationRoutingStatusV1127(env, url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const nearMiss=await livePromotionNearMissStatusV1125(env);
+  const maturing=(Array.isArray(nearMiss?.allNonDominantCandidates)?nearMiss.allNonDominantCandidates:[])
+    .filter(r=>r?.nearMissTier==="TIER_1_MATURING_V1125")
+    .sort((a,b)=>safeNumber(b?.nearMissScore)-safeNumber(a?.nearMissScore));
+  const selectedAddress=isAddress(requested)?requested:normalize(maturing?.[0]?.address);
+
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const cohort=ensureIntelligenceCohortV1079(state);
+  const entries=Array.isArray(cohort?.entries)?cohort.entries:[];
+  const addresses=entries.map(e=>normalize(e?.address)).filter(isAddress);
+  const history=await cohortHistorySummariesV1081(env,addresses);
+  const historyByAddress=new Map(
+    (history?.ok&&Array.isArray(history?.rows)?history.rows:[])
+      .map(r=>[normalize(r?.address),r])
+      .filter(([a])=>isAddress(a))
+  );
+  const nowMs=Date.now();
+  const watched=Array.isArray(state?.watchedTokens)?state.watchedTokens:[];
+  const watchedSet=new Set(watched.map(t=>normalize(t?.address)).filter(isAddress));
+
+  let simulatedSelection=null;
+  try{
+    const clonedState=typeof structuredClone==="function"
+      ? structuredClone(state)
+      : JSON.parse(JSON.stringify(state));
+    simulatedSelection=await selectIntelligenceFollowUpV1079(env,clonedState,true);
+  }catch(error){
+    simulatedSelection={status:"SIMULATED_SELECTOR_FAILED_V1127",error:errorString(error).slice(0,700)};
+  }
+
+  const cohortRows=entries.map(entry=>{
+    const address=normalize(entry?.address);
+    const row=historyByAddress.get(address)||null;
+    const observations=row?safeNumber(row?.observation_count):safeNumber(entry?.observationCount);
+    const lastHistoryAt=row?safeNumber(row?.last_at)||null:safeNumber(entry?.latestHistoryAt)||null;
+    const firstHistoryAt=row?safeNumber(row?.first_at)||null:null;
+    const lastSelectedAt=safeNumber(entry?.lastSelectedAt)||null;
+    const lastAnalysedAt=safeNumber(entry?.lastAnalysedAt)||null;
+    const cooldownRemainingMs=lastSelectedAt
+      ? Math.max(0,INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079-(nowMs-lastSelectedAt))
+      : 0;
+    return {
+      address,
+      symbol:entry?.symbol||row?.symbol||null,
+      isRequestedTarget:isAddress(selectedAddress)&&address===selectedAddress,
+      observations,
+      firstHistoryAt,
+      lastHistoryAt,
+      historyAgeMs:lastHistoryAt?Math.max(0,nowMs-lastHistoryAt):null,
+      lastSelectedAt,
+      selectedAgeMs:lastSelectedAt?Math.max(0,nowMs-lastSelectedAt):null,
+      lastAnalysedAt,
+      analysedAgeMs:lastAnalysedAt?Math.max(0,nowMs-lastAnalysedAt):null,
+      selectionCooldownRemainingMs:cooldownRemainingMs,
+      selectionCooldownActive:cooldownRemainingMs>0,
+      stillInMainWatchlist:watchedSet.has(address),
+      marketVerified:row?Number(row?.market_verified)===1:entry?.marketVerified===true,
+      onChainPriceVerifiedRows:row?safeNumber(row?.onchain_price_verified_count):0,
+      onChainPriceChangedRows:row?safeNumber(row?.onchain_price_changed_count):0,
+      eligibleByCurrentHistory:row?intelligenceWatchRowEligibleV1077(row,nowMs):null
+    };
+  }).sort((a,b)=>
+    safeNumber(a?.observations)-safeNumber(b?.observations) ||
+    safeNumber(a?.lastSelectedAt)-safeNumber(b?.lastSelectedAt)
+  );
+
+  const target=cohortRows.find(r=>r.address===selectedAddress)||null;
+  const latestAdmission=cohort?.lastAdmissionAttemptV1090||null;
+  const simulationAddress=normalize(simulatedSelection?.selectedAddress);
+  const targetSelectedBySimulation=isAddress(selectedAddress)&&simulationAddress===selectedAddress;
+
+  const findings=[];
+  let status="COHORT_ROUTING_HEALTHY_V1127";
+  let likelyCause="NORMAL_BREADTH_ROTATION_OR_INACTIVITY_V1127";
+
+  if(!isAddress(selectedAddress)){
+    status="NO_TARGET_TOKEN_V1127";
+    likelyCause="NO_TIER_1_MATURING_TARGET_V1127";
+    findings.push("NO_VALID_TARGET");
+  }else if(!target){
+    status="TARGET_NOT_IN_DURABLE_COHORT_V1127";
+    likelyCause="COHORT_RETENTION_OR_EVICTION_V1127";
+    findings.push("TARGET_NOT_PRESENT_IN_COHORT");
+  }else{
+    if(target.historyAgeMs!==null && target.historyAgeMs>15*60*1000)
+      findings.push("TARGET_HISTORY_OLDER_THAN_15M");
+    if(target.lastSelectedAt===null) findings.push("TARGET_HAS_NO_RECORDED_COHORT_SELECTION");
+    if(target.lastAnalysedAt===null) findings.push("TARGET_HAS_NO_RECORDED_COHORT_ANALYSIS");
+    if(target.selectionCooldownActive) findings.push("TARGET_CURRENTLY_IN_SELECTION_COOLDOWN");
+    if(!target.stillInMainWatchlist) findings.push("TARGET_NOT_IN_MAIN_WATCHLIST_BUT_DURABLE_COHORT_CAN_STILL_SELECT_IT");
+    if(target.onChainPriceVerifiedRows===0) findings.push("TARGET_HAS_ZERO_ONCHAIN_PRICE_HISTORY_ROWS");
+
+    const otherLowerObservation=cohortRows.some(r=>r.address!==selectedAddress && safeNumber(r?.observations)<safeNumber(target?.observations));
+    const otherSameOlderSelection=cohortRows.some(r=>
+      r.address!==selectedAddress &&
+      safeNumber(r?.observations)===safeNumber(target?.observations) &&
+      safeNumber(r?.lastSelectedAt)<safeNumber(target?.lastSelectedAt)
+    );
+    if(otherLowerObservation) findings.push("BREADTH_SELECTOR_HAS_LOWER_OBSERVATION_TOKEN_AHEAD");
+    else if(otherSameOlderSelection) findings.push("BREADTH_SELECTOR_HAS_EQUALLY_SPARSE_TOKEN_SELECTED_LESS_RECENTLY");
+
+    if(targetSelectedBySimulation){
+      findings.push("TARGET_IS_CURRENT_SIMULATED_COHORT_SELECTION");
+      likelyCause="TARGET_DUE_FOR_NEXT_COHORT_FOLLOW_UP_V1127";
+    }else if(simulationAddress){
+      findings.push("SIMULATED_SELECTOR_CURRENTLY_PREFERS_ANOTHER_COHORT_TOKEN");
+      likelyCause="NORMAL_COHORT_BREADTH_ROTATION_V1127";
+    }
+
+    const latestAdmissionAddress=normalize(latestAdmission?.provisionalAddress);
+    if(latestAdmissionAddress===selectedAddress){
+      if(latestAdmission?.actuallyAdmitted===true) findings.push("LATEST_TARGET_ADMISSION_WAS_ACCEPTED");
+      else {
+        findings.push("LATEST_TARGET_ADMISSION_WAS_NOT_ACCEPTED");
+        if(latestAdmission?.blocker) findings.push(`LATEST_ADMISSION_BLOCKER:${latestAdmission.blocker}`);
+        status="TARGET_ADMISSION_BLOCKED_V1127";
+        likelyCause="COHORT_SLOT_ADMISSION_BLOCK_V1127";
+      }
+    }
+
+    // Escalate only when target is stale and neither rotation nor cooldown plausibly explains it.
+    if(
+      target.historyAgeMs!==null && target.historyAgeMs>60*60*1000 &&
+      !target.selectionCooldownActive &&
+      targetSelectedBySimulation &&
+      latestAdmissionAddress===selectedAddress &&
+      latestAdmission?.actuallyAdmitted===true &&
+      target.lastAnalysedAt && target.lastHistoryAt &&
+      target.lastAnalysedAt>target.lastHistoryAt+60*1000
+    ){
+      status="POSSIBLE_POST_ANALYSIS_HISTORY_WRITE_GAP_V1127";
+      likelyCause="TARGET_ANALYSED_AFTER_LAST_D1_OBSERVATION_WITHOUT_FRESH_HISTORY_ROW_V1127";
+      findings.push("LAST_ANALYSIS_NEWER_THAN_LAST_D1_HISTORY_WITHOUT_FRESH_ROW");
+    }else if(target.historyAgeMs!==null && target.historyAgeMs>60*60*1000 && targetSelectedBySimulation){
+      status="TARGET_DUE_FOR_FOLLOW_UP_V1127";
+    }
+  }
+
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_COHORT_OBSERVATION_ROUTING_STATUS_V1127",
+    success:stateRead?.ok!==false && history?.ok===true,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    stateWrites:0,
+    d1Writes:0,
+    requestedToken:isAddress(requested)?requested:null,
+    selectedToken:selectedAddress||null,
+    status,
+    likelyCause,
+    target,
+    simulatedCurrentSelection:{
+      status:simulatedSelection?.status||null,
+      selectedAddress:simulationAddress||null,
+      selectedSymbol:simulatedSelection?.selectedSymbol||null,
+      selectionPurpose:simulatedSelection?.selectionPurposeV1100||null,
+      observationCount:safeNumber(simulatedSelection?.observationCount),
+      cohortEntries:safeNumber(simulatedSelection?.cohortEntries),
+      targetSelected:targetSelectedBySimulation,
+      admissionNotSimulated:true
+    },
+    latestPersistedAdmissionAttempt:latestAdmission,
+    cohortHistoryRead:{
+      ok:history?.ok===true,
+      status:history?.status||null,
+      matchedAddresses:safeNumber(history?.rows?.length)
+    },
+    cohortRows,
+    findings,
+    interpretation:{
+      selector:"The simulated selector uses the existing V1079/V1100 breadth/depth rules on a cloned state. It does not commit cooldown/admission state.",
+      admission:"The persisted V1090 admission snapshot shows the most recent real cohort-slot attempt from a completed scanner cycle.",
+      historyWrite:"A real post-analysis write gap is only flagged when analysis is newer than D1 history and normal rotation/cooldown no longer explains the delay.",
+      noAutoFix:"V1127 is diagnostic only. It does not relax gates, force a token into analysis, or write synthetic observations."
+    },
+    note:"V1127 traces durable-cohort selection/admission/history freshness using existing state and D1 only. Zero new provider/RPC traffic.",
     timestamp:now()
   };
 }
