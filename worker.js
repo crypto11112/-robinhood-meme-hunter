@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1144"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1145"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1144 — FLOW-BOOTSTRAP ELIGIBILITY PREDICATE AUDIT
@@ -90075,6 +90075,119 @@ function retireStaleSinglePoolRawWatchesV754(state, latestNumber) {
   };
 }
 
+
+// V1145: keep/recover a quality-safe durable cohort exact pool long enough to
+// complete its first forward-only V551 collection range. This uses only
+// persisted ChainVanta cohort + canonical pool-registry state; it adds no RPC
+// or provider requests and does not expand the 24-entry watch.
+function durableCohortFirstRangeRetentionEligibleV1145(state,row) {
+  const token=normalize(row?.tokenAddress||"");
+  if(!isAddress(token) || row?.rawOnlyV740===true || safeNumber(row?.successfulRanges)!==0) return false;
+  const quote=normalize(row?.quoteTokenAddress||"");
+  if(![ZERO,CANONICAL_WETH_V179,CANONICAL_USDG_V179].includes(quote)) return false;
+  const cohort=state?.intelligenceCohortV1079||null;
+  const entry=Array.isArray(cohort?.entries)
+    ? cohort.entries.find(item=>normalize(item?.address||"")===token)||null
+    : null;
+  if(!entry) return false;
+  const opportunity=finiteOrNullV1076(entry?.opportunityScore);
+  const confidence=finiteOrNullV1076(entry?.confidenceScore);
+  const risk=finiteOrNullV1076(entry?.riskScore);
+  const qualitySafe=Boolean(
+    opportunity!==null && opportunity>=INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128 &&
+    confidence!==null && confidence>=INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128 &&
+    risk!==null && risk<=INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128
+  );
+  const previouslyWorked=Boolean(safeNumber(entry?.lastSelectedAt)>0 || safeNumber(entry?.lastAnalysedAt)>0);
+  return qualitySafe && previouslyWorked;
+}
+
+function durableCohortDirectionalRecoveryCandidatesV1145(state,latestNumber) {
+  const cohort=state?.intelligenceCohortV1079||null;
+  const entries=Array.isArray(cohort?.entries)?cohort.entries:[];
+  const registry=state?.poolRegistry&&typeof state.poolRegistry==="object"?state.poolRegistry:{};
+  const watchRoot=directionalWatchRootV551(state||{});
+  const watchedTokens=new Set(Object.values(watchRoot?.entries||{}).map(row=>normalize(row?.tokenAddress||"")).filter(isAddress));
+  const recovered=[];
+  for(const entry of entries){
+    const token=normalize(entry?.address||"");
+    if(!isAddress(token)||watchedTokens.has(token)) continue;
+    const opportunity=finiteOrNullV1076(entry?.opportunityScore);
+    const confidence=finiteOrNullV1076(entry?.confidenceScore);
+    const risk=finiteOrNullV1076(entry?.riskScore);
+    const qualitySafe=Boolean(
+      opportunity!==null && opportunity>=INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128 &&
+      confidence!==null && confidence>=INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128 &&
+      risk!==null && risk<=INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128
+    );
+    if(!qualitySafe || !(safeNumber(entry?.lastSelectedAt)>0 || safeNumber(entry?.lastAnalysedAt)>0)) continue;
+    const matches=[];
+    for(const [rawPoolId,raw] of Object.entries(registry)){
+      const poolId=normalize(raw?.poolId||rawPoolId);
+      const c0=normalize(raw?.currency0||raw?.token0||"");
+      const c1=normalize(raw?.currency1||raw?.token1||"");
+      if(!/^0x[a-f0-9]{64}$/.test(String(poolId||""))||!isAddress(c0)||!isAddress(c1)||c0===c1) continue;
+      if(c0!==token&&c1!==token) continue;
+      const quote=c0===token?c1:c0;
+      if(![ZERO,CANONICAL_WETH_V179,CANONICAL_USDG_V179].includes(quote)) continue;
+      const swapBlock=Math.max(safeNumber(raw?.lastSwapBlockV746),safeNumber(raw?.lastSwapBlock));
+      const activityBlock=Math.max(swapBlock,safeNumber(raw?.lastActivityBlock),safeNumber(raw?.blockNumber));
+      matches.push({poolId,currency0:c0,currency1:c1,quoteTokenAddress:quote,swapBlock,activityBlock});
+    }
+    if(!matches.length) continue;
+    matches.sort((a,b)=>b.swapBlock-a.swapBlock||b.activityBlock-a.activityBlock||String(a.poolId).localeCompare(String(b.poolId)));
+    const top=matches[0];
+    const second=matches[1]||null;
+    // Multiple supported pools are only recovered when the canonical registry has
+    // a unique freshest retained swap/activity winner. Ambiguous ties stay out.
+    if(second && top.swapBlock===second.swapBlock && top.activityBlock===second.activityBlock) continue;
+    recovered.push({
+      address:token,
+      symbol:entry?.symbol||null,
+      validERC20:true,
+      opportunity:{score:opportunity},
+      confidence,
+      risk:{score:risk},
+      onChainPoolIdentityV153:{
+        verified:true,
+        status:"DURABLE_COHORT_CANONICAL_EXACT_POOL_RECOVERY_V1145",
+        source:"DURABLE_COHORT_PLUS_CANONICAL_POOL_REGISTRY_V1145",
+        poolId:top.poolId,
+        pairAddress:top.poolId,
+        candidateAddress:token,
+        quoteTokenAddress:top.quoteTokenAddress,
+        currency0V740:top.currency0,
+        currency1V740:top.currency1,
+        rawActivityOnlyV740:false,
+        registryIdentityRecoveryV742:false,
+        durableCohortRecoveryV1145:true
+      },
+      activity:{poolSpecific:true,swaps:0,liquidityEvents:0},
+      cohortExactPoolHandoffV1087:{
+        verified:true,
+        source:"DURABLE_COHORT_CANONICAL_REGISTRY_RECOVERY_V1145",
+        tokenAddress:token,
+        poolId:top.poolId,
+        quoteTokenAddress:top.quoteTokenAddress,
+        forwardOnly:true,
+        historicalBackfill:false,
+        requestCeilingRaised:false
+      },
+      durableFirstRangeRecoveryV1145:{
+        verified:true,
+        source:"DURABLE_COHORT_CANONICAL_REGISTRY_V1145",
+        registryMatches:matches.length,
+        selectedSwapBlock:top.swapBlock||null,
+        selectedActivityBlock:top.activityBlock||null,
+        latestNumber:Number.isFinite(Number(latestNumber))?Number(latestNumber):null,
+        firstRangeOnly:true,
+        externalRequestsAdded:0
+      }
+    });
+  }
+  return recovered.slice(0,4);
+}
+
 function pruneDirectionalWatchV551(state) {
   const root = directionalWatchRootV551(state);
   const now = Date.now();
@@ -90115,6 +90228,10 @@ function pruneDirectionalWatchV551(state) {
   });
 
   const retentionTierV565 = row => {
+    // V1145: a quality-safe durable cohort pool with zero successful ranges is
+    // temporarily retention-protected until its first forward-only range.
+    if (durableCohortFirstRangeRetentionEligibleV1145(state,row)) return 8;
+
     /*
      * V573 keeps the original evidence-first philosophy while ensuring that
      * a recently proven exact-USD pool can enter the bounded watch instead of
@@ -90315,6 +90432,9 @@ function pruneDirectionalWatchV551(state) {
     eligibleCount: eligibleRows.length,
     keptCount: rows.length,
     droppedCount: droppedRows.length,
+    durableFirstRangeRetentionV1145:true,
+    durableFirstRangeKeptV1145:rows.filter(row=>durableCohortFirstRangeRetentionEligibleV1145(state,row)).length,
+    durableFirstRangeDroppedV1145:droppedRows.filter(row=>durableCohortFirstRangeRetentionEligibleV1145(state,row)).length,
     keptEverCaughtUp: rows.filter(row => row?.everCaughtUpV565 === true).length,
     keptWithExactUsdEvidence: rows.filter(
       row =>
@@ -120637,11 +120757,15 @@ for (
     };
   }
 
+  const directionalDurableCohortRecoveryCandidatesV1145 =
+    durableCohortDirectionalRecoveryCandidatesV1145(state, latestNumber);
+
   const directionalWatchRegistrationCandidatesV555 = [
     ...directionalPriorCompletionRecoveryCandidatesV574,
     ...directionalPersistedRecoveryCandidatesV573,
     ...directionalObservedExactPoolCandidatesV570,
     ...directionalCohortExactPoolCandidatesV1087,
+    ...directionalDurableCohortRecoveryCandidatesV1145,
     ...directionalRawExactPoolCandidatesV740,
     ...directionalActiveExactPoolCandidatesV555,
     ...directionalProviderCorroboratedExactPoolCandidatesV737,
@@ -120680,6 +120804,23 @@ for (
       onChainDirectionalV179?.wethUsdGReferenceV187 ||
         bestVerifiedWethUsdGReferenceV195(state)
     );
+
+  directionalWatchRegistrationV551.v1145DurableFirstRangeRecovery = {
+    enabled:true,
+    considered:directionalDurableCohortRecoveryCandidatesV1145.length,
+    rows:directionalDurableCohortRecoveryCandidatesV1145.map(candidate=>({
+      address:normalize(candidate?.address)||null,
+      symbol:candidate?.symbol||null,
+      poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId)||null,
+      quoteTokenAddress:normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress)||null,
+      registryMatches:safeNumber(candidate?.durableFirstRangeRecoveryV1145?.registryMatches),
+      selectedSwapBlock:safeNumber(candidate?.durableFirstRangeRecoveryV1145?.selectedSwapBlock)||null
+    })),
+    watchCapacityUnchanged:24,
+    requestCeilingsChanged:false,
+    externalRequestsAdded:0,
+    firstRangeOnly:true
+  };
 
   directionalWatchRegistrationV551.v737EarlyProviderCorroboratedHandoff = {
     enabled:true,
