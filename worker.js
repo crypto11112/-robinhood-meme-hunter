@@ -1,5 +1,12 @@
 /**
- * ChainVanta — V1155
+ * ChainVanta — V1156
+
+ * V1156 — canonical-continuity-first durable cohort watch recovery.
+ * V1133 proved SCHIFFY retained a supported canonical exact pool while its bounded V551 watch row was absent.
+ * V1145 recovery already knows how to rebuild that row, but its fixed four-candidate output was cohort-order dependent.
+ * V1156 keeps the same four recovery-input cap and the same 24-row watch capacity, but ranks proven V1146
+ * continuity first, then stronger/recent proven collection state, before quality-safe fallback recovery.
+ * Adds zero provider/RPC requests and changes no scoring, promotion thresholds, request ceilings, risk, or Telegram behavior.
  * V1155: V551 protected-owner budget handoff + single-slot provider routing.
  * - V1154 live evidence proved cursor persistence is healthy, but V551 could reach
  *   its protected request with only one real analysis slot remaining while the
@@ -9769,7 +9776,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1155"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1156"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -91019,7 +91026,55 @@ function durableCohortDirectionalRecoveryCandidatesV1145(state,latestNumber) {
       }
     });
   }
-  return recovered.slice(0,4);
+  // V1156: V1145 previously returned the first four qualifying cohort rows in
+  // durable-cohort array order. Under a full cohort this could starve a token
+  // whose exact pool + cursor had already been proven and remembered by V1146
+  // (SCHIFFY was observed in V1133 as REGISTRY_PRESENT_WATCH_MISSING).
+  // Keep the same four-candidate recovery-input cap, but make selection
+  // evidence-driven: proven canonical continuity first, then the strongest and
+  // most recently collected proven state, then current quality scores.
+  recovered.sort((a,b) => {
+    const aRecovery=a?.durableFirstRangeRecoveryV1145||{};
+    const bRecovery=b?.durableFirstRangeRecoveryV1145||{};
+    const aContinuity=aRecovery?.canonicalPoolContinuityV1146===true?1:0;
+    const bContinuity=bRecovery?.canonicalPoolContinuityV1146===true?1:0;
+    if (bContinuity!==aContinuity) return bContinuity-aContinuity;
+
+    const aPrior=aRecovery?.priorWatchStateV1146||{};
+    const bPrior=bRecovery?.priorWatchStateV1146||{};
+    const aRanges=safeNumber(aPrior?.successfulRanges);
+    const bRanges=safeNumber(bPrior?.successfulRanges);
+    if (bRanges!==aRanges) return bRanges-aRanges;
+
+    const aCollected=safeNumber(aPrior?.lastCollectedAt);
+    const bCollected=safeNumber(bPrior?.lastCollectedAt);
+    if (bCollected!==aCollected) return bCollected-aCollected;
+
+    const opportunityDelta=safeNumber(b?.opportunity?.score)-safeNumber(a?.opportunity?.score);
+    if (opportunityDelta!==0) return opportunityDelta;
+    const confidenceDelta=safeNumber(b?.confidence)-safeNumber(a?.confidence);
+    if (confidenceDelta!==0) return confidenceDelta;
+    return String(normalize(a?.address)||'').localeCompare(String(normalize(b?.address)||''));
+  });
+
+  const selectedV1156=recovered.slice(0,4);
+  for (let index=0; index<recovered.length; index++) {
+    const candidate=recovered[index];
+    if (!candidate?.durableFirstRangeRecoveryV1145) continue;
+    const prior=candidate.durableFirstRangeRecoveryV1145?.priorWatchStateV1146||null;
+    candidate.durableFirstRangeRecoveryV1145.recoverySelectionV1156={
+      rank:index+1,
+      selected:index<4,
+      fixedInputCap:4,
+      canonicalContinuity:candidate.durableFirstRangeRecoveryV1145?.canonicalPoolContinuityV1146===true,
+      priorSuccessfulRanges:safeNumber(prior?.successfulRanges),
+      priorLastCollectedBlock:safeNumber(prior?.lastCollectedBlock)||null,
+      priorLastCollectedAt:safeNumber(prior?.lastCollectedAt)||null,
+      opportunityScore:safeNumber(candidate?.opportunity?.score),
+      confidenceScore:safeNumber(candidate?.confidence)
+    };
+  }
+  return selectedV1156;
 }
 
 function pruneDirectionalWatchV551(state) {
@@ -122069,7 +122124,8 @@ for (
       poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId)||null,
       quoteTokenAddress:normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress)||null,
       registryMatches:safeNumber(candidate?.durableFirstRangeRecoveryV1145?.registryMatches),
-      selectedSwapBlock:safeNumber(candidate?.durableFirstRangeRecoveryV1145?.selectedSwapBlock)||null
+      selectedSwapBlock:safeNumber(candidate?.durableFirstRangeRecoveryV1145?.selectedSwapBlock)||null,
+      recoverySelectionV1156:candidate?.durableFirstRangeRecoveryV1145?.recoverySelectionV1156||null
     })),
     watchCapacityUnchanged:24,
     requestCeilingsChanged:false,
