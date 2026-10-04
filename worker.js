@@ -1,4 +1,26 @@
 /**
+ * ChainVanta — V1100
+ * ESTABLISHED-TOKEN PRICE DEPTH ROTATION
+ * Builds directly from deployed V1099.
+ * - Fixes the breadth-without-depth pattern exposed by V1095: many tokens had
+ *   one verified V438 on-chain price, but almost none were revisited enough to
+ *   produce a changed-price sequence.
+ * - Keeps ONE existing durable-cohort follow-up slot per suitable scheduled scan.
+ *   No extra token slot, RPC/provider request ceiling, or fresh-launch budget.
+ * - Alternates the existing cohort slot between:
+ *     DEPTH — revisit a token that already has verified V438 price evidence but
+ *             still needs a useful longitudinal price sequence; and
+ *     BREADTH — preserve the existing fewest-observations rotation.
+ * - Depth candidates are bounded: priority remains only while they have fewer
+ *   than 4 verified on-chain price rows OR fewer than 2 changed-price rows.
+ * - D1-only selection metadata; the actual analysis remains the existing proven
+ *   cohort/RPC/V438 path.
+ * - Adds depth telemetry to /intelligence-cohort-status.
+ * - No scoring, qualification, Telegram thresholds, scanner cadence, provider
+ *   routing, or global request ceilings change.
+ */
+
+/**
  * ChainVanta — V1099
  * 2H + 4H FORWARD PERFORMANCE CHECKPOINTS
  * Builds directly from deployed V1098.
@@ -9363,7 +9385,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1099"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1100"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -185882,14 +185904,23 @@ async function cohortHistorySummariesV1081(env, addresses) {
         h.age_hours,
         s.observation_count,
         s.first_at,
-        s.last_at
+        s.last_at,
+        s.onchain_price_verified_count,
+        s.onchain_price_changed_count,
+        s.last_onchain_price_observed_at
       FROM ${MARKET_HISTORY_TABLE_V1076} h
       JOIN (
         SELECT
           address,
           COUNT(*) AS observation_count,
           MIN(captured_at) AS first_at,
-          MAX(captured_at) AS last_at
+          MAX(captured_at) AS last_at,
+          SUM(CASE WHEN onchain_price_verified=1 THEN 1 ELSE 0 END)
+            AS onchain_price_verified_count,
+          SUM(CASE WHEN onchain_price_snapshot_changed=1 THEN 1 ELSE 0 END)
+            AS onchain_price_changed_count,
+          MAX(CASE WHEN onchain_price_verified=1 THEN onchain_price_observed_at ELSE NULL END)
+            AS last_onchain_price_observed_at
         FROM ${MARKET_HISTORY_TABLE_V1076}
         WHERE address IN (${placeholders})
         GROUP BY address
@@ -186595,6 +186626,10 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
     cohortEntries:0,
     cohortRefresh:null,
     selectedFromDurableCohort:false,
+    selectionPurposeV1100:null,
+    depthEligibleCandidatesV1100:0,
+    selectedOnChainPriceRowsV1100:0,
+    selectedChangedPriceRowsV1100:0,
     status:null,
     error:null,
     externalRequestsUsed:0,
@@ -186666,17 +186701,54 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
       historyScore,
       observationCount:
         row ? safeNumber(row?.observation_count) : safeNumber(entry?.observationCount),
+      onChainPriceVerifiedCountV1100:
+        row ? safeNumber(row?.onchain_price_verified_count) : 0,
+      onChainPriceChangedCountV1100:
+        row ? safeNumber(row?.onchain_price_changed_count) : 0,
+      lastOnChainPriceObservedAtV1100:
+        row ? safeNumber(row?.last_onchain_price_observed_at) : 0,
       lastSelectedAt
     });
   }
 
-  ranked.sort((a,b) =>
-    safeNumber(a?.observationCount) - safeNumber(b?.observationCount) ||
-    safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
-    safeNumber(b?.historyScore) - safeNumber(a?.historyScore)
+  const depthEligibleV1100 = ranked.filter(item =>
+    safeNumber(item?.onChainPriceVerifiedCountV1100) >= 1 &&
+    (
+      safeNumber(item?.onChainPriceVerifiedCountV1100) < 4 ||
+      safeNumber(item?.onChainPriceChangedCountV1100) < 2
+    )
   );
 
-  const selected = ranked[0] || null;
+  base.depthEligibleCandidatesV1100 = depthEligibleV1100.length;
+
+  // V1100 alternates the one already-existing cohort slot. A committed DEPTH
+  // selection is followed by BREADTH on the next eligible cohort admission so
+  // repeat price work cannot starve the wider cohort.
+  const preferDepthV1100 =
+    depthEligibleV1100.length > 0 &&
+    cohort?.lastSelectionPurposeV1100 !== "DEPTH";
+
+  if (preferDepthV1100) {
+    depthEligibleV1100.sort((a,b) =>
+      safeNumber(a?.onChainPriceChangedCountV1100) -
+        safeNumber(b?.onChainPriceChangedCountV1100) ||
+      safeNumber(a?.onChainPriceVerifiedCountV1100) -
+        safeNumber(b?.onChainPriceVerifiedCountV1100) ||
+      safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
+      safeNumber(b?.historyScore) - safeNumber(a?.historyScore)
+    );
+  } else {
+    ranked.sort((a,b) =>
+      safeNumber(a?.observationCount) - safeNumber(b?.observationCount) ||
+      safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
+      safeNumber(b?.historyScore) - safeNumber(a?.historyScore)
+    );
+  }
+
+  const selected =
+    (preferDepthV1100 ? depthEligibleV1100[0] : ranked[0]) || null;
+  const selectionPurposeV1100 =
+    selected ? (preferDepthV1100 ? "DEPTH" : "BREADTH") : null;
   if (!selected) {
     return {
       ...base,
@@ -186726,6 +186798,13 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
         ? finiteOrNullV1076(selected.row?.liquidity_usd)
         : finiteOrNullV1076(entry?.liquidityUsd),
     selectedFromDurableCohort:true,
+    selectionPurposeV1100,
+    selectedOnChainPriceRowsV1100:
+      safeNumber(selected?.onChainPriceVerifiedCountV1100),
+    selectedChangedPriceRowsV1100:
+      safeNumber(selected?.onChainPriceChangedCountV1100),
+    selectedLastOnChainPriceObservedAtV1100:
+      safeNumber(selected?.lastOnChainPriceObservedAtV1100) || null,
     token:selected.token
   };
 }
@@ -186791,12 +186870,21 @@ function commitIntelligenceFollowUpAdmissionV1086(
   entry.lastSelectedAt = at;
   cohort.lastSelectedAddress = address;
   cohort.lastSelectedAt = at;
+  cohort.lastSelectionPurposeV1100 =
+    selection?.selectionPurposeV1100 === "DEPTH"
+      ? "DEPTH"
+      : "BREADTH";
+  if (cohort.lastSelectionPurposeV1100 === "DEPTH") {
+    cohort.lastDepthSelectedAddressV1100 = address;
+    cohort.lastDepthSelectedAtV1100 = at;
+  }
   cohort.updatedAt = at;
 
   return {
     committed:true,
     address,
     at,
+    selectionPurposeV1100:cohort.lastSelectionPurposeV1100,
     reason:"INTELLIGENCE_SLOT_ADMISSION_COMMITTED_V1086"
   };
 }
@@ -186815,6 +186903,8 @@ async function intelligenceCohortStatusV1079(env, state) {
     admissionCommitV1086:true,
     liveQualityEvictionV1086:true,
     admissionBlockerDiagnosticV1090:true,
+    priceDepthRotationV1100:true,
+    priceDepthRotationModeV1100:"ALTERNATE_DEPTH_BREADTH_SAME_EXISTING_SLOT",
     success:true,
     readOnly:true,
     externalRequestsUsed:0,
@@ -186824,6 +186914,12 @@ async function intelligenceCohortStatusV1079(env, state) {
     entries:safeNumber(cohort?.entries?.length),
     lastSelectedAddress:cohort?.lastSelectedAddress||null,
     lastSelectedAt:cohort?.lastSelectedAt||null,
+    lastSelectionPurposeV1100:
+      cohort?.lastSelectionPurposeV1100 || null,
+    lastDepthSelectedAddressV1100:
+      cohort?.lastDepthSelectedAddressV1100 || null,
+    lastDepthSelectedAtV1100:
+      cohort?.lastDepthSelectedAtV1100 || null,
     retained:[]
   };
 
@@ -186875,6 +186971,22 @@ async function intelligenceCohortStatusV1079(env, state) {
           : finiteOrNullV1076(entry?.liquidityUsd),
       retentionScore:
         row ? intelligenceWatchRowScoreV1077(row, Date.now()) : safeNumber(entry?.retentionScore),
+      onChainPriceVerifiedRowsV1100:
+        row ? safeNumber(row?.onchain_price_verified_count) : 0,
+      onChainPriceChangedRowsV1100:
+        row ? safeNumber(row?.onchain_price_changed_count) : 0,
+      lastOnChainPriceObservedAtV1100:
+        row ? safeNumber(row?.last_onchain_price_observed_at)||null : null,
+      priceDepthEligibleV1100:
+        row
+          ? (
+              safeNumber(row?.onchain_price_verified_count) >= 1 &&
+              (
+                safeNumber(row?.onchain_price_verified_count) < 4 ||
+                safeNumber(row?.onchain_price_changed_count) < 2
+              )
+            )
+          : false,
       stillInMainWatchlist:
         Array.isArray(state?.watchedTokens) &&
         state.watchedTokens.some(token => normalize(token?.address)===address)
