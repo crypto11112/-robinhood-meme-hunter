@@ -1,4 +1,21 @@
 /**
+ * ChainVanta — V1095
+ * VERIFIED ON-CHAIN EXECUTION PRICE HISTORY
+ * Builds directly from deployed V1094.
+ * - Reuses the existing V438 exact-USD execution-price foundation; no new
+ *   RPC/provider request is introduced.
+ * - Persists verified median execution price, latest execution price/time,
+ *   sample count and exact PoolId into D1 alongside longitudinal history.
+ * - Classifies whether the verified on-chain execution-price observation
+ *   genuinely changed versus the previous verified on-chain snapshot.
+ * - V1094 breakout intelligence can use repeated changed VERIFIED V438
+ *   execution prices when provider market snapshots are stale/unchanged.
+ * - Provider and on-chain price evidence remain separate and explicit.
+ * - Shadow/read-only intelligence only. No production score, qualification,
+ *   Telegram threshold or request-budget changes.
+ */
+
+/**
  * ChainVanta — V1094
  * BREAKOUT INTELLIGENCE — SHADOW V1
  * Builds directly from deployed V1093.
@@ -9284,7 +9301,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1094"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1095"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -187516,12 +187533,30 @@ function breakoutFromRowsV1094(address, rows) {
   const accumulation =
     flowAwareAccumulationFromRowsV1092(normalizedAddress, ordered);
 
-  const changedMarketRows = ordered.filter(row =>
+  const changedProviderMarketRowsV1095 = ordered.filter(row =>
     Number(row?.market_verified) === 1 &&
     Number(row?.market_snapshot_changed) === 1 &&
     finiteOrNullV1076(row?.price_usd) !== null &&
     finiteOrNullV1076(row?.price_usd) > 0
   );
+
+  const changedOnChainPriceRowsV1095 = ordered.filter(row =>
+    Number(row?.onchain_price_verified) === 1 &&
+    Number(row?.onchain_price_snapshot_changed) === 1 &&
+    finiteOrNullV1076(row?.onchain_price_usd) !== null &&
+    finiteOrNullV1076(row?.onchain_price_usd) > 0
+  );
+
+  const useOnChainPriceV1095 =
+    changedOnChainPriceRowsV1095.length >
+    changedProviderMarketRowsV1095.length;
+
+  const changedMarketRows = useOnChainPriceV1095
+    ? changedOnChainPriceRowsV1095
+    : changedProviderMarketRowsV1095;
+
+  const priceFieldV1095 =
+    useOnChainPriceV1095 ? "onchain_price_usd" : "price_usd";
 
   const firstChanged = changedMarketRows[0] || null;
   const latestChanged =
@@ -187536,8 +187571,10 @@ function breakoutFromRowsV1094(address, rows) {
         )
       : 0;
 
-  const firstPrice = finiteOrNullV1076(firstChanged?.price_usd);
-  const latestPrice = finiteOrNullV1076(latestChanged?.price_usd);
+  const firstPrice =
+    finiteOrNullV1076(firstChanged?.[priceFieldV1095]);
+  const latestPrice =
+    finiteOrNullV1076(latestChanged?.[priceFieldV1095]);
 
   const verifiedChangedPricePct =
     firstPrice !== null &&
@@ -187740,6 +187777,18 @@ function breakoutFromRowsV1094(address, rows) {
     breakoutScore,
     breakoutState,
     verifiedChangedMarketRows:changedMarketRows.length,
+    providerChangedMarketRowsV1095:
+      changedProviderMarketRowsV1095.length,
+    onChainChangedPriceRowsV1095:
+      changedOnChainPriceRowsV1095.length,
+    priceEvidenceSourceV1095:
+      changedMarketRows.length
+        ? (
+            useOnChainPriceV1095
+              ? "VERIFIED_V438_ONCHAIN_EXECUTION_PRICE_HISTORY"
+              : "VERIFIED_PROVIDER_MARKET_HISTORY"
+          )
+        : null,
     changedMarketSpanMinutes:Number(
       (changedMarketSpanMs / 60000).toFixed(1)
     ),
@@ -187790,6 +187839,8 @@ function breakoutFromRowsV1094(address, rows) {
                   : "More verified material flow and changed market history are required before breakout pressure can be assessed.",
     methodology:{
       staleOrUnchangedSnapshotsCountAsPriceMovement:false,
+      verifiedOnChainExecutionPriceCanConfirmMovementV1095:true,
+      providerAndOnChainPriceEvidenceKeptSeparate:true,
       changedMarketRowsRequired:
         BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094,
       changedMarketSpanMinutesRequired:
@@ -187808,12 +187859,81 @@ function breakoutFromRowsV1094(address, rows) {
   };
 }
 
+async function onChainPriceHistoryStatusV1095(env) {
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"ONCHAIN_PRICE_HISTORY_STATUS_V1095",
+    success:false,
+    readOnly:true,
+    externalRequestsUsed:0
+  };
+
+  const ready = await ensureMarketHistoryV1076(env);
+  if (!ready.ok) {
+    return {...base,status:ready.status,error:ready.error||null,timestamp:now()};
+  }
+
+  try {
+    const summary = await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        COUNT(*) AS total_rows,
+        SUM(CASE WHEN onchain_price_verified=1 THEN 1 ELSE 0 END)
+          AS verified_onchain_price_rows,
+        SUM(CASE WHEN onchain_price_snapshot_changed=1 THEN 1 ELSE 0 END)
+          AS changed_onchain_price_rows,
+        COUNT(DISTINCT CASE WHEN onchain_price_verified=1 THEN address END)
+          AS tokens_with_verified_onchain_price
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+    `).first();
+
+    const latest = await env.CHAINVANTA_DB.prepare(`
+      SELECT
+        address,symbol,captured_at,
+        onchain_price_verified,onchain_price_usd,
+        onchain_latest_price_usd,onchain_price_observed_at,
+        onchain_price_sample_count,onchain_price_pool_id,
+        onchain_price_source,onchain_price_snapshot_changed
+      FROM ${MARKET_HISTORY_TABLE_V1076}
+      WHERE onchain_price_verified=1
+      ORDER BY captured_at DESC
+      LIMIT 20
+    `).all();
+
+    return {
+      ...base,
+      success:true,
+      status:"ONCHAIN_PRICE_HISTORY_STATUS_OK_V1095",
+      summary:{
+        totalRows:safeNumber(summary?.total_rows),
+        verifiedOnChainPriceRows:
+          safeNumber(summary?.verified_onchain_price_rows),
+        changedOnChainPriceRows:
+          safeNumber(summary?.changed_onchain_price_rows),
+        tokensWithVerifiedOnChainPrice:
+          safeNumber(summary?.tokens_with_verified_onchain_price)
+      },
+      latest:Array.isArray(latest?.results) ? latest.results : [],
+      note:"Uses already-verified V438 exact-USD execution prices only. This endpoint makes zero provider/RPC calls.",
+      timestamp:now()
+    };
+  } catch (error) {
+    return {
+      ...base,
+      status:"ONCHAIN_PRICE_HISTORY_STATUS_FAILED_V1095",
+      error:errorString(error).slice(0,700),
+      timestamp:now()
+    };
+  }
+}
+
+
 async function breakoutTokenDiagnosticV1094(env, url) {
   const token = normalize(url.searchParams.get("token"));
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_TOKEN_V1094",
+    diagnostic:"BREAKOUT_TOKEN_V1095",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -187847,7 +187967,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_TOKEN_OK_V1094",
+    status:"BREAKOUT_TOKEN_OK_V1095",
     result:breakoutFromRowsV1094(token, history.rows),
     timestamp:now()
   };
@@ -187857,7 +187977,7 @@ async function breakoutStatusV1094(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_STATUS_V1094",
+    diagnostic:"BREAKOUT_STATUS_V1095",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -187894,7 +188014,7 @@ async function breakoutStatusV1094(env) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_STATUS_OK_V1094",
+    status:"BREAKOUT_STATUS_OK_V1095",
     evaluated:results.length,
     evidenceReady:results.filter(r => r.evidenceReady).length,
     confirmed:results.filter(
@@ -187913,7 +188033,7 @@ async function breakoutStatusV1094(env) {
       r => r.breakoutState === "BUILDING_BREAKOUT_HISTORY"
     ).length,
     tokens:results,
-    note:"Shadow only. Breakout requires materially sized verified V212 flow plus genuinely changed verified market evidence; stale/cache repeats do not count.",
+    note:"Shadow only. Breakout requires materially sized verified V212 flow plus genuinely changed verified provider or V438 on-chain execution-price evidence; stale/cache repeats do not count.",
     timestamp:now()
   };
 }
@@ -188577,7 +188697,15 @@ async function ensureMarketHistoryV1076(env) {
       "flow_1h_buy_usd REAL",
       "flow_1h_sell_usd REAL",
       "flow_1h_net_usd REAL",
-      "flow_1h_buy_pressure_pct REAL"
+      "flow_1h_buy_pressure_pct REAL",
+      "onchain_price_verified INTEGER NOT NULL DEFAULT 0",
+      "onchain_price_usd REAL",
+      "onchain_latest_price_usd REAL",
+      "onchain_price_observed_at INTEGER",
+      "onchain_price_sample_count INTEGER",
+      "onchain_price_pool_id TEXT",
+      "onchain_price_source TEXT",
+      "onchain_price_snapshot_changed INTEGER"
     ];
 
     for (const definition of v1083Columns) {
@@ -188606,6 +188734,18 @@ function marketHistorySnapshotV1076(candidate, capturedAt = Date.now()) {
   const verifiedFlowV1083 = candidate?.onChainVerifiedFlowV212 || {};
   const flow5mV1083 = verifiedFlowV1083?.windows?.m5 || {};
   const flow1hV1083 = verifiedFlowV1083?.windows?.h1 || {};
+  const onChainPriceV1095 =
+    market?.onChainMarketFoundationV438 || {};
+  const onChainPriceVerifiedV1095 =
+    onChainPriceV1095?.verifiedObservedExecutionPrice === true;
+  const onChainMedianPriceV1095 =
+    onChainPriceVerifiedV1095
+      ? finiteOrNullV1076(onChainPriceV1095?.medianObservedPriceUsd)
+      : null;
+  const onChainLatestPriceV1095 =
+    onChainPriceVerifiedV1095
+      ? finiteOrNullV1076(onChainPriceV1095?.latestObservedPriceUsd)
+      : null;
 
   let ageHours = null;
   const ageMsCandidates = [
@@ -188685,7 +188825,32 @@ function marketHistorySnapshotV1076(candidate, capturedAt = Date.now()) {
     flow1hBuyUsd: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.buyVolumeUsd) : null,
     flow1hSellUsd: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.sellVolumeUsd) : null,
     flow1hNetUsd: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.netFlowUsd) : null,
-    flow1hBuyPressurePct: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.buyPressureUsd) : null
+    flow1hBuyPressurePct: flow1hV1083?.verified === true ? finiteOrNullV1076(flow1hV1083?.buyPressureUsd) : null,
+    onChainPriceVerifiedV1095:
+      onChainPriceVerifiedV1095 &&
+      onChainMedianPriceV1095 !== null &&
+      onChainMedianPriceV1095 > 0,
+    onChainPriceUsdV1095:
+      onChainMedianPriceV1095 !== null && onChainMedianPriceV1095 > 0
+        ? onChainMedianPriceV1095
+        : null,
+    onChainLatestPriceUsdV1095:
+      onChainLatestPriceV1095 !== null && onChainLatestPriceV1095 > 0
+        ? onChainLatestPriceV1095
+        : null,
+    onChainPriceObservedAtV1095:
+      safeNumber(onChainPriceV1095?.latestObservedAt) || null,
+    onChainPriceSampleCountV1095:
+      safeNumber(onChainPriceV1095?.sampleCount),
+    onChainPricePoolIdV1095:
+      /^0x[a-f0-9]{64}$/.test(normalize(onChainPriceV1095?.latestPoolId))
+        ? normalize(onChainPriceV1095?.latestPoolId)
+        : null,
+    onChainPriceSourceV1095:
+      onChainPriceVerifiedV1095
+        ? (onChainPriceV1095?.source || "ONCHAIN_V4_EXACT_USD_EXECUTIONS_V438")
+        : null,
+    onChainPriceSnapshotChangedV1095:null
   };
 }
 
@@ -188785,12 +188950,53 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       const integrity = classifyMarketEvidenceV1083(snap, prior || null);
       snap.marketEvidenceMode = integrity.mode;
       snap.marketSnapshotChanged = integrity.changed;
+
+      try {
+        const priorOnChain = await env.CHAINVANTA_DB.prepare(`
+          SELECT onchain_price_usd,onchain_price_observed_at,onchain_price_pool_id
+          FROM ${MARKET_HISTORY_TABLE_V1076}
+          WHERE address = ?
+            AND captured_at < ?
+            AND onchain_price_verified = 1
+            AND onchain_price_usd IS NOT NULL
+          ORDER BY captured_at DESC
+          LIMIT 1
+        `).bind(snap.address, snap.capturedAt).first();
+
+        if (
+          snap.onChainPriceVerifiedV1095 === true &&
+          snap.onChainPriceUsdV1095 !== null
+        ) {
+          const priorPrice =
+            finiteOrNullV1076(priorOnChain?.onchain_price_usd);
+          const priorObservedAt =
+            safeNumber(priorOnChain?.onchain_price_observed_at);
+          const currentObservedAt =
+            safeNumber(snap.onChainPriceObservedAtV1095);
+
+          if (priorPrice === null || priorPrice <= 0) {
+            snap.onChainPriceSnapshotChangedV1095 = null;
+          } else {
+            const relativeDiff =
+              Math.abs(snap.onChainPriceUsdV1095 - priorPrice) / priorPrice;
+            const observationAdvanced =
+              currentObservedAt > 0 &&
+              currentObservedAt > priorObservedAt;
+
+            snap.onChainPriceSnapshotChangedV1095 =
+              observationAdvanced && relativeDiff >= 0.000001;
+          }
+        }
+      } catch (_) {
+        snap.onChainPriceSnapshotChangedV1095 = null;
+      }
     } catch (_) {
       snap.marketEvidenceMode =
         snap.marketVerified === true
           ? "PRIOR_COMPARISON_UNAVAILABLE_V1083"
           : "MARKET_UNVERIFIED_V1083";
       snap.marketSnapshotChanged = null;
+      snap.onChainPriceSnapshotChangedV1095 = null;
     }
   }
 
@@ -188805,8 +189011,11 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       market_evidence_mode,market_snapshot_changed,
       flow_verified,flow_source,flow_status,flow_record_count,flow_pool_count,
       flow_5m_trades,flow_5m_buy_usd,flow_5m_sell_usd,flow_5m_net_usd,flow_5m_buy_pressure_pct,
-      flow_1h_trades,flow_1h_buy_usd,flow_1h_sell_usd,flow_1h_net_usd,flow_1h_buy_pressure_pct
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      flow_1h_trades,flow_1h_buy_usd,flow_1h_sell_usd,flow_1h_net_usd,flow_1h_buy_pressure_pct,
+      onchain_price_verified,onchain_price_usd,onchain_latest_price_usd,
+      onchain_price_observed_at,onchain_price_sample_count,onchain_price_pool_id,
+      onchain_price_source,onchain_price_snapshot_changed
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `;
 
   try {
@@ -188821,7 +189030,19 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
       r.marketSnapshotChanged === true ? 1 : r.marketSnapshotChanged === false ? 0 : null,
       r.flowVerified?1:0,r.flowSource,r.flowStatus,r.flowRecordCount,r.flowPoolCount,
       r.flow5mTrades,r.flow5mBuyUsd,r.flow5mSellUsd,r.flow5mNetUsd,r.flow5mBuyPressurePct,
-      r.flow1hTrades,r.flow1hBuyUsd,r.flow1hSellUsd,r.flow1hNetUsd,r.flow1hBuyPressurePct
+      r.flow1hTrades,r.flow1hBuyUsd,r.flow1hSellUsd,r.flow1hNetUsd,r.flow1hBuyPressurePct,
+      r.onChainPriceVerifiedV1095?1:0,
+      r.onChainPriceUsdV1095,
+      r.onChainLatestPriceUsdV1095,
+      r.onChainPriceObservedAtV1095,
+      r.onChainPriceSampleCountV1095,
+      r.onChainPricePoolIdV1095,
+      r.onChainPriceSourceV1095,
+      r.onChainPriceSnapshotChangedV1095 === true
+        ? 1
+        : r.onChainPriceSnapshotChangedV1095 === false
+          ? 0
+          : null
     ));
 
     // Keep batches small even if future candidate counts grow.
@@ -188836,6 +189057,10 @@ async function persistMarketHistoryV1076(env, candidates, capturedAt = Date.now(
     base.changedMarketRowsV1083 = rows.filter(r=>r.marketSnapshotChanged===true).length;
     base.unchangedMarketRowsV1083 = rows.filter(r=>r.marketSnapshotChanged===false).length;
     base.verifiedFlowRowsV1083 = rows.filter(r=>r.flowVerified===true).length;
+    base.verifiedOnChainPriceRowsV1095 =
+      rows.filter(r=>r.onChainPriceVerifiedV1095===true).length;
+    base.changedOnChainPriceRowsV1095 =
+      rows.filter(r=>r.onChainPriceSnapshotChangedV1095===true).length;
     base.status = 'MARKET_HISTORY_WRITTEN_V1076';
     return base;
   } catch (error) {
@@ -190356,6 +190581,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         env,
         cohortStateV1079.state
       )
+    );
+  }
+
+  if (
+    path ===
+      "/onchain-price-history-status"
+  ) {
+    return jsonResponse(
+      await onChainPriceHistoryStatusV1095(env)
     );
   }
 
