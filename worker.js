@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1129"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1130"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -186811,6 +186811,7 @@ const INTELLIGENCE_COHORT_MAX_V1079 = 8;
 const INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 = 7 * 24 * 60 * 60 * 1000; // V1105: 7-day inactivity retention
 const INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 = 4 * 60 * 1000;
 
+// V1130: fairness score-source integrity fix — current cohort-entry Opportunity/Confidence take precedence over stale history-row scores.
 // V1128: conservative fallback only; this is evidence collection, never promotion.
 const INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128 = 60 * 60 * 1000;
 const INTELLIGENCE_COHORT_FAIRNESS_RESELECT_MS_V1128 = 60 * 60 * 1000;
@@ -187170,8 +187171,15 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
       const quality = intelligenceCohortQualityDecisionV1082(row);
       if (quality?.keep !== true) continue;
 
-      const opportunity = finiteOrNullV1076(row?.opportunity_score) ?? finiteOrNullV1076(entry?.opportunityScore) ?? 0;
-      const confidence = finiteOrNullV1076(row?.confidence_score) ?? finiteOrNullV1076(entry?.confidenceScore) ?? 0;
+      // V1130: fairness is a CURRENT-candidate scheduling decision. Prefer the
+      // current authoritative cohort-entry scores and use durable-history row
+      // values only when the current entry does not carry a finite score.
+      // V1129 proved row scores could be stale (for example 25/25 while the
+      // current candidate was 65/69), which incorrectly excluded legitimate
+      // maturing tokens from evidence refresh. Promotion/scoring thresholds
+      // themselves are unchanged.
+      const opportunity = finiteOrNullV1076(entry?.opportunityScore) ?? finiteOrNullV1076(row?.opportunity_score) ?? 0;
+      const confidence = finiteOrNullV1076(entry?.confidenceScore) ?? finiteOrNullV1076(row?.confidence_score) ?? 0;
       const riskVerified = Number(row?.risk_verified) === 1;
       const risk = riskVerified ? finiteOrNullV1076(row?.risk_score) : null;
       const observations = safeNumber(row?.observation_count);
