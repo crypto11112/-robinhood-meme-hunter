@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1106
+ * COHORT RETENTION TELEMETRY INTEGRITY FIX
+ * Builds directly from deployed V1105.
+ * - V1105 correctly extended the actual cohort/watch eligibility constants to
+ *   7 days, but /intelligence-cohort-status still displayed a legacy hard-coded
+ *   maximumAgeHours:48 value.
+ * - The diagnostic now derives maximumAgeHours from the actual runtime
+ *   INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 constant.
+ * - Adds watchEligibilityHoursV1106 derived from the actual V1077 watch
+ *   eligibility constant so both linked windows are visible and auditable.
+ * - No scanner, cohort selection, provider/RPC, scoring, Telegram or payment
+ *   behavior changes.
+ */
+
+/**
  * ChainVanta — V1105
  * ESTABLISHED-TOKEN LONGER RETENTION
  * Builds directly from deployed V1104.
@@ -9483,7 +9498,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1105"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1106"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -187007,8 +187022,12 @@ async function intelligenceCohortStatusV1079(env, state) {
     readOnly:true,
     externalRequestsUsed:0,
     maximumEntries:INTELLIGENCE_COHORT_MAX_V1079,
-    maximumAgeHours:48,
-    selectionCooldownMinutes:4,
+    maximumAgeHours:
+      INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 / (60 * 60 * 1000),
+    watchEligibilityHoursV1106:
+      INTELLIGENCE_WATCH_MAX_AGE_MS_V1077 / (60 * 60 * 1000),
+    selectionCooldownMinutes:
+      INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 / (60 * 1000),
     entries:safeNumber(cohort?.entries?.length),
     lastSelectedAddress:cohort?.lastSelectedAddress||null,
     lastSelectedAt:cohort?.lastSelectedAt||null,
