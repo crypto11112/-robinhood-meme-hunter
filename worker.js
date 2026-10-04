@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1113
+ * CONTROLLED EXACT-POOL RPC LIVE-LANE TEST + DEX COOLDOWN ISOLATION
+ * Builds directly from deployed V1112.
+ * - Adds /live-priority-rpc-test?confirm=shadow to exercise the V1112 exact-pool
+ *   RPC lane with one current cohort token that already has a VERIFIED exact V4 PoolId.
+ * - Test is shadow/read-only, max 10 minutes, cannot promote, score, qualify or send Telegram.
+ * - Carries the verified exact-pool identity + WETH/USDG reference into the Durable Object
+ *   so the test can establish a forward-only head baseline then decode only NEW swaps.
+ * - Fixes one V1112 control-plane inconsistency: DexScreener 429 cooldown no longer
+ *   disables or prevents the exact-pool RPC lane from being armed/refreshed. Provider
+ *   cooldown suppresses Dex corroboration only; manual pause/monthly hard lock still stop live work.
+ * - No scanner cadence, production Telegram, payment, scoring, risk, holder or qualification changes.
+ */
+
+/**
  * ChainVanta — V1112
  * EXACT-POOL RPC PRIORITY LIVE FLOW — SHADOW V1
  * Builds directly from deployed V1111.
@@ -9607,7 +9622,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1112"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1113"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192193,6 +192208,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-priority-rpc-test"
+  ) {
+    return jsonResponse(
+      await controlledPriorityLiveRpcTestV1113(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-budget-status"
   ) {
     return jsonResponse(
@@ -196086,6 +196110,80 @@ async function controlledPriorityLiveLaneTestV1110(env, url) {
   }
 }
 
+async function controlledPriorityLiveRpcTestV1113(env, url) {
+  const confirm = String(url?.searchParams?.get("confirm") || "").toLowerCase();
+  if (confirm !== "shadow") {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      started:false, shadowOnly:true, productionAlertsEnabled:false,
+      status:"CONFIRM_SHADOW_REQUIRED_V1113",
+      instruction:"Use /live-priority-rpc-test?confirm=shadow to start one bounded exact-pool RPC test."
+    };
+  }
+
+  const priority = await livePriorityStatusV1108(env);
+  const candidates = Array.isArray(priority?.allCandidates) ? priority.allCandidates : [];
+  const exactEligible = candidates.filter(row =>
+    isAddress(normalize(row?.address || "")) &&
+    row?.exactPoolLiveIdentityV1112?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(normalize(row?.exactPoolLiveIdentityV1112?.poolId || ""))
+  );
+  const requested = normalize(url?.searchParams?.get("token") || "");
+  let candidate = null;
+  if (isAddress(requested)) {
+    candidate = exactEligible.find(row => normalize(row?.address || "") === requested) || null;
+  } else {
+    candidate = exactEligible
+      .slice()
+      .sort((a,b) => {
+        const ab = Array.isArray(a?.blockers) ? a.blockers.length : 0;
+        const bb = Array.isArray(b?.blockers) ? b.blockers.length : 0;
+        return ab-bb || safeNumber(b?.priorityScore)-safeNumber(a?.priorityScore);
+      })[0] || null;
+  }
+  if (!candidate) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      started:false, shadowOnly:true, productionAlertsEnabled:false,
+      status:isAddress(requested)?"REQUESTED_TOKEN_HAS_NO_VERIFIED_EXACT_POOL_V1113":"NO_COHORT_TOKEN_WITH_VERIFIED_EXACT_POOL_V1113",
+      exactPoolEligibleCandidates:exactEligible.map(row=>({address:normalize(row?.address||""),symbol:row?.symbol||null,poolId:normalize(row?.exactPoolLiveIdentityV1112?.poolId||""),blockers:Array.isArray(row?.blockers)?row.blockers:[]})).slice(0,8)
+    };
+  }
+
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"V1113_DO_BINDING_UNAVAILABLE"};
+  }
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/priority-live-rpc-test-v1113", {
+      method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        address:normalize(candidate.address), symbol:candidate?.symbol||null,
+        priorityScore:safeNumber(candidate?.priorityScore),
+        breakoutState:candidate?.breakoutState||null,
+        entryQuality:candidate?.entryQuality||null,
+        accumulationState:candidate?.accumulationState||null,
+        flowEvidenceReady:candidate?.flowEvidenceReady===true,
+        marketEvidenceReady:candidate?.marketEvidenceReady===true,
+        blockers:Array.isArray(candidate?.blockers)?candidate.blockers:[],
+        exactPoolLiveIdentityV1112:candidate?.exactPoolLiveIdentityV1112||null,
+        liveWethUsdGReferenceV1112:candidate?.liveWethUsdGReferenceV1112||null,
+        requestedAt:Date.now()
+      })
+    });
+    const body = await response.json().catch(()=>({}));
+    return {
+      agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+      shadowOnly:true,productionAlertsEnabled:false,
+      genuinePromotion:false,telegramMutation:false,
+      ...body
+    };
+  } catch(error) {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"V1113_CONTROLLED_RPC_TEST_FETCH_FAILED",error:errorString(error)};
+  }
+}
+
 async function priorityLiveBudgetStatusV1111(env) {
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
   if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
@@ -196144,7 +196242,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1112",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1113",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -196182,6 +196280,7 @@ async function livePriorityLaneStatusV1109(env) {
       rpcTradeCountV1112:Array.isArray(row?.rpcTradesV1112)?row.rpcTradesV1112.length:0,
       rpcFlowV1112:row?.rpcFlowV1112||null,
       controlledShadowTestV1110:row?.controlledShadowTestV1110===true,
+      controlledExactPoolRpcTestV1113:row?.controlledExactPoolRpcTestV1113===true,
       laneEntrySourceV1110:row?.laneEntrySourceV1110||"GENUINE_V1108_PROMOTION",
       testStartedAtV1110:row?.testStartedAtV1110||null,
       testExpiresAtV1110:row?.controlledShadowTestV1110===true&&Number.isFinite(Number(row?.testStartedAtV1110))?Number(row.testStartedAtV1110)+PRIORITY_LIVE_TEST_RETENTION_MS_V1110:null,
@@ -196197,11 +196296,13 @@ async function livePriorityLaneStatusV1109(env) {
       exactPoolRpcAcceleration:true,
       exactPoolRpcModeV1112:"ONE_BATCH_PER_POLL_HEAD_PLUS_MULTI_POOL_SWAP_LOGS_FORWARD_ONLY",
       dexScreenerRoleV1112:"SLOW_5_MINUTE_CORROBORATION_NOT_CORE_LIVE_FEED",
+      dexScreenerCooldownIsolationV1113:"429_COOLDOWN_SUPPRESSES_DEX_ONLY_RPC_LANE_REMAINS_ELIGIBLE",
+      controlledExactPoolRpcTestV1113:"EXPLICIT_ONLY_VERIFIED_POOLID_FORWARD_ONLY_NO_TELEGRAM",
       holderDeltaAcceleration:false,
       whaleDeltaAcceleration:false,
       telegramMutation:false
     },
-    nextStage:"V1112 adds forward-only exact-pool RPC buy/sell flow behind the V1111 governor. After live RPC flow is proven clean, add transfer-derived holder and whale deltas to the same max-3 lane.",
+    nextStage:"V1113 independently proves exact-pool RPC flow even during DexScreener cooldown. After forward-only RPC baseline/range/trade decoding is proven clean, add transfer-derived holder and whale deltas behind the same governor.",
     timestamp:now()
   };
 }
@@ -197752,10 +197853,85 @@ export class V3LiveCollectorV363 {
       .slice(0,PRIORITY_LIVE_MAX_ACTIVE_V1109);
     entries=Object.fromEntries(retained.map(row=>[normalize(row.address),row]));
     await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
-    const budgetAllowsRunV1111=budgetV1111.manualPaused!==true&&budgetV1111.hardLocked!==true&&budgetV1111.providerCooldownActive!==true;
+    const budgetAllowsRunV1111=budgetV1111.manualPaused!==true&&budgetV1111.hardLocked!==true; // V1113: Dex 429 cooldown suppresses Dex corroboration only; exact-pool RPC remains eligible.
     await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,Object.keys(entries).length>0&&budgetAllowsRunV1111);
     if(Object.keys(entries).length>0&&budgetAllowsRunV1111) await this.doSetAlarmV404(Date.now()+1000);
     return Response.json({version:CHAINVANTA_DISPLAY_VERSION,registered:true,status:Object.keys(entries).length?(budgetAllowsRunV1111?"PRIORITY_LIVE_ROSTER_UPDATED_V1111":"PRIORITY_LIVE_ROSTER_RETAINED_BUDGET_PAUSED_V1111"):"NO_PROMOTED_TOKENS_V1109",incoming:incoming.length,activeEntries:Object.keys(entries).length,retentionMinutes:Math.round(PRIORITY_LIVE_RETENTION_MS_V1109/60000),budgetV1111:{tier:budgetV1111.tier,used:budgetV1111.used,limit:budgetV1111.limit,manualPaused:budgetV1111.manualPaused,hardLocked:budgetV1111.hardLocked}});
+  }
+
+  async priorityLiveRpcTestV1113(request) {
+    let body={};
+    try { body=await request.json(); } catch (_) {}
+    const address=normalize(body?.address||"");
+    const identity=body?.exactPoolLiveIdentityV1112||null;
+    if(!isAddress(address)) return Response.json({started:false,status:"INVALID_CONTROLLED_RPC_TEST_TOKEN_V1113"},{status:400});
+    if(identity?.verified!==true || !/^0x[a-f0-9]{64}$/.test(normalize(identity?.poolId||""))) {
+      return Response.json({started:false,status:"CONTROLLED_RPC_TEST_REQUIRES_VERIFIED_EXACT_POOL_V1113",address},{status:400});
+    }
+
+    const nowMs=Date.now();
+    const budgetV1111=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    if(budgetV1111.manualPaused===true||budgetV1111.hardLocked===true){
+      return Response.json({started:false,status:budgetV1111.hardLocked?"MONTHLY_LIVE_BUDGET_HARD_LOCK_V1111":"PRIORITY_LIVE_MANUALLY_PAUSED_V1111",budget:{tier:budgetV1111.tier,used:budgetV1111.used,limit:budgetV1111.limit}});
+    }
+    let entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
+    entries=entries&&typeof entries==="object"?entries:{};
+    const genuine=Object.values(entries).filter(row=>row&&row?.controlledShadowTestV1110!==true);
+    if(genuine.length){
+      const exactReady=genuine.filter(row=>row?.exactPoolLiveIdentityV1112?.verified===true).length;
+      return Response.json({started:false,status:"GENUINE_PRIORITY_LANE_ACTIVE_TEST_NOT_NEEDED_V1113",activeGenuineEntries:genuine.length,exactPoolReadyGenuineEntries:exactReady});
+    }
+
+    // One explicit diagnostic token only. It is never a genuine promotion and
+    // cannot mutate Telegram/scoring/qualification. Provider 429 cooldown is not
+    // a blocker because V1113 is testing the independent exact-pool RPC lane.
+    entries={};
+    entries[address]={
+      address,
+      symbol:body?.symbol||null,
+      priorityScore:safeNumber(body?.priorityScore),
+      breakoutStateAtPromotion:body?.breakoutState||null,
+      entryQualityAtPromotion:body?.entryQuality||null,
+      accumulationStateAtPromotion:body?.accumulationState||null,
+      flowEvidenceReadyAtPromotion:body?.flowEvidenceReady===true,
+      marketEvidenceReadyAtPromotion:body?.marketEvidenceReady===true,
+      blockersAtTestV1113:Array.isArray(body?.blockers)?body.blockers:[],
+      exactPoolLiveIdentityV1112:identity,
+      liveWethUsdGReferenceV1112:body?.liveWethUsdGReferenceV1112||null,
+      promotedAt:null,
+      lastPromotionRefreshAt:nowMs,
+      latestObservationV1109:null,
+      rollingMarketV1109:[],
+      liveSignalsV1109:null,
+      liveStateV1109:"BUILDING_LIVE_HISTORY",
+      pinnedProviderPairV1109:null,
+      pairMissesV1109:0,
+      rpcLastCoveredHeadV1112:null,
+      rpcLastPollAtV1112:null,
+      rpcTradesV1112:[],
+      rpcFlowV1112:null,
+      rpcStatusV1112:"WAITING_FOR_FORWARD_RPC_BASELINE_V1113",
+      controlledShadowTestV1110:true,
+      controlledExactPoolRpcTestV1113:true,
+      laneEntrySourceV1110:"CONTROLLED_EXACT_POOL_RPC_TEST_ONLY_V1113",
+      testStartedAtV1110:nowMs,
+      shadowOnly:true
+    };
+    await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
+    await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,true);
+    await this.doPutV404(PRIORITY_LIVE_LAST_STATUS_KEY_V1109,{lastPollAt:null,status:"CONTROLLED_EXACT_POOL_RPC_TEST_ARMED_V1113",requests:0,verifiedObservations:0,httpStatus:null,error:null,rpcLiveV1112:null,dexScreenerAttemptedV1112:false,dexScreenerCooldownActiveV1112:budgetV1111.providerCooldownActive===true});
+    await this.doSetAlarmV404(Date.now()+1000);
+    return Response.json({
+      started:true,status:"CONTROLLED_EXACT_POOL_RPC_TEST_STARTED_V1113",address,symbol:body?.symbol||null,
+      poolId:normalize(identity.poolId),quoteTokenAddress:normalize(identity?.quoteTokenAddress||"")||null,
+      controlledShadowTest:true,controlledExactPoolRpcTestV1113:true,genuinePromotion:false,
+      productionAlertsEnabled:false,telegramMutation:false,
+      providerCooldownDoesNotBlockRpc:true,
+      pollIntervalMs:HORIZON_LIVE_POLL_MS_V413,
+      testRetentionMinutes:Math.round(PRIORITY_LIVE_TEST_RETENTION_MS_V1110/60000),
+      expiresAt:nowMs+PRIORITY_LIVE_TEST_RETENTION_MS_V1110,
+      budget:{tier:budgetV1111.tier,used:budgetV1111.used,limit:budgetV1111.limit,providerCooldownActive:budgetV1111.providerCooldownActive===true}
+    });
   }
 
   async priorityLiveTestV1110(request) {
@@ -197820,7 +197996,7 @@ export class V3LiveCollectorV363 {
     return {
       version:CHAINVANTA_DISPLAY_VERSION,
       available:true,
-      tracker:"PROMOTED_OR_CONTROLLED_TEST_RPC_LIVE_LANE_GOVERNED_V1112",
+      tracker:"PROMOTED_OR_CONTROLLED_TEST_RPC_LIVE_LANE_GOVERNED_V1113",
       pollIntervalMs:HORIZON_LIVE_POLL_MS_V413,
       entries,
       activeEntries:Object.keys(entries).length,
@@ -198680,6 +198856,7 @@ export class V3LiveCollectorV363 {
     if (url.pathname === "/horizon-snapshots-v413") return Response.json(await this.horizonSnapshotV413());
     if (url.pathname === "/priority-live-register-v1109" && request.method === "POST") return await this.priorityLiveRegisterV1109(request);
     if (url.pathname === "/priority-live-test-v1110" && request.method === "POST") return await this.priorityLiveTestV1110(request);
+    if (url.pathname === "/priority-live-rpc-test-v1113" && request.method === "POST") return await this.priorityLiveRpcTestV1113(request);
     if (url.pathname === "/priority-live-budget-v1111") return Response.json(await this.priorityLiveBudgetSnapshotV1111());
     if (url.pathname === "/priority-live-budget-control-v1111" && request.method === "POST") return Response.json(await this.priorityLiveBudgetControlV1111(request));
     if (url.pathname === "/priority-live-snapshot-v1109") return Response.json(await this.priorityLiveSnapshotV1109());
