@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1134"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1135"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -192549,6 +192549,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     );
   }
 
+
+  if (
+    path ===
+      "/live-registry-candidate-identity-handoff-status"
+  ) {
+    return jsonResponse(
+      await liveRegistryCandidateIdentityHandoffStatusV1135(env, url)
+    );
+  }
+
   if (
     path ===
       "/live-decision-observer-start"
@@ -206412,6 +206422,190 @@ async function liveDirectionalWatchRegistrationStatusV1134(env, url){
       retention:"Capacity is only treated as a suspect when the watch is actually full; V1134 does not infer an eviction without persisted evidence."
     },
     note:"V1134 is read-only. It adds zero provider/RPC requests, writes no state, changes no thresholds, promotion rules, budgets, or Telegram behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1135: read-only canonical-registry -> candidate exact-pool identity handoff diagnostic.
+// This intentionally performs no provider/RPC work and no writes. It compares the
+// already-persisted candidate surfaces with the canonical pool registry so we can
+// distinguish identity-construction failure from later merge/persistence loss.
+async function liveRegistryCandidateIdentityHandoffStatusV1135(env, url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const [registration,stateRead,priority] = await Promise.all([
+    liveDirectionalWatchRegistrationStatusV1134(env,url),
+    readState(env),
+    livePriorityStatusV1108(env)
+  ]);
+  const state=stateRead?.state||{};
+  const registrationRows=Array.isArray(registration?.candidates)?registration.candidates:[];
+  const priorityRows=Array.isArray(priority?.allCandidates)?priority.allCandidates:[];
+
+  let selected=registrationRows.filter(r=>r?.stage==="REGISTRY_TO_CANDIDATE_IDENTITY_GAP_V1134");
+  if(isAddress(requested)) selected=registrationRows.filter(r=>normalize(r?.address||"")===requested);
+  else selected=selected.slice(0,8);
+
+  const retained=[];
+  const pushSurface=(surfaceName,value)=>{
+    if(Array.isArray(value)){
+      for(const row of value) if(row&&typeof row==="object") retained.push({surfaceName,row});
+    }else if(value&&typeof value==="object"){
+      for(const row of Object.values(value)) if(row&&typeof row==="object") retained.push({surfaceName,row});
+    }
+  };
+  pushSurface("watched",state?.watched);
+  pushSurface("tokens",state?.tokens);
+  pushSurface("candidates",state?.candidates);
+  pushSurface("recentCandidates",state?.recentCandidates);
+  pushSurface("analysisHistory",state?.analysisHistory);
+  pushSurface("qualified",state?.qualified);
+  pushSurface("qualificationHistory",state?.qualificationHistory);
+  pushSurface("latestCandidates",state?.latestCandidates);
+
+  const poolRegistry=state?.poolRegistry&&typeof state.poolRegistry==="object"?state.poolRegistry:{};
+  const quoteRef=bestVerifiedWethUsdGReferenceV195(state);
+
+  const base={
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_REGISTRY_CANDIDATE_IDENTITY_HANDOFF_STATUS_V1135",
+    success:true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,
+    externalProviderRequestsAdded:0,stateWritesAdded:0,
+    requestedToken:isAddress(requested)?requested:null,candidatesRequested:selected.length
+  };
+  if(!selected.length) return {...base,success:false,status:"NO_REGISTRY_TO_CANDIDATE_GAPS_TO_TRACE_V1135",candidates:[],timestamp:now()};
+
+  const results=[];
+  for(const regRow of selected){
+    const address=normalize(regRow?.address||"");
+    if(!isAddress(address)) continue;
+    const pRow=priorityRows.find(r=>normalize(r?.address||"")===address)||null;
+    const retainedRows=retained.filter(x=>normalize(x?.row?.address||x?.row?.tokenAddress||"")===address);
+    const retainedIdentities=retainedRows.map(x=>({
+      surface:x.surfaceName,
+      identity:x?.row?.onChainPoolIdentityV153||x?.row?.exactPoolLiveIdentityV1112||null,
+      pools:Array.isArray(x?.row?.pools)?x.row.pools.length:null,
+      marketVerified:x?.row?.market?.verified===true,
+      symbol:x?.row?.symbol||null
+    })).filter(x=>x.identity||x.pools!==null||x.marketVerified===true);
+
+    const registryMatches=[];
+    for(const [rawPoolId,raw] of Object.entries(poolRegistry)){
+      const poolId=normalize(raw?.poolId||rawPoolId);
+      const c0=normalize(raw?.currency0||raw?.tokenA||"");
+      const c1=normalize(raw?.currency1||raw?.tokenB||"");
+      if(!/^0x[a-f0-9]{64}$/.test(String(poolId||""))) continue;
+      if(c0!==address&&c1!==address) continue;
+      const quote=c0===address?c1:c0;
+      const priceability=v254PriceableQuote(quote,quoteRef);
+      registryMatches.push({
+        poolId,currency0:c0||null,currency1:c1||null,quoteTokenAddress:quote||null,
+        quoteSupported:priceability?.eligible===true,
+        quoteMode:priceability?.mode||null,
+        blockNumber:safeNumber(raw?.blockNumber)||null,
+        lastSwapBlock:safeNumber(raw?.lastSwapBlockV746||raw?.lastSwapBlock)||null,
+        lastActivityBlock:safeNumber(raw?.lastActivityBlock)||null
+      });
+    }
+    const supported=registryMatches.filter(r=>r.quoteSupported===true);
+
+    const retainedVerified=retainedIdentities.filter(x=>
+      x?.identity?.verified===true && /^0x[a-f0-9]{64}$/.test(String(normalize(x?.identity?.poolId||x?.identity?.pairAddress)||""))
+    );
+    const priorityIdentity=pRow?.exactPoolLiveIdentityV1112||null;
+    const priorityVerified=priorityIdentity?.verified===true && /^0x[a-f0-9]{64}$/.test(String(normalize(priorityIdentity?.poolId)||""));
+
+    // Purely local simulation of what the candidate constructor could recover if
+    // its watched-pool list were already populated from the registry. This is not
+    // applied to state and is explicitly diagnostic-only.
+    const syntheticWatched={address,pools:registryMatches.map(r=>({
+      poolId:r.poolId,currency0:r.currency0,currency1:r.currency1,
+      blockNumber:r.blockNumber,lastSwapBlockV746:r.lastSwapBlock,lastActivityBlock:r.lastActivityBlock
+    }))};
+    const simulatedDirect=onChainPoolIdentityV153(syntheticWatched,null);
+    const latestHead=safeNumber(state?.latestNumber||state?.lastBlockNumber||state?.headBlock)||null;
+    const simulatedRecovery=onChainPoolIdentityRecoveryV742(state,syntheticWatched,null,latestHead);
+
+    let stage="UNCLASSIFIED_V1135";
+    let likelyCause="INSUFFICIENT_PERSISTED_CANDIDATE_SURFACE_V1135";
+    if(retainedVerified.length>0 && !priorityVerified){
+      stage="IDENTITY_CREATED_THEN_LOST_AFTER_CANDIDATE_V1135";
+      likelyCause="RETAINED_CANDIDATE_HAS_VERIFIED_IDENTITY_BUT_PRIORITY_STATE_DOES_NOT_V1135";
+    }else if(retainedRows.length>0 && retainedVerified.length===0 && supported.length>0){
+      stage="IDENTITY_NOT_POPULATED_ON_RETAINED_CANDIDATE_V1135";
+      likelyCause="SUPPORTED_REGISTRY_POOL_EXISTS_BUT_RETAINED_CANDIDATE_HAS_NO_VERIFIED_ONCHAIN_IDENTITY_V1135";
+    }else if(retainedRows.length===0 && supported.length>0){
+      stage="CANDIDATE_SURFACE_NOT_PERSISTED_V1135";
+      likelyCause="REGISTRY_POOL_EXISTS_BUT_NO_RETAINED_FULL_CANDIDATE_OBJECT_IS_AVAILABLE_FOR_HANDOFF_REVIEW_V1135";
+    }else if(priorityVerified){
+      stage="PRIORITY_IDENTITY_NOW_PRESENT_V1135";
+      likelyCause="HANDOFF_CURRENTLY_RECOVERED_NO_FIX_REQUIRED_FOR_THIS_TOKEN_V1135";
+    }
+
+    let simulationMeaning="NO_DETERMINISTIC_LOCAL_REGISTRY_IDENTITY_V1135";
+    if(simulatedDirect?.verified===true) simulationMeaning="DIRECT_V153_CAN_RESOLVE_IF_WATCHED_POOLS_ARE_PRESENT_V1135";
+    else if(simulatedRecovery?.verified===true) simulationMeaning="V742_REGISTRY_RECOVERY_CAN_RESOLVE_LOCALLY_V1135";
+    else if(supported.length===1) simulationMeaning="ONE_SUPPORTED_REGISTRY_POOL_EXISTS_BUT_CURRENT_RECOVERY_PATH_REMAINS_UNVERIFIED_V1135";
+    else if(supported.length>1) simulationMeaning="MULTIPLE_SUPPORTED_REGISTRY_POOLS_REQUIRE_SELECTION_EVIDENCE_V1135";
+
+    results.push({
+      address,symbol:regRow?.symbol||pRow?.symbol||null,rank:regRow?.rank??null,
+      stage,likelyCause,
+      registry:{matchingPools:registryMatches.length,supportedPools:supported.length,rows:registryMatches.slice(0,12)},
+      retainedCandidateSurfaces:{
+        matches:retainedRows.length,
+        verifiedIdentityMatches:retainedVerified.length,
+        rows:retainedIdentities.slice(0,12).map(x=>({
+          surface:x.surface,pools:x.pools,marketVerified:x.marketVerified,
+          identity:x.identity?{
+            verified:x.identity?.verified===true,status:x.identity?.status||null,source:x.identity?.source||null,
+            poolId:normalize(x.identity?.poolId||x.identity?.pairAddress||"")||null,
+            quoteTokenAddress:normalize(x.identity?.quoteTokenAddress||"")||null
+          }:null
+        }))
+      },
+      priorityIdentity:{
+        available:priorityVerified,verified:priorityIdentity?.verified===true,
+        poolId:normalize(priorityIdentity?.poolId||"")||null,source:priorityIdentity?.source||null,status:priorityIdentity?.status||null
+      },
+      localConstructionSimulation:{
+        diagnosticOnly:true,applied:false,
+        directV153:{verified:simulatedDirect?.verified===true,status:simulatedDirect?.status||null,poolId:normalize(simulatedDirect?.poolId||"")||null,source:simulatedDirect?.source||null},
+        recoveryV742:{verified:simulatedRecovery?.verified===true,status:simulatedRecovery?.status||null,poolId:normalize(simulatedRecovery?.poolId||"")||null,source:simulatedRecovery?.source||null},
+        latestHeadAvailable:latestHead,
+        meaning:simulationMeaning
+      },
+      handoffEvidence:{
+        registrationStage:regRow?.stage||null,
+        rawLaneUpstreamSeen:regRow?.registrationSurfaces?.rawLaneUpstreamSeen===true,
+        cohortHandoffMatches:regRow?.registrationSurfaces?.cohortHandoffMatches===true,
+        currentWatchRows:safeNumber(regRow?.watchRetention?.currentWatchRows),
+        watchAtCapacity:regRow?.watchRetention?.atCapacity===true
+      },
+      nextAction:stage==="IDENTITY_CREATED_THEN_LOST_AFTER_CANDIDATE_V1135"
+        ? "TRACE_CANDIDATE_MERGE_AND_PRIORITY_PERSISTENCE_V1135"
+        : stage==="IDENTITY_NOT_POPULATED_ON_RETAINED_CANDIDATE_V1135"
+          ? "FIX_OR_TRACE_ANALYZE_TOKEN_REGISTRY_RECOVERY_ASSIGNMENT_V1135"
+          : stage==="CANDIDATE_SURFACE_NOT_PERSISTED_V1135"
+            ? "ADD_BOUNDED_IDENTITY_HANDOFF_TELEMETRY_BEFORE_BEHAVIOR_CHANGE_V1135"
+            : stage==="PRIORITY_IDENTITY_NOW_PRESENT_V1135"
+              ? "RETEST_DIRECTIONAL_WATCH_REGISTRATION_V1135"
+              : "REVIEW_LOCAL_CONSTRUCTION_SIMULATION_V1135"
+    });
+  }
+
+  const counts={};
+  for(const r of results) counts[r.stage]=(counts[r.stage]||0)+1;
+  return {
+    ...base,success:results.length>0,status:"REGISTRY_CANDIDATE_IDENTITY_HANDOFF_CLASSIFIED_V1135",
+    summary:{statusCounts:counts,retainedCandidateSurfaceRows:retained.length},candidates:results,
+    interpretation:{
+      retainedCandidate:"Checks persisted full-candidate surfaces for onChainPoolIdentityV153 before blaming later priority/watch logic.",
+      simulation:"Runs the existing V153/V742 identity functions against registry-derived pool rows in memory only. It does not write or promote the simulated identity.",
+      classification:"Separates identity never populated from identity populated then lost, so the following version can change only the proven failing handoff."
+    },
+    note:"V1135 is diagnostic only. It adds zero provider/RPC requests, performs zero state writes, changes no thresholds, promotion logic, watch capacity, budgets, or Telegram behavior.",
     timestamp:now()
   };
 }
