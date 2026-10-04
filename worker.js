@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1130"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1131"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -192514,6 +192514,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-promotion-evidence-completion-status"
+  ) {
+    return jsonResponse(
+      await livePromotionEvidenceCompletionStatusV1131(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -205589,3 +205598,220 @@ export default {
     );
   }
 };
+
+
+// V1131: read-only promotion evidence-completion diagnostic.
+// Traces the current near-miss candidate through exact-pool, market-sequence,
+// verified-flow, durable-history and promotion-handoff stages. No provider/RPC
+// request is made here; it only inspects state and already-persisted D1 evidence.
+async function livePromotionEvidenceCompletionStatusV1131(env, url){
+  const nearMiss=await livePromotionNearMissStatusV1125(env);
+  const requested=normalize(url?.searchParams?.get("token"));
+  const sourceRows=Array.isArray(nearMiss?.allNonDominantCandidates)
+    ? nearMiss.allNonDominantCandidates
+    : [];
+
+  const selectedRows=isAddress(requested)
+    ? sourceRows.filter(r=>normalize(r?.address)===requested)
+    : sourceRows.filter(r=>
+        r?.nearMissTier==="TIER_1_MATURING_V1125" ||
+        r?.nearMissTier==="PROMOTION_READY_V1125"
+      ).slice(0,4);
+
+  const base={
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_PROMOTION_EVIDENCE_COMPLETION_STATUS_V1131",
+    success:true,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    requestedToken:isAddress(requested)?requested:null,
+    candidatesRequested:selectedRows.length
+  };
+
+  if(!selectedRows.length){
+    return {
+      ...base,
+      success:false,
+      status:isAddress(requested)?"REQUESTED_TOKEN_NOT_IN_CURRENT_NEAR_MISS_SET_V1131":"NO_MATURING_CANDIDATES_V1131",
+      candidates:[],
+      note:"V1131 diagnoses existing persisted evidence only. It makes no provider/RPC calls and changes no live behavior.",
+      timestamp:now()
+    };
+  }
+
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const results=[];
+
+  for(const candidate of selectedRows){
+    const address=normalize(candidate?.address);
+    if(!isAddress(address)) continue;
+
+    const hist=await accumulationRowsForAddressV1078(env,address,288);
+    const rows=Array.isArray(hist?.rows)?hist.rows:[];
+    const ordered=[...rows].sort((a,b)=>safeNumber(a?.captured_at)-safeNumber(b?.captured_at));
+    const latest=ordered.length?ordered[ordered.length-1]:null;
+    const breakout=breakoutFromRowsV1094(address,ordered);
+    const accumulation=flowAwareAccumulationFromRowsV1092(address,ordered);
+    const exactPool=priorityLiveExactPoolIdentityV1112(state,address);
+    const exactPoolAvailable=!!(exactPool?.verified===true || exactPool?.poolId || exactPool?.pool_id);
+
+    const providerVerified=ordered.filter(r=>
+      Number(r?.market_verified)===1 &&
+      finiteOrNullV1076(r?.price_usd)!==null &&
+      finiteOrNullV1076(r?.price_usd)>0
+    );
+    const providerChanged=providerVerified.filter(r=>Number(r?.market_snapshot_changed)===1);
+    const onchainVerified=ordered.filter(r=>
+      Number(r?.onchain_price_verified)===1 &&
+      finiteOrNullV1076(r?.onchain_price_usd)!==null &&
+      finiteOrNullV1076(r?.onchain_price_usd)>0
+    );
+    const onchainChanged=onchainVerified.filter(r=>Number(r?.onchain_price_snapshot_changed)===1);
+
+    const marketFailures=[];
+    const marketReady=breakout?.marketEvidenceReady===true;
+    if(!marketReady){
+      if(providerVerified.length===0 && onchainVerified.length===0) marketFailures.push("NO_VERIFIED_PRICE_OBSERVATIONS");
+      if(providerChanged.length===0 && onchainChanged.length===0) marketFailures.push("NO_CHANGED_VERIFIED_PRICE_SNAPSHOT");
+      if(safeNumber(breakout?.verifiedPriceObservationsV1101)<2) marketFailures.push("FEWER_THAN_2_VERIFIED_PRICE_OBSERVATIONS");
+      if(safeNumber(breakout?.verifiedChangedMarketRows)<1) marketFailures.push("NO_SELECTED_CHANGED_MARKET_ROW");
+      if(safeNumber(breakout?.changedMarketSpanMinutes)<(BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094/60000)) marketFailures.push("VERIFIED_PRICE_SPAN_BELOW_5_MINUTES");
+      if(!marketFailures.length) marketFailures.push("SELECTED_PRICE_SEQUENCE_NOT_READY");
+    }
+
+    const flowFailures=[];
+    const flowReady=accumulation?.evidenceReady===true;
+    if(!flowReady){
+      if(safeNumber(accumulation?.verifiedFlowObservations)===0) flowFailures.push("NO_VERIFIED_FLOW_ROWS");
+      if(safeNumber(accumulation?.usable1hFlowObservations)<FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092) flowFailures.push("INSUFFICIENT_USABLE_1H_FLOW_OBSERVATIONS");
+      if(safeNumber(accumulation?.verifiedFlowSpanMinutes)<(FLOW_ACCUM_MIN_SPAN_MS_V1092/60000)) flowFailures.push("VERIFIED_FLOW_SPAN_BELOW_5_MINUTES");
+      const medTrades=finiteOrNullV1076(accumulation?.flow?.medianTrades);
+      const medGross=finiteOrNullV1076(accumulation?.flow?.medianGrossUsd);
+      if(medTrades===null || medTrades<FLOW_ACCUM_MIN_MEDIAN_TRADES_V1093) flowFailures.push("MEDIAN_TRADES_BELOW_5");
+      if(medGross===null || medGross<FLOW_ACCUM_MIN_MEDIAN_GROSS_USD_V1093) flowFailures.push("MEDIAN_GROSS_USD_BELOW_250");
+      if(!flowFailures.length) flowFailures.push("FLOW_MODEL_NOT_READY");
+    }
+
+    const handoffMismatches=[];
+    if((candidate?.flowEvidenceReady===true)!==flowReady) handoffMismatches.push("FLOW_READINESS_HANDOFF_MISMATCH");
+    if((candidate?.marketEvidenceReady===true)!==marketReady) handoffMismatches.push("MARKET_READINESS_HANDOFF_MISMATCH");
+    if((candidate?.exactPoolIdentityAvailable===true)!==exactPoolAvailable) handoffMismatches.push("EXACT_POOL_HANDOFF_MISMATCH");
+    const historyCount=safeNumber(candidate?.storedObservations);
+    if(hist?.ok===true && historyCount!==ordered.length && historyCount!==Math.min(288,ordered.length)) handoffMismatches.push("HISTORY_COUNT_HANDOFF_MISMATCH");
+
+    const stages={
+      durableHistory:hist?.ok===true && ordered.length>0?"PASS":"FAIL",
+      exactPoolIdentity:exactPoolAvailable?"PASS":"FAIL",
+      marketEvidence:marketReady?"PASS":"FAIL",
+      flowEvidence:flowReady?"PASS":"FAIL",
+      promotionHandoff:handoffMismatches.length?"FAIL":"PASS"
+    };
+
+    const blockers=[];
+    if(stages.durableHistory==="FAIL") blockers.push("DURABLE_HISTORY_UNAVAILABLE");
+    if(stages.exactPoolIdentity==="FAIL") blockers.push("EXACT_POOL_IDENTITY_MISSING");
+    if(stages.marketEvidence==="FAIL") blockers.push(...marketFailures.map(x=>`MARKET:${x}`));
+    if(stages.flowEvidence==="FAIL") blockers.push(...flowFailures.map(x=>`FLOW:${x}`));
+    if(stages.promotionHandoff==="FAIL") blockers.push(...handoffMismatches.map(x=>`HANDOFF:${x}`));
+
+    let status="EVIDENCE_COMPLETION_READY_V1131";
+    if(stages.promotionHandoff==="FAIL") status="EVIDENCE_HANDOFF_MISMATCH_V1131";
+    else if(stages.exactPoolIdentity==="FAIL" && (stages.marketEvidence==="FAIL" || stages.flowEvidence==="FAIL")) status="MULTI_STAGE_EVIDENCE_GAP_V1131";
+    else if(stages.marketEvidence==="FAIL" && stages.flowEvidence==="FAIL") status="MARKET_AND_FLOW_EVIDENCE_GAP_V1131";
+    else if(stages.marketEvidence==="FAIL") status="MARKET_EVIDENCE_GAP_V1131";
+    else if(stages.flowEvidence==="FAIL") status="FLOW_EVIDENCE_GAP_V1131";
+    else if(stages.exactPoolIdentity==="FAIL") status="EXACT_POOL_GAP_V1131";
+
+    results.push({
+      address,
+      symbol:candidate?.symbol||latest?.symbol||null,
+      rank:candidate?.rank??null,
+      nearMissTier:candidate?.nearMissTier||null,
+      priorityScore:safeNumber(candidate?.priorityScore),
+      storedObservations:historyCount,
+      status,
+      stages,
+      durableHistory:{
+        readOk:hist?.ok===true,
+        rowsLoaded:ordered.length,
+        latestCapturedAt:safeNumber(latest?.captured_at)||null,
+        ageSinceLatestMs:latest?.captured_at?Math.max(0,now()-safeNumber(latest.captured_at)):null
+      },
+      exactPoolIdentity:{
+        available:exactPoolAvailable,
+        poolId:exactPool?.poolId||exactPool?.pool_id||null,
+        verified:exactPool?.verified===true,
+        source:exactPool?.source||exactPool?.status||null
+      },
+      marketEvidence:{
+        ready:marketReady,
+        selectedSource:breakout?.priceEvidenceSourceV1095||null,
+        selectedVerifiedObservations:safeNumber(breakout?.verifiedPriceObservationsV1101),
+        selectedChangedRows:safeNumber(breakout?.verifiedChangedMarketRows),
+        selectedSpanMinutes:safeNumber(breakout?.changedMarketSpanMinutes),
+        minimumSpanMinutes:BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094/60000,
+        providerVerifiedRows:providerVerified.length,
+        providerChangedRows:providerChanged.length,
+        onchainVerifiedRows:onchainVerified.length,
+        onchainChangedRows:onchainChanged.length,
+        entryPriceSequenceReady:breakout?.entryPriceSequenceReadyV1104===true,
+        failures:marketFailures
+      },
+      flowEvidence:{
+        ready:flowReady,
+        verifiedFlowObservations:safeNumber(accumulation?.verifiedFlowObservations),
+        usable1hFlowObservations:safeNumber(accumulation?.usable1hFlowObservations),
+        verifiedFlowSpanMinutes:safeNumber(accumulation?.verifiedFlowSpanMinutes),
+        medianTrades:finiteOrNullV1076(accumulation?.flow?.medianTrades),
+        medianGrossUsd:finiteOrNullV1076(accumulation?.flow?.medianGrossUsd),
+        repeatedEvidenceReady:accumulation?.repeatedEvidenceReadyV1093===true,
+        materialFlowReady:accumulation?.materialFlowReadyV1093===true,
+        minimumVerifiedObservations:FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092,
+        minimumSpanMinutes:FLOW_ACCUM_MIN_SPAN_MS_V1092/60000,
+        minimumMedianTrades:FLOW_ACCUM_MIN_MEDIAN_TRADES_V1093,
+        minimumMedianGrossUsd:FLOW_ACCUM_MIN_MEDIAN_GROSS_USD_V1093,
+        failures:flowFailures,
+        warnings:Array.isArray(accumulation?.warnings)?accumulation.warnings:[]
+      },
+      promotionHandoff:{
+        candidateFlowReady:candidate?.flowEvidenceReady===true,
+        modelFlowReady:flowReady,
+        candidateMarketReady:candidate?.marketEvidenceReady===true,
+        modelMarketReady:marketReady,
+        candidateExactPoolAvailable:candidate?.exactPoolIdentityAvailable===true,
+        stateExactPoolAvailable:exactPoolAvailable,
+        mismatches:handoffMismatches
+      },
+      blockers:[...new Set(blockers)]
+    });
+  }
+
+  const statuses={};
+  for(const r of results) statuses[r.status]=(statuses[r.status]||0)+1;
+  const anyHandoff=results.some(r=>r?.stages?.promotionHandoff==="FAIL");
+  const allReady=results.length>0 && results.every(r=>r?.status==="EVIDENCE_COMPLETION_READY_V1131");
+
+  return {
+    ...base,
+    success:results.length>0,
+    status:anyHandoff?"HANDOFF_MISMATCH_DETECTED_V1131":allReady?"ALL_DIAGNOSED_EVIDENCE_READY_V1131":"EVIDENCE_GAPS_IDENTIFIED_V1131",
+    statusCounts:statuses,
+    candidates:results,
+    interpretation:{
+      durableHistory:"Confirms the candidate has persisted D1 observations available to the longitudinal models.",
+      exactPoolIdentity:"Confirms an exact pool identity already exists in ChainVanta state; V1131 does not query a provider to discover one.",
+      marketEvidence:"Requires a verified changed-price sequence with at least two time-distinct verified observations spanning at least five minutes.",
+      flowEvidence:"Requires at least two usable verified 1h-flow observations spanning at least five minutes, median trades >=5 and median gross flow >=$250.",
+      promotionHandoff:"Compares the underlying model/state readiness with the flags received by the promotion diagnostic so hidden handoff mismatches are visible."
+    },
+    note:"V1131 is diagnostic only. It adds zero external provider/RPC requests, changes no thresholds, does not auto-promote tokens, and does not mutate Telegram or production behavior.",
+    timestamp:now()
+  };
+}
