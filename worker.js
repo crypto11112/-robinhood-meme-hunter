@@ -9727,7 +9727,16 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1137"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1138"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1138 — PROMOTION-AWARE DURABLE-COHORT SCHEDULING FIX
+ * - Uses the same single existing cohort analysis slot; MAX_TOKEN_CHECKS is unchanged.
+ * - Gives quality-safe evidence-maturing cohort candidates priority over ordinary BREADTH/DEPTH rotation.
+ * - Adds a 30-minute starvation bound and then rotates by oldest last-selected time.
+ * - Reuses V1128 quality-safe Opportunity/Confidence/Risk floors for scheduling only.
+ * - Does not lower scoring/promotion/risk thresholds, add provider/RPC requests, widen the fast lane/watch, or enable Telegram.
+ */
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -111056,6 +111065,12 @@ for (
         selectionPurpose:intelligenceFollowUpSelectionV1077?.selectionPurposeV1100 || null,
         fairnessFallback:intelligenceFollowUpSelectionV1077?.fairnessFallbackV1128 === true,
         fairnessReason:intelligenceFollowUpSelectionV1077?.fairnessReasonV1128 || null,
+        promotionAwareSchedulingV1138:intelligenceFollowUpSelectionV1077?.promotionAwareSchedulingV1138 === true,
+        promotionEvidenceCandidatesV1138:safeNumber(intelligenceFollowUpSelectionV1077?.promotionEvidenceCandidatesV1138),
+        promotionEvidenceStarvedCandidatesV1138:safeNumber(intelligenceFollowUpSelectionV1077?.promotionEvidenceStarvedCandidatesV1138),
+        promotionEvidenceSelectedV1138:intelligenceFollowUpSelectionV1077?.promotionEvidenceSelectedV1138 === true,
+        promotionEvidenceReasonV1138:intelligenceFollowUpSelectionV1077?.promotionEvidenceReasonV1138 || null,
+        promotionEvidenceSelectedAgeMsV1138:intelligenceFollowUpSelectionV1077?.promotionEvidenceSelectedAgeMsV1138 ?? null,
         slotEligible:intelligenceSlotEligibleV1077 === true,
         freshLaunchPressureLow:intelligenceFreshLaunchPressureLowV1077 === true,
         alreadyOrganicallySelected:intelligenceAlreadyInSelectedV1077 === true,
@@ -187055,6 +187070,12 @@ const INTELLIGENCE_COHORT_MAX_V1079 = 8;
 const INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 = 7 * 24 * 60 * 60 * 1000; // V1105: 7-day inactivity retention
 const INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 = 4 * 60 * 1000;
 
+// V1138: promotion-aware scheduling inside the SAME single durable-cohort slot.
+// This is scheduling priority only; it does not change scoring/promotion gates or add analysis/provider capacity.
+// Reuse the already-established V1128 quality-safe score/risk floor below, and ensure an eligible
+// evidence-maturing candidate cannot be repeatedly displaced by ordinary breadth rotation.
+const INTELLIGENCE_COHORT_PROMOTION_STARVATION_MS_V1138 = 30 * 60 * 1000;
+
 // V1130: fairness score-source integrity fix — current cohort-entry Opportunity/Confidence take precedence over stale history-row scores.
 // V1128: conservative fallback only; this is evidence collection, never promotion.
 const INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128 = 60 * 60 * 1000;
@@ -187272,6 +187293,12 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
     fairnessCandidatesV1128:0,
     fairnessReasonV1128:null,
     fairnessHistoryAgeMsV1128:null,
+    promotionAwareSchedulingV1138:true,
+    promotionEvidenceCandidatesV1138:0,
+    promotionEvidenceStarvedCandidatesV1138:0,
+    promotionEvidenceSelectedV1138:false,
+    promotionEvidenceReasonV1138:null,
+    promotionEvidenceSelectedAgeMsV1138:null,
     status:null,
     error:null,
     externalRequestsUsed:0,
@@ -187363,10 +187390,92 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
 
   base.depthEligibleCandidatesV1100 = depthEligibleV1100.length;
 
-  // V1100 alternates the one already-existing cohort slot. A committed DEPTH
-  // selection is followed by BREADTH on the next eligible cohort admission so
-  // repeat price work cannot starve the wider cohort.
+  // V1138: before ordinary DEPTH/BREADTH rotation, identify high-quality cohort
+  // entries that are still missing evidence needed by the promotion pipeline.
+  // The floor deliberately reuses the conservative V1128 Opportunity/Confidence/Risk
+  // values; no production scoring or promotion threshold is changed.
+  const promotionEvidenceCandidatesV1138 = ranked
+    .map(item => {
+      const entry = item?.entry || null;
+      const row = item?.row || null;
+      const address = normalize(entry?.address || item?.token?.address);
+      const opportunity =
+        finiteOrNullV1076(entry?.opportunityScore) ??
+        finiteOrNullV1076(row?.opportunity_score) ?? 0;
+      const confidence =
+        finiteOrNullV1076(entry?.confidenceScore) ??
+        finiteOrNullV1076(row?.confidence_score) ?? 0;
+      const risk =
+        finiteOrNullV1076(entry?.riskScore) ??
+        (Number(row?.risk_verified) === 1 ? finiteOrNullV1076(row?.risk_score) : null);
+      const exactIdentity = isAddress(address)
+        ? priorityLiveExactPoolIdentityV1112(state, address)
+        : null;
+      const exactPoolAvailable = Boolean(
+        exactIdentity?.verified === true ||
+        exactIdentity?.poolId ||
+        exactIdentity?.pool_id
+      );
+      const onChainVerified = safeNumber(item?.onChainPriceVerifiedCountV1100);
+      const onChainChanged = safeNumber(item?.onChainPriceChangedCountV1100);
+      const evidenceIncomplete =
+        exactPoolAvailable !== true ||
+        onChainVerified < 2 ||
+        onChainChanged < 1;
+      const selectedAgeMs = safeNumber(item?.lastSelectedAt) > 0
+        ? Math.max(0, nowMs - safeNumber(item?.lastSelectedAt))
+        : Number.POSITIVE_INFINITY;
+      const qualitySafe =
+        opportunity >= INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128 &&
+        confidence >= INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128 &&
+        risk !== null &&
+        risk <= INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128;
+      return {
+        ...item,
+        promotionOpportunityV1138:opportunity,
+        promotionConfidenceV1138:confidence,
+        promotionRiskV1138:risk,
+        promotionExactPoolAvailableV1138:exactPoolAvailable,
+        promotionEvidenceIncompleteV1138:evidenceIncomplete,
+        promotionSelectedAgeMsV1138:selectedAgeMs,
+        promotionQualitySafeV1138:qualitySafe
+      };
+    })
+    .filter(item =>
+      item?.promotionQualitySafeV1138 === true &&
+      item?.promotionEvidenceIncompleteV1138 === true
+    );
+
+  const promotionEvidenceStarvedV1138 = promotionEvidenceCandidatesV1138.filter(item =>
+    !Number.isFinite(item?.promotionSelectedAgeMsV1138) ||
+    safeNumber(item?.promotionSelectedAgeMsV1138) >= INTELLIGENCE_COHORT_PROMOTION_STARVATION_MS_V1138
+  );
+
+  const promotionPoolV1138 =
+    promotionEvidenceStarvedV1138.length > 0
+      ? promotionEvidenceStarvedV1138
+      : promotionEvidenceCandidatesV1138;
+
+  promotionPoolV1138.sort((a,b) => {
+    const aMissingPool = a?.promotionExactPoolAvailableV1138 === true ? 1 : 0;
+    const bMissingPool = b?.promotionExactPoolAvailableV1138 === true ? 1 : 0;
+    const aAge = Number.isFinite(a?.promotionSelectedAgeMsV1138) ? safeNumber(a?.promotionSelectedAgeMsV1138) : Number.MAX_SAFE_INTEGER;
+    const bAge = Number.isFinite(b?.promotionSelectedAgeMsV1138) ? safeNumber(b?.promotionSelectedAgeMsV1138) : Number.MAX_SAFE_INTEGER;
+    return aMissingPool - bMissingPool ||
+      bAge - aAge ||
+      safeNumber(a?.observationCount) - safeNumber(b?.observationCount) ||
+      safeNumber(b?.promotionOpportunityV1138) - safeNumber(a?.promotionOpportunityV1138) ||
+      safeNumber(b?.promotionConfidenceV1138) - safeNumber(a?.promotionConfidenceV1138) ||
+      safeNumber(b?.historyScore) - safeNumber(a?.historyScore);
+  });
+
+  base.promotionEvidenceCandidatesV1138 = promotionEvidenceCandidatesV1138.length;
+  base.promotionEvidenceStarvedCandidatesV1138 = promotionEvidenceStarvedV1138.length;
+
+  // Preserve V1100 DEPTH/BREADTH as the fallback once there is no promotion-evidence
+  // candidate requiring the single cohort slot. This keeps scanner capacity unchanged.
   const preferDepthV1100 =
+    promotionPoolV1138.length === 0 &&
     depthEligibleV1100.length > 0 &&
     cohort?.lastSelectionPurposeV1100 !== "DEPTH";
 
@@ -187379,7 +187488,7 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
       safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
       safeNumber(b?.historyScore) - safeNumber(a?.historyScore)
     );
-  } else {
+  } else if (promotionPoolV1138.length === 0) {
     ranked.sort((a,b) =>
       safeNumber(a?.observationCount) - safeNumber(b?.observationCount) ||
       safeNumber(a?.lastSelectedAt) - safeNumber(b?.lastSelectedAt) ||
@@ -187388,9 +187497,28 @@ async function selectIntelligenceFollowUpV1079(env, state, scheduled) {
   }
 
   let selected =
+    promotionPoolV1138[0] ||
     (preferDepthV1100 ? depthEligibleV1100[0] : ranked[0]) || null;
   let selectionPurposeV1100 =
-    selected ? (preferDepthV1100 ? "DEPTH" : "BREADTH") : null;
+    selected
+      ? promotionPoolV1138[0] === selected
+        ? "PROMOTION_EVIDENCE_V1138"
+        : preferDepthV1100
+          ? "DEPTH"
+          : "BREADTH"
+      : null;
+
+  if (selectionPurposeV1100 === "PROMOTION_EVIDENCE_V1138") {
+    base.promotionEvidenceSelectedV1138 = true;
+    base.promotionEvidenceReasonV1138 =
+      promotionEvidenceStarvedV1138.length > 0
+        ? "STARVATION_BOUND_PRIORITY_V1138"
+        : "PROMOTION_EVIDENCE_PRIORITY_V1138";
+    base.promotionEvidenceSelectedAgeMsV1138 =
+      Number.isFinite(selected?.promotionSelectedAgeMsV1138)
+        ? safeNumber(selected?.promotionSelectedAgeMsV1138)
+        : null;
+  }
 
   // V1128: if normal V1079/V1100 eligibility yields nobody, do not strand a
   // retained sparse-evidence token forever. Re-use the same one cohort slot for
@@ -187596,7 +187724,9 @@ function commitIntelligenceFollowUpAdmissionV1086(
       ? "DEPTH"
       : selection?.selectionPurposeV1100 === "FAIRNESS_EVIDENCE_REFRESH"
         ? "FAIRNESS_EVIDENCE_REFRESH"
-        : "BREADTH";
+        : selection?.selectionPurposeV1100 === "PROMOTION_EVIDENCE_V1138"
+          ? "PROMOTION_EVIDENCE_V1138"
+          : "BREADTH";
   if (cohort.lastSelectionPurposeV1100 === "DEPTH") {
     cohort.lastDepthSelectedAddressV1100 = address;
     cohort.lastDepthSelectedAtV1100 = at;
@@ -187604,6 +187734,10 @@ function commitIntelligenceFollowUpAdmissionV1086(
   if (cohort.lastSelectionPurposeV1100 === "FAIRNESS_EVIDENCE_REFRESH") {
     cohort.lastFairnessSelectedAddressV1128 = address;
     cohort.lastFairnessSelectedAtV1128 = at;
+  }
+  if (cohort.lastSelectionPurposeV1100 === "PROMOTION_EVIDENCE_V1138") {
+    cohort.lastPromotionEvidenceSelectedAddressV1138 = address;
+    cohort.lastPromotionEvidenceSelectedAtV1138 = at;
   }
   cohort.updatedAt = at;
 
