@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1125"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1126"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192360,6 +192360,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-promotion-evidence-progression"
+  ) {
+    return jsonResponse(
+      await livePromotionEvidenceProgressionV1126(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -197312,6 +197321,164 @@ async function livePromotionNearMissStatusV1125(env){
       notNearMiss:"More substantial evidence/quality gaps remain."
     },
     note:"V1125 watches current non-dominant candidates approaching promotion using existing V1124 data only. It does not auto-promote, weaken safety rules, add provider traffic, or mutate production behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1126: focused read-only evidence-progression diagnostic.
+// It explains whether a near-miss is genuinely receiving new durable observations,
+// whether those observations contain the evidence needed by the promotion models,
+// and whether exact-pool identity already exists in ChainVanta state. It does not
+// call any external provider and does not change promotion/scoring behavior.
+async function livePromotionEvidenceProgressionV1126(env, url){
+  const nearMiss=await livePromotionNearMissStatusV1125(env);
+  const requested=normalize(url?.searchParams?.get("token"));
+  const maturing=(Array.isArray(nearMiss?.allNonDominantCandidates)?nearMiss.allNonDominantCandidates:[])
+    .filter(r=>r?.nearMissTier==="TIER_1_MATURING_V1125")
+    .sort((a,b)=>safeNumber(b?.nearMissScore)-safeNumber(a?.nearMissScore));
+  const selectedAddress=isAddress(requested)?requested:normalize(maturing?.[0]?.address);
+  const selected=(Array.isArray(nearMiss?.allNonDominantCandidates)?nearMiss.allNonDominantCandidates:[])
+    .find(r=>normalize(r?.address)===selectedAddress)||null;
+
+  const base={
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_PROMOTION_EVIDENCE_PROGRESSION_V1126",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    requestedToken:isAddress(requested)?requested:null,
+    selectedToken:selectedAddress||null
+  };
+
+  if(!isAddress(selectedAddress)){
+    return {...base,status:"NO_MATURING_TOKEN_AVAILABLE_V1126",note:"No valid token was supplied and no Tier-1 maturing candidate is currently available.",timestamp:now()};
+  }
+
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const cohort=ensureIntelligenceCohortV1079(state);
+  const cohortEntry=(Array.isArray(cohort?.entries)?cohort.entries:[])
+    .find(e=>normalize(e?.address)===selectedAddress)||null;
+
+  const hist=await accumulationRowsForAddressV1078(env,selectedAddress,288);
+  const rows=Array.isArray(hist?.rows)?hist.rows:[];
+  const latest=rows.length?rows[rows.length-1]:null;
+  const previous=rows.length>1?rows[rows.length-2]:null;
+  const first=rows.length?rows[0]:null;
+  const latestCapturedAt=safeNumber(latest?.captured_at)||null;
+  const previousCapturedAt=safeNumber(previous?.captured_at)||null;
+  const firstCapturedAt=safeNumber(first?.captured_at)||null;
+  const ageSinceLatestMs=latestCapturedAt?Math.max(0,now()-latestCapturedAt):null;
+  const latestGapMs=(latestCapturedAt&&previousCapturedAt)?Math.max(0,latestCapturedAt-previousCapturedAt):null;
+
+  const marketVerifiedRows=rows.filter(r=>safeNumber(r?.market_verified)===1 || r?.market_verified===true);
+  const onchainVerifiedRows=rows.filter(r=>safeNumber(r?.onchain_price_verified)===1 || r?.onchain_price_verified===true);
+  const volumeRows=rows.filter(r=>finiteOrNullV1076(r?.volume_24h_usd)!==null && safeNumber(r?.volume_24h_usd)>0);
+  const priceRows=rows.filter(r=>finiteOrNullV1076(r?.price_usd)!==null && safeNumber(r?.price_usd)>0);
+  const uniqueMarketSources=[...new Set(rows.map(r=>r?.market_source).filter(Boolean))];
+
+  const breakout=breakoutFromRowsV1094(selectedAddress,rows);
+  const accumulation=flowAwareAccumulationFromRowsV1092(selectedAddress,rows);
+  const exactPool=priorityLiveExactPoolIdentityV1112(state,selectedAddress);
+
+  const durableCount=rows.length;
+  const displayedStored=safeNumber(selected?.storedObservations);
+  const historyCountMatches=displayedStored===Math.min(288,durableCount) || displayedStored===durableCount;
+
+  let progressionStatus="EVIDENCE_PIPELINE_ACTIVE_V1126";
+  const findings=[];
+  if(!hist?.ok){
+    progressionStatus="HISTORY_READ_FAILED_V1126";
+    findings.push("DURABLE_HISTORY_READ_FAILED");
+  }else if(!rows.length){
+    progressionStatus="NO_DURABLE_HISTORY_V1126";
+    findings.push("NO_DURABLE_OBSERVATIONS");
+  }else{
+    if(ageSinceLatestMs!==null && ageSinceLatestMs>15*60*1000){
+      progressionStatus="OBSERVATION_WRITE_STALE_V1126";
+      findings.push("LATEST_DURABLE_OBSERVATION_OLDER_THAN_15M");
+    }
+    if(!historyCountMatches) findings.push("DISPLAYED_STORED_COUNT_DIFFERS_FROM_D1_WINDOW");
+    if(breakout?.flowEvidenceReady!==true) findings.push("FLOW_EVIDENCE_STILL_NOT_READY");
+    if(breakout?.marketEvidenceReady!==true) findings.push("MARKET_EVIDENCE_STILL_NOT_READY");
+    if(!(exactPool?.verified===true || exactPool?.poolId || exactPool?.pool_id)) findings.push("EXACT_POOL_IDENTITY_STILL_MISSING");
+    if(marketVerifiedRows.length===0) findings.push("NO_MARKET_VERIFIED_HISTORY_ROWS");
+    if(onchainVerifiedRows.length===0) findings.push("NO_ONCHAIN_PRICE_VERIFIED_HISTORY_ROWS");
+  }
+
+  let likelyCause="NORMAL_EVIDENCE_MATURATION_V1126";
+  if(progressionStatus==="OBSERVATION_WRITE_STALE_V1126") likelyCause="TOKEN_NOT_RECEIVING_FRESH_COHORT_OBSERVATIONS_V1126";
+  else if(rows.length>=8 && breakout?.flowEvidenceReady!==true && marketVerifiedRows.length===0 && onchainVerifiedRows.length===0)
+    likelyCause="OBSERVATIONS_EXIST_BUT_REQUIRED_MARKET_FLOW_EVIDENCE_ABSENT_V1126";
+  else if(rows.length>=8 && !(exactPool?.verified===true || exactPool?.poolId || exactPool?.pool_id) && (breakout?.marketEvidenceReady===true || breakout?.flowEvidenceReady===true))
+    likelyCause="EXACT_POOL_IDENTITY_IS_PRIMARY_REMAINING_GAP_V1126";
+
+  return {
+    ...base,
+    success:hist?.ok===true,
+    status:progressionStatus,
+    symbol:selected?.symbol||cohortEntry?.symbol||latest?.symbol||null,
+    nearMissTier:selected?.nearMissTier||null,
+    watchReason:selected?.watchReason||null,
+    priorityScore:safeNumber(selected?.priorityScore),
+    hardBlockers:Array.isArray(selected?.hardBlockers)?selected.hardBlockers:[],
+    readinessGaps:Array.isArray(selected?.readinessGaps)?selected.readinessGaps:[],
+    cohort:{
+      present:!!cohortEntry,
+      entries:safeNumber(cohort?.entries?.length),
+      entry:cohortEntry?{
+        address:cohortEntry.address||null,
+        symbol:cohortEntry.symbol||null,
+        observationCount:safeNumber(cohortEntry?.observationCount),
+        addedAt:safeNumber(cohortEntry?.addedAt)||null,
+        lastSeenAt:safeNumber(cohortEntry?.lastSeenAt)||null
+      }:null
+    },
+    durableHistory:{
+      readOk:hist?.ok===true,
+      readStatus:hist?.status||null,
+      rowsLoaded:durableCount,
+      displayedStoredObservations:displayedStored,
+      countConsistent:historyCountMatches,
+      firstCapturedAt,
+      latestCapturedAt,
+      previousCapturedAt,
+      latestGapMs,
+      ageSinceLatestMs,
+      marketVerifiedRows:marketVerifiedRows.length,
+      onchainPriceVerifiedRows:onchainVerifiedRows.length,
+      rowsWithVerifiedPrice:priceRows.length,
+      rowsWithVolume:volumeRows.length,
+      marketSources:uniqueMarketSources
+    },
+    currentModelEvidence:{
+      breakoutState:breakout?.breakoutState||null,
+      breakoutScore:safeNumber(breakout?.breakoutScore),
+      entryQuality:breakout?.entryQualityV1103||null,
+      flowEvidenceReady:breakout?.flowEvidenceReady===true,
+      marketEvidenceReady:breakout?.marketEvidenceReady===true,
+      accumulationState:accumulation?.accumulationState||null
+    },
+    exactPoolIdentity:{
+      available:!!(exactPool?.verified===true || exactPool?.poolId || exactPool?.pool_id),
+      identity:exactPool||null
+    },
+    likelyCause,
+    findings,
+    interpretation:{
+      observationWriteStale:"If latest durable history is older than 15 minutes while the token remains in the cohort, investigate cohort observation/write routing rather than relaxing promotion thresholds.",
+      evidenceAbsent:"If observations are fresh but verified market/flow evidence remains absent, the token may simply lack qualifying activity or source coverage.",
+      poolMissing:"A missing exact-pool identity is reported separately; V1126 does not fabricate or externally resolve one.",
+      noAutoFix:"V1126 is diagnostic only. It does not promote the token or modify safety/quality gates."
+    },
+    note:"V1126 diagnoses why a maturing near-miss is not progressing using only ChainVanta state and durable D1 history. No external provider/RPC requests are added.",
     timestamp:now()
   };
 }
