@@ -1,5 +1,14 @@
 /**
- * ChainVanta — V1121
+ * ChainVanta — V1148
+ * V1148: V958 fallback-budget decision trace — diagnostic only.
+ * - Traces the Validation Cloud primary -> Blockscout fallback budget path.
+ * - Records whether V1147 pair protection armed, request-budget state before/after primary,
+ *   whether the fallback reached consumeBudget, and the exact predicate that blocks it.
+ * - Adds no provider/RPC requests, request ceilings, collection slots, scoring, promotion,
+ *   watch-capacity, risk, or Telegram changes.
+ *
+ * Historical source-lineage changelog follows below.
+ *
  * V1121: outcome quality guard + valuation-basis integrity — shadow V1.
  * - Adds horizon-specific maximum observation lag so late freezes remain recorded but cannot contaminate performance statistics.
  * - Distinguishes EXACT / NEAR_EXACT / ACCEPTABLE_LAG / STALE timing quality; EXACT is now <=3s after target.
@@ -9727,7 +9736,18 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1147"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1148"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/* =========================================================
+   V1148 — V958 FALLBACK BUDGET DECISION TRACE
+   =========================================================
+   Diagnostic-only instrumentation around the real V551 Validation Cloud →
+   Blockscout fallback budget path. It records whether V1147 pair protection
+   armed, whether the primary request consumed budget, whether the fallback
+   reached consumeBudget, and the exact predicate or hard boundary that
+   rejected it. No request ceilings, slots, providers, scoring, promotion,
+   risk, watch capacity, or Telegram behavior are changed.
+*/
 
 /*
  * V1147 — PROTECTED V551 PRIMARY→FALLBACK REQUEST PAIR
@@ -22731,14 +22751,39 @@ function consumeDirectionalWatchFallbackPairV1147(
   if (type !== "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS") return null;
 
   const reserve = budget?.analysis?.directionalWatchReserveV553;
+  if (reserve && typeof reserve === "object") {
+    reserve.v1148FallbackPresented = true;
+    reserve.v1148FallbackPresentedAt = Date.now();
+    reserve.v1148FallbackType = String(type || "");
+    reserve.v1148BudgetBeforeFallback = {
+      totalUsed:safeNumber(budget?.totalUsed),
+      totalLimit:safeNumber(budget?.totalLimit),
+      analysisUsed:safeNumber(budget?.analysis?.used),
+      analysisLimit:safeNumber(effectiveAnalysisLimitV416(budget)),
+      pairArmed:reserve?.validationCloudFallbackPairArmedV1147 === true,
+      primaryConsumed:reserve?.validationCloudPrimaryConsumedV1147 === true,
+      fallbackConsumed:reserve?.blockscoutFallbackConsumedV1147 === true
+    };
+  }
   if (
     reserve?.active !== true ||
     reserve?.validationCloudFallbackPairArmedV1147 !== true ||
     reserve?.validationCloudPrimaryConsumedV1147 !== true ||
     reserve?.blockscoutFallbackConsumedV1147 === true
   ) {
+    if (reserve && typeof reserve === "object") {
+      reserve.v1148FallbackPairEligibleAtConsume = false;
+      reserve.v1148FallbackPairRejectPredicate =
+        reserve?.active !== true ? "RESERVE_NOT_ACTIVE_V1148" :
+        reserve?.validationCloudFallbackPairArmedV1147 !== true ? "PAIR_NOT_ARMED_V1148" :
+        reserve?.validationCloudPrimaryConsumedV1147 !== true ? "PRIMARY_NOT_MARKED_CONSUMED_V1148" :
+        reserve?.blockscoutFallbackConsumedV1147 === true ? "FALLBACK_ALREADY_CONSUMED_V1148" :
+        "UNKNOWN_PAIR_PREDICATE_V1148";
+    }
     return null;
   }
+  reserve.v1148FallbackPairEligibleAtConsume = true;
+  reserve.v1148FallbackPairRejectPredicate = null;
 
   const needed = Math.max(1, safeNumber(amount));
   if (needed !== 1) return false;
@@ -22764,6 +22809,17 @@ function consumeDirectionalWatchFallbackPairV1147(
   const hardGlobalAllowed =
     safeNumber(budget.totalUsed) + needed <= safeNumber(budget.totalLimit);
 
+  reserve.v1148FallbackBoundaryAudit = {
+    needed,
+    analysisAllowed,
+    preTelegramGlobalAllowed,
+    hardGlobalAllowed,
+    totalUsed:safeNumber(budget?.totalUsed),
+    totalLimit:safeNumber(budget?.totalLimit),
+    analysisUsed:safeNumber(budget?.analysis?.used),
+    analysisLimit:safeNumber(analysisLimit),
+    preTelegramGlobalLimit:safeNumber(preTelegramGlobalLimit)
+  };
   if (!analysisAllowed || !preTelegramGlobalAllowed || !hardGlobalAllowed) {
     reserve.fallbackPairBlockedHardBoundaryV1147 = true;
     reserve.fallbackPairBlockReasonV1147 = !analysisAllowed
@@ -22787,6 +22843,11 @@ function consumeDirectionalWatchFallbackPairV1147(
   reserve.blockscoutFallbackConsumedV1147 = true;
   reserve.blockscoutFallbackConsumedAtV1147 = Date.now();
   reserve.fallbackPairBlockReasonV1147 = null;
+  reserve.v1148FallbackPairConsumed = true;
+  reserve.v1148BudgetAfterFallback = {
+    totalUsed:safeNumber(budget?.totalUsed),
+    analysisUsed:safeNumber(budget?.analysis?.used)
+  };
   return true;
 }
 
@@ -92323,6 +92384,20 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber,env=null
   reserve.blockscoutFallbackConsumedV1147 = false;
   reserve.fallbackPairBlockedHardBoundaryV1147 = false;
   reserve.fallbackPairBlockReasonV1147 = null;
+  reserve.v1148FallbackPresented = false;
+  reserve.v1148FallbackPresentedAt = null;
+  reserve.v1148FallbackType = null;
+  reserve.v1148FallbackPairEligibleAtConsume = null;
+  reserve.v1148FallbackPairRejectPredicate = null;
+  reserve.v1148FallbackBoundaryAudit = null;
+  reserve.v1148FallbackPairConsumed = false;
+  reserve.v1148BudgetBeforeFallback = null;
+  reserve.v1148BudgetAfterFallback = null;
+  reserve.v1148PrimaryBudgetBefore = null;
+  reserve.v1148PrimaryBudgetAfter = null;
+  reserve.v1148PrimaryAttempted = false;
+  reserve.v1148PrimaryFailed = false;
+  reserve.v1148PrimaryError = null;
   reserve.hardMinimumProtectionV1141 =
     reserve.minimumGuaranteedRequestsV559 > 0;
   reserve.hardMinimumGuaranteedRequestsV1141 =
@@ -92696,6 +92771,17 @@ async function advanceDirectionalWatchV551({
         budget.analysis.v958DirectionalRpcActive = true;
         let vcResultV958;
         const totalUsedBeforeValidationCloudV1147 = safeNumber(budget?.totalUsed);
+        const reserveV1148BeforePrimary = budget?.analysis?.directionalWatchReserveV553;
+        if (reserveV1148BeforePrimary && typeof reserveV1148BeforePrimary === "object") {
+          reserveV1148BeforePrimary.v1148PrimaryAttempted = true;
+          reserveV1148BeforePrimary.v1148PrimaryBudgetBefore = {
+            totalUsed:safeNumber(budget?.totalUsed),
+            totalLimit:safeNumber(budget?.totalLimit),
+            analysisUsed:safeNumber(budget?.analysis?.used),
+            analysisLimit:safeNumber(effectiveAnalysisLimitV416(budget)),
+            pairArmed:reserveV1148BeforePrimary?.validationCloudFallbackPairArmedV1147 === true
+          };
+        }
         try {
           vcResultV958 = await rpcCall(
             validationCloudRpcUrlV627(env),
@@ -92720,6 +92806,13 @@ async function advanceDirectionalWatchV551({
             reserveV1147.validationCloudPrimaryConsumedV1147 = true;
             reserveV1147.validationCloudPrimaryConsumedAtV1147 = Date.now();
           }
+          if (reserveV1147 && typeof reserveV1147 === "object") {
+            reserveV1147.v1148PrimaryBudgetAfter = {
+              totalUsed:safeNumber(budget?.totalUsed),
+              analysisUsed:safeNumber(budget?.analysis?.used),
+              primaryMarkedConsumed:reserveV1147?.validationCloudPrimaryConsumedV1147 === true
+            };
+          }
         }
 
         if (!Array.isArray(vcResultV958)) {
@@ -92732,6 +92825,11 @@ async function advanceDirectionalWatchV551({
       } catch (errorV958) {
         validationCloudErrorV958 =
           errorString(errorV958);
+        const reserveV1148Failure = budget?.analysis?.directionalWatchReserveV553;
+        if (reserveV1148Failure && typeof reserveV1148Failure === "object") {
+          reserveV1148Failure.v1148PrimaryFailed = true;
+          reserveV1148Failure.v1148PrimaryError = validationCloudErrorV958;
+        }
       }
     }
 
@@ -123815,6 +123913,18 @@ for (
         blockscoutFallbackConsumedV1147:directionalWatchReserveV553?.blockscoutFallbackConsumedV1147 === true,
         fallbackPairBlockedHardBoundaryV1147:directionalWatchReserveV553?.fallbackPairBlockedHardBoundaryV1147 === true,
         fallbackPairBlockReasonV1147:directionalWatchReserveV553?.fallbackPairBlockReasonV1147 || null,
+        v1148PrimaryAttempted:directionalWatchReserveV553?.v1148PrimaryAttempted === true,
+        v1148PrimaryFailed:directionalWatchReserveV553?.v1148PrimaryFailed === true,
+        v1148PrimaryError:directionalWatchReserveV553?.v1148PrimaryError || null,
+        v1148PrimaryBudgetBefore:directionalWatchReserveV553?.v1148PrimaryBudgetBefore || null,
+        v1148PrimaryBudgetAfter:directionalWatchReserveV553?.v1148PrimaryBudgetAfter || null,
+        v1148FallbackPresented:directionalWatchReserveV553?.v1148FallbackPresented === true,
+        v1148FallbackPairEligibleAtConsume:directionalWatchReserveV553?.v1148FallbackPairEligibleAtConsume,
+        v1148FallbackPairRejectPredicate:directionalWatchReserveV553?.v1148FallbackPairRejectPredicate || null,
+        v1148FallbackBoundaryAudit:directionalWatchReserveV553?.v1148FallbackBoundaryAudit || null,
+        v1148FallbackPairConsumed:directionalWatchReserveV553?.v1148FallbackPairConsumed === true,
+        v1148BudgetBeforeFallback:directionalWatchReserveV553?.v1148BudgetBeforeFallback || null,
+        v1148BudgetAfterFallback:directionalWatchReserveV553?.v1148BudgetAfterFallback || null,
         promotionEvidenceFirstRangePriorityV1142:directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
         promotionEvidenceDurableBridgeV1143:directionalWatchReserveV553?.promotionEvidenceDurableBridgeV1143 === true,
         promotionEvidenceDurablePromotionBridgeV1143:directionalWatchReserveV553?.promotionEvidenceDurablePromotionBridgeV1143 === true,
