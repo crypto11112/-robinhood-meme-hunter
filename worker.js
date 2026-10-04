@@ -1,6 +1,12 @@
 /**
- * ChainVanta — V1119
- * V1119: audit evaluator integrity + read-time legacy pending projection.
+ * ChainVanta — V1120
+ * V1120: lightweight decision-outcome observer — shadow V1.
+ * - Keeps forward-only decision outcomes observable after a token leaves the max-3 fast lane.
+ * - Uses one bounded DexScreener batch only when an audit horizon is actually due.
+ * - No holder/whale/full RPC re-analysis; this observer is price/market-cap measurement only.
+ * - Shares the V1111 monthly request governor and provider cooldown/backoff.
+ * - Records observation lag and never hindsight-backfills a missed horizon.
+ * - Adds explicit /live-decision-observer-start?confirm=shadow control for legacy pending records.
  * TARGET-AWARE OUTCOME FREEZER + PENDING REASON TELEMETRY — SHADOW V1
  * Builds directly from deployed V1117.
  * - Fixes a V1117 handoff edge case where a still-fresh but pre-target provider snapshot
@@ -9713,7 +9719,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1119"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1120"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192319,6 +192325,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-decision-observer-start"
+  ) {
+    return jsonResponse(
+      await startDecisionOutcomeObserverV1120(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-budget-status"
   ) {
     return jsonResponse(
@@ -195600,6 +195615,30 @@ const PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117 = Object.freeze({
   m1:60*1000,m5:5*60*1000,m15:15*60*1000,m30:30*60*1000,h1:60*60*1000,h2:2*60*60*1000,h4:4*60*60*1000
 });
 
+// V1120: lightweight post-lane decision outcome observer. It is separate from
+// the max-3 live roster and only requests market evidence when a horizon is due.
+const PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120 = "v1120:decisionOutcomeObserverEnabled";
+const PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120 = "v1120:decisionOutcomeObserverStatus";
+const PRIORITY_DECISION_OBSERVER_MAX_BATCH_TOKENS_V1120 = 30;
+const PRIORITY_DECISION_OBSERVER_RETRY_MS_V1120 = 2 * 60 * 1000;
+
+function priorityDecisionObserverPendingV1120(audit, nowMs=Date.now()){
+  const records=Array.isArray(audit?.records)?audit.records:[];
+  const due=[]; const future=[];
+  for(const rec of records){
+    const decisionAt=safeNumber(rec?.decisionAt);
+    if(!(decisionAt>0) || nowMs-decisionAt>PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117) continue;
+    for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
+      const h=rec?.horizons?.[key]; if(!h || h?.status==="FROZEN") continue;
+      const targetAt=safeNumber(h?.targetAt||decisionAt+ms);
+      const item={recordId:rec?.id||null,address:normalize(rec?.address||""),symbol:rec?.symbol||null,key,targetAt,decisionAt};
+      if(nowMs>=targetAt) due.push(item); else future.push(item);
+    }
+  }
+  due.sort((a,b)=>a.targetAt-b.targetAt); future.sort((a,b)=>a.targetAt-b.targetAt);
+  return {due,future,pendingCount:due.length+future.length,nextTargetAt:future[0]?.targetAt||null};
+}
+
 function priorityLiveTokenScaleV1117(row){
   const points=Array.isArray(row?.holderDeltaPointsV1114)?row.holderDeltaPointsV1114:[];
   for(let i=points.length-1;i>=0;i--){
@@ -195680,7 +195719,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
           controlledShadowTest:row?.controlledShadowTestV1110===true,genuinePromotion:row?.controlledShadowTestV1110!==true&&!!row?.promotedAt,
           baseline:snap?.verified===true?snap:{verified:false,status:snap?.status||"DECISION_BASELINE_PRICE_UNAVAILABLE_V1118",observedAt:null,priceUsd:null,marketCap:null},
           decisionEvidence:{bullishPillars:Array.isArray(decision?.bullishPillars)?decision.bullishPillars:[],bearishPillars:Array.isArray(decision?.bearishPillars)?decision.bearishPillars:[],blockers:Array.isArray(decision?.blockers)?decision.blockers:[],reasons:Array.isArray(decision?.reasons)?decision.reasons:[]},
-          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1119"
+          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1120"
         });
         newRecords++; changed=true;
       }
@@ -195719,7 +195758,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
     }
   }
   if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
-  return {audit:{version:"V1119",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119"},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
+  return {audit:{version:"V1120",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119",outcomeObserverV1120:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
 }
 
 // V1119: read-time audit projection. This is deliberately read-only: it never
@@ -196706,6 +196745,19 @@ async function priorityLiveBudgetControlV1111(env, action, url) {
   }
 }
 
+async function startDecisionOutcomeObserverV1120(env, url){
+  const confirm=String(url?.searchParams?.get("confirm")||"").toLowerCase();
+  if(confirm!=="shadow") return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"CONFIRM_SHADOW_REQUIRED_V1120",instruction:"Use /live-decision-observer-start?confirm=shadow"};
+  const ns=env?.[V3_LIVE_DO_BINDING_V363];
+  if(!ns||typeof ns.idFromName!=="function"||typeof ns.get!=="function") return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"V1120_DO_BINDING_UNAVAILABLE"};
+  try{
+    const stub=ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response=await stub.fetch("https://v3-live.internal/priority-decision-observer-start-v1120",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({requestedAt:Date.now()})});
+    const body=await response.json().catch(()=>({}));
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,shadowOnly:true,productionAlertsEnabled:false,telegramMutation:false,...body};
+  }catch(error){ return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"V1120_OBSERVER_START_FAILED",error:errorString(error)}; }
+}
+
 async function readPriorityLiveLaneV1109(env) {
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
   if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
@@ -196727,7 +196779,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1118",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1120",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -196810,9 +196862,10 @@ async function livePriorityLaneStatusV1109(env) {
       decisionOutcomeAuditV1117:"FORWARD_ONLY_1M_5M_15M_30M_1H_2H_4H_NO_NEW_REQUESTS",
       outcomeFreezerIntegrityV1118:"TARGET_AWARE_MULTI_SOURCE_PRICE_SELECTION_PLUS_PENDING_REASON_TELEMETRY",
       auditEvaluatorIntegrityV1119:"READ_TIME_LEGACY_PROJECTION_PLUS_EXPLICIT_EVALUATOR_STAMPS_NO_HISTORY_MUTATION",
+      lightweightDecisionOutcomeObserverV1120:"TARGET_TRIGGERED_POST_LANE_VERIFIED_PRICE_ONLY_SHARED_V1111_GOVERNOR",
       telegramMutation:false
     },
-    nextStage:"V1119 proves legacy pending horizons report truthfully even between evaluator cycles, then a fresh controlled test must demonstrate an actual post-target freeze before longer calibration or Telegram activation.",
+    nextStage:"V1120 keeps audited decisions observable after fast-lane expiry. Prove real post-target freezes through 1m/5m/15m first, then let a broader forward sample mature before decision-threshold calibration or Telegram activation.",
     timestamp:now()
   };
 }
@@ -196846,11 +196899,11 @@ async function liveDecisionAuditStatusV1117(env){
     }
   }
   return {
-    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1119",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
-    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,readProjectionV1119:snap?.readProjectionV1119===true,
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1120",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,lightweightOutcomeObserverV1120:true,readProjectionV1119:snap?.readProjectionV1119===true,
     projectionEvaluatedAt:snap?.projectionEvaluatedAt||null,legacyHorizonsProjected:safeNumber(snap?.legacyHorizonsProjected),duePendingProjected:safeNumber(snap?.duePendingProjected),freezeEligibleProjected:safeNumber(snap?.freezeEligibleProjected),
-    records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
-    note:"V1119 projects legacy pending horizons at read time without mutating history, so targetPassed/pendingReason remain truthful even when no alarm has run. Only the live evaluator may freeze an outcome, and only from a verified observation at/after the target. No hindsight backfill or new provider requests.",timestamp:now()
+    outcomeObserverV1120:snap?.outcomeObserverV1120||null,records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
+    note:"V1120 keeps audit outcomes observable after fast-lane expiry with a lightweight, target-triggered price observer. It freezes only verified post-target observations, records lag, shares the V1111 request governor, and never hindsight-backfills.",timestamp:now()
   };
 }
 
@@ -198589,18 +198642,150 @@ export class V3LiveCollectorV363 {
     };
   }
 
+  async priorityDecisionOutcomeObserverStartV1120(){
+    const nowMs=Date.now();
+    const audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{records:[]};
+    const pending=priorityDecisionObserverPendingV1120(audit,nowMs);
+    if(!pending.pendingCount){
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,false);
+      const status={version:"V1120",enabled:false,active:false,status:"NO_PENDING_DECISION_OUTCOMES_V1120",pendingHorizons:0,dueHorizons:0,futureHorizons:0,lastUpdatedAt:nowMs};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return {started:false,...status};
+    }
+    const budget=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    if(budget.manualPaused===true||budget.hardLocked===true){
+      return {started:false,status:budget.hardLocked?"MONTHLY_LIVE_BUDGET_HARD_LOCK_V1111":"PRIORITY_LIVE_MANUALLY_PAUSED_V1111",pendingHorizons:pending.pendingCount,budget:{tier:budget.tier,used:budget.used,limit:budget.limit}};
+    }
+    await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,true);
+    const wakeAt=pending.due.length?nowMs+1000:Math.max(nowMs+1000,safeNumber(pending.nextTargetAt));
+    await this.doSetAlarmV404(wakeAt);
+    const status={version:"V1120",enabled:true,active:true,status:pending.due.length?"OUTCOME_OBSERVER_ARMED_DUE_NOW_V1120":"OUTCOME_OBSERVER_ARMED_WAITING_TARGET_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,nextWakeAt:wakeAt,lastUpdatedAt:nowMs};
+    await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+    return {started:true,shadowOnly:true,productionAlertsEnabled:false,telegramMutation:false,...status,budget:{tier:budget.tier,used:budget.used,limit:budget.limit}};
+  }
+
+  async priorityDecisionOutcomeObserverV1120(){
+    const nowMs=Date.now();
+    let audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
+    let pending=priorityDecisionObserverPendingV1120(audit,nowMs);
+    if(!pending.pendingCount){
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,false);
+      const status={version:"V1120",enabled:false,active:false,status:"OUTCOME_OBSERVER_COMPLETE_V1120",pendingHorizons:0,dueHorizons:0,futureHorizons:0,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt:null};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return status;
+    }
+    if(!pending.due.length){
+      const nextWakeAt=Math.max(nowMs+1000,safeNumber(pending.nextTargetAt));
+      const status={version:"V1120",enabled:true,active:true,status:"OUTCOME_OBSERVER_WAITING_NEXT_TARGET_V1120",pendingHorizons:pending.pendingCount,dueHorizons:0,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return status;
+    }
+
+    const budget=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    if(budget.manualPaused===true||budget.hardLocked===true){
+      const status={version:"V1120",enabled:true,active:false,status:budget.hardLocked?"OUTCOME_OBSERVER_MONTHLY_HARD_LOCK_V1120":"OUTCOME_OBSERVER_MANUALLY_PAUSED_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt:null};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return status;
+    }
+    if(budget.providerCooldownActive===true){
+      const nextWakeAt=Math.max(nowMs+1000,safeNumber(budget.providerCooldownUntil));
+      const status={version:"V1120",enabled:true,active:true,status:"OUTCOME_OBSERVER_PROVIDER_COOLDOWN_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt,providerCooldownUntil:budget.providerCooldownUntil};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return status;
+    }
+
+    const priorStatus=await this.state.storage.get(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120)||{};
+    const lastRequestAt=safeNumber(priorStatus?.lastRequestAt);
+    if(lastRequestAt>0 && nowMs-lastRequestAt<PRIORITY_DECISION_OBSERVER_RETRY_MS_V1120){
+      const nextWakeAt=lastRequestAt+PRIORITY_DECISION_OBSERVER_RETRY_MS_V1120;
+      const status={...priorStatus,version:"V1120",enabled:true,active:true,status:"OUTCOME_OBSERVER_RETRY_WAIT_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return status;
+    }
+
+    const addresses=[...new Set(pending.due.map(x=>normalize(x.address)).filter(isAddress))].slice(0,PRIORITY_DECISION_OBSERVER_MAX_BATCH_TOKENS_V1120);
+    if(!addresses.length){
+      const status={version:"V1120",enabled:true,active:false,status:"OUTCOME_OBSERVER_DUE_RECORDS_HAVE_NO_VALID_ADDRESS_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt:null};
+      await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+      return status;
+    }
+
+    let response=null,pairs=[],httpStatus=null,error=null;
+    try{
+      response=await fetch(`${DEXSCREENER_BASE}/tokens/v1/robinhood/${addresses.join(",")}`,{headers:{"accept":"application/json","user-agent":"ChainVanta-V1120-OutcomeObserver/1.0"}});
+      httpStatus=response.status;
+      if(response.ok) pairs=await response.json().catch(()=>[]); else error=`DEXSCREENER_HTTP_${response.status}`;
+    }catch(e){ error=errorString(e); }
+    if(!Array.isArray(pairs)) pairs=[];
+    const observedAt=Date.now();
+    const byToken=new Map();
+    for(const pair of pairs){
+      const address=normalize(pair?.baseToken?.address||"");
+      if(!addresses.includes(address)) continue;
+      const priceUsd=finiteV414(pair?.priceUsd); const marketCap=finiteV414(pair?.marketCap); const liquidity=finiteV414(pair?.liquidity?.usd);
+      if(priceUsd===null||priceUsd<=0) continue;
+      const candidate={address,priceUsd,marketCap:marketCap!==null&&marketCap>0?marketCap:null,liquidityUsd:liquidity!==null?liquidity:null,pairAddress:normalize(pair?.pairAddress||"")||null,dexId:pair?.dexId||null};
+      const prior=byToken.get(address);
+      if(!prior||safeNumber(candidate.liquidityUsd)>safeNumber(prior.liquidityUsd)) byToken.set(address,candidate);
+    }
+
+    let changed=false,outcomesFrozen=0,recordsObserved=0;
+    for(const rec of (Array.isArray(audit?.records)?audit.records:[])){
+      const address=normalize(rec?.address||"");
+      if(!addresses.includes(address)) continue;
+      const market=byToken.get(address)||null;
+      const baseline=rec?.baseline;
+      let touchedRecord=false;
+      for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
+        const h=rec?.horizons?.[key]; if(!h||h?.status==="FROZEN") continue;
+        const targetAt=safeNumber(h?.targetAt||safeNumber(rec?.decisionAt)+ms);
+        if(observedAt<targetAt) continue;
+        touchedRecord=true;
+        if(baseline?.verified!==true||!(Number(baseline?.priceUsd)>0)){
+          rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"DECISION_BASELINE_UNVERIFIED_V1120",observerProcessedAtV1120:observedAt,observerVersion:"V1120"};
+          changed=true; continue;
+        }
+        if(market&&Number(market.priceUsd)>0){
+          rec.horizons[key]={status:"FROZEN",targetAt,targetPassed:true,freezeEligible:true,pendingReason:null,capturedAt:observedAt,observationAt:observedAt,latestEligibleObservationAt:observedAt,latestEligiblePrice:market.priceUsd,observationSource:"DEXSCREENER_LIGHTWEIGHT_OUTCOME_OBSERVER_V1120",observationLagMs:Math.max(0,observedAt-targetAt),priceUsd:market.priceUsd,marketCap:market.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,market.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,market.marketCap),source:"DEXSCREENER_LIGHTWEIGHT_OUTCOME_OBSERVER_V1120",priceBasis:"VERIFIED_PROVIDER_PRICE_POST_TARGET",observerProcessedAtV1120:observedAt,observerVersion:"V1120",forwardOnly:true,hindsightBackfillAllowed:false};
+          outcomesFrozen++; changed=true;
+        }else{
+          rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"OUTCOME_OBSERVER_NO_VERIFIED_MARKET_V1120",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,observerProcessedAtV1120:observedAt,observerVersion:"V1120"};
+          changed=true;
+        }
+      }
+      if(touchedRecord) recordsObserved++;
+    }
+    if(changed){
+      audit={...audit,version:"V1120",records:audit.records,lastUpdatedAt:observedAt,outcomeObserverV1120:true};
+      await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,audit);
+    }
+    await this.priorityLiveRecordPollV1111({externalRequests:1,verifiedObservations:outcomesFrozen,httpStatus});
+    pending=priorityDecisionObserverPendingV1120(audit,Date.now());
+    let nextWakeAt=null;
+    if(pending.due.length) nextWakeAt=Date.now()+PRIORITY_DECISION_OBSERVER_RETRY_MS_V1120;
+    else if(pending.future.length) nextWakeAt=Math.max(Date.now()+1000,safeNumber(pending.nextTargetAt));
+    const active=pending.pendingCount>0;
+    if(!active) await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,false);
+    const status={version:"V1120",enabled:active,active,status:outcomesFrozen>0?"OUTCOME_OBSERVER_FROZE_POST_TARGET_OUTCOMES_V1120":(error||"OUTCOME_OBSERVER_NO_FREEZE_V1120"),pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,batchAddresses:addresses.length,recordsObserved,externalRequestsUsed:1,outcomesFrozen,httpStatus,error,lastRequestAt:observedAt,lastPollAt:observedAt,nextWakeAt,source:"DEXSCREENER_LIGHTWEIGHT_OUTCOME_OBSERVER_V1120"};
+    await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
+    return status;
+  }
+
   async priorityDecisionAuditSnapshotV1117(){
     const audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
     const entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     const liveRows=Object.values(entries||{});
     const projected=priorityDecisionAuditReadProjectionV1119(audit,liveRows,Date.now());
+    const observerStatus=await this.state.storage.get(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120)||null;
+    const observerEnabled=(await this.state.storage.get(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120))===true;
     return {
-      version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1119",
+      version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1120",
       forwardOnly:true,hindsightBackfillAllowed:false,readProjectionV1119:true,
       projectionEvaluatedAt:projected?.projectionEvaluatedAt||null,
       legacyHorizonsProjected:safeNumber(projected?.legacyHorizonsProjected),
       duePendingProjected:safeNumber(projected?.duePendingProjected),
       freezeEligibleProjected:safeNumber(projected?.freezeEligibleProjected),
+      outcomeObserverV1120:{enabled:observerEnabled,status:observerStatus},
       records:Array.isArray(projected?.records)?projected.records:[],lastUpdatedAt:audit?.lastUpdatedAt||null
     };
   }
@@ -198964,6 +199149,9 @@ export class V3LiveCollectorV363 {
     const decisionAuditUpdateV1117=priorityDecisionAuditUpdateV1117(priorDecisionAuditV1117,liveRows,Date.now());
     if(decisionAuditUpdateV1117.changed){
       await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,decisionAuditUpdateV1117.audit);
+      if(decisionAuditUpdateV1117.newRecords>0){
+        await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,true);
+      }
     }
 
     await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
@@ -199621,6 +199809,7 @@ export class V3LiveCollectorV363 {
     if (url.pathname === "/priority-live-budget-control-v1111" && request.method === "POST") return Response.json(await this.priorityLiveBudgetControlV1111(request));
     if (url.pathname === "/priority-live-snapshot-v1109") return Response.json(await this.priorityLiveSnapshotV1109());
     if (url.pathname === "/priority-decision-audit-v1117") return Response.json(await this.priorityDecisionAuditSnapshotV1117());
+    if (url.pathname === "/priority-decision-observer-start-v1120" && request.method === "POST") return Response.json(await this.priorityDecisionOutcomeObserverStartV1120());
     if (url.pathname === "/start") {
       const cfg = {
         token: normalize(url.searchParams.get("token") || ""),
@@ -200117,16 +200306,23 @@ if (url.pathname === "/reconcile-v374") {
     }
     const horizonEnabledV413 = await this.state.storage.get(HORIZON_LIVE_ENABLED_KEY_V413);
     const priorityLiveEnabledV1109 = await this.state.storage.get(PRIORITY_LIVE_ENABLED_KEY_V1109);
+    const decisionObserverEnabledV1120 = await this.state.storage.get(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120);
     let horizonPollV413 = null;
     let priorityPollV1109 = null;
+    let decisionObserverPollV1120 = null;
     if (horizonEnabledV413 === true) {
       horizonPollV413 = await this.pollLiveHorizonsV413();
     }
     if (priorityLiveEnabledV1109 === true) {
       priorityPollV1109 = await this.pollPriorityLiveV1109();
     }
+    if (decisionObserverEnabledV1120 === true) {
+      decisionObserverPollV1120 = await this.priorityDecisionOutcomeObserverV1120();
+    }
     if (horizonPollV413?.active === true || priorityPollV1109?.active === true) {
       await this.doSetAlarmV404(Date.now()+HORIZON_LIVE_POLL_MS_V413);
+    } else if (decisionObserverPollV1120?.active === true && safeNumber(decisionObserverPollV1120?.nextWakeAt)>0) {
+      await this.doSetAlarmV404(Math.max(Date.now()+1000,safeNumber(decisionObserverPollV1120.nextWakeAt)));
     }
 
     const productionEnabled = await this.state.storage.get("enabled");
