@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1092
+ * FLOW-AWARE ACCUMULATION — SHADOW V1
+ * Builds directly from deployed V1091.
+ * - Adds a separate shadow accumulation model driven primarily by repeated
+ *   VERIFIED V212 on-chain BUY/SELL USD flow stored in D1.
+ * - Does not sum overlapping rolling 1h windows as if they were independent
+ *   volume. Instead it evaluates persistence: median buy pressure, share of
+ *   positive-net observations, latest direction, trade activity and time span.
+ * - Requires repeated verified flow observations before calling accumulation
+ *   evidence ready. One verified snapshot remains BUILDING_FLOW_HISTORY.
+ * - Blends verified flow (65%) with the existing V1078 structural accumulation
+ *   score (35%) only after repeated flow evidence is ready.
+ * - Adds /flow-accumulation-status and /flow-accumulation?token=0x...
+ * - Shadow/read-only only. No Opportunity/Momentum/Confidence/Risk mutation,
+ *   no Telegram qualification changes, and zero new provider/RPC requests.
+ */
+
+/**
  * ChainVanta — V1091
  * COHORT EXACT-POOL WATCH RETENTION FIX
  * Builds directly from deployed V1090.
@@ -9231,7 +9249,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1091"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1092"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -186995,6 +187013,423 @@ async function accumulationStatusV1078(env) {
 
 
 /* ============================================================
+   V1092 — FLOW-AWARE ACCUMULATION — SHADOW V1
+   ============================================================ */
+const FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092 = 2;
+const FLOW_ACCUM_MIN_SPAN_MS_V1092 = 5 * 60 * 1000;
+const FLOW_ACCUM_STRONG_MIN_OBSERVATIONS_V1092 = 3;
+const FLOW_ACCUM_STRONG_MIN_SPAN_MS_V1092 = 15 * 60 * 1000;
+
+function medianV1092(values) {
+  const rows = (Array.isArray(values) ? values : [])
+    .map(finiteOrNullV1076)
+    .filter(v => v !== null)
+    .sort((a,b) => a - b);
+  if (!rows.length) return null;
+  const mid = Math.floor(rows.length / 2);
+  return rows.length % 2
+    ? rows[mid]
+    : (rows[mid - 1] + rows[mid]) / 2;
+}
+
+function flowAccumulationStateV1092(
+  flowScore,
+  evidenceReady,
+  strongEvidence,
+  warnings,
+  medianBuyPressurePct,
+  positiveNetShare
+) {
+  if (!evidenceReady) return "BUILDING_FLOW_HISTORY";
+
+  const warningSet = new Set(Array.isArray(warnings) ? warnings : []);
+  if (
+    warningSet.has("VERIFIED_HIGH_RISK") ||
+    warningSet.has("EXTREME_CONCENTRATION") ||
+    warningSet.has("LIQUIDITY_COLLAPSE")
+  ) {
+    return "CAUTION";
+  }
+
+  if (
+    medianBuyPressurePct !== null &&
+    medianBuyPressurePct < 45 &&
+    positiveNetShare !== null &&
+    positiveNetShare <= 0.40
+  ) {
+    return "DISTRIBUTION";
+  }
+
+  if (strongEvidence && flowScore >= 75) return "STRONG_ACCUMULATION";
+  if (flowScore >= 60) return "ACCUMULATING";
+  if (flowScore >= 40) return "MIXED";
+  return "WEAK";
+}
+
+function flowAwareAccumulationFromRowsV1092(address, rows) {
+  const normalizedAddress = normalize(address);
+  const ordered = (Array.isArray(rows) ? rows : [])
+    .filter(row => normalize(row?.address) === normalizedAddress)
+    .sort((a,b) => safeNumber(a?.captured_at) - safeNumber(b?.captured_at));
+
+  const structural = accumulationFromRowsV1078(normalizedAddress, ordered);
+
+  const verifiedFlowRows = ordered.filter(
+    row => Number(row?.flow_verified) === 1
+  );
+
+  const firstFlowAt = verifiedFlowRows.length
+    ? safeNumber(verifiedFlowRows[0]?.captured_at)
+    : 0;
+  const lastFlowAt = verifiedFlowRows.length
+    ? safeNumber(verifiedFlowRows[verifiedFlowRows.length - 1]?.captured_at)
+    : 0;
+  const flowSpanMs =
+    firstFlowAt && lastFlowAt
+      ? Math.max(0, lastFlowAt - firstFlowAt)
+      : 0;
+
+  const usable1h = verifiedFlowRows.map(row => {
+    const trades = finiteOrNullV1076(row?.flow_1h_trades);
+    const buyUsd = finiteOrNullV1076(row?.flow_1h_buy_usd);
+    const sellUsd = finiteOrNullV1076(row?.flow_1h_sell_usd);
+    const netUsd = finiteOrNullV1076(row?.flow_1h_net_usd);
+    const buyPressurePct =
+      finiteOrNullV1076(row?.flow_1h_buy_pressure_pct);
+
+    if (
+      trades === null ||
+      trades <= 0 ||
+      buyUsd === null ||
+      sellUsd === null ||
+      netUsd === null ||
+      buyPressurePct === null
+    ) {
+      return null;
+    }
+
+    return {
+      capturedAt:safeNumber(row?.captured_at),
+      trades,
+      buyUsd,
+      sellUsd,
+      netUsd,
+      buyPressurePct
+    };
+  }).filter(Boolean);
+
+  const evidenceReady =
+    usable1h.length >= FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092 &&
+    flowSpanMs >= FLOW_ACCUM_MIN_SPAN_MS_V1092;
+
+  const strongEvidence =
+    usable1h.length >= FLOW_ACCUM_STRONG_MIN_OBSERVATIONS_V1092 &&
+    flowSpanMs >= FLOW_ACCUM_STRONG_MIN_SPAN_MS_V1092;
+
+  const medianBuyPressurePct = medianV1092(
+    usable1h.map(row => row.buyPressurePct)
+  );
+  const medianNetUsd = medianV1092(
+    usable1h.map(row => row.netUsd)
+  );
+  const medianTrades = medianV1092(
+    usable1h.map(row => row.trades)
+  );
+
+  const positiveNetCount = usable1h.filter(row => row.netUsd > 0).length;
+  const positiveNetShare = usable1h.length
+    ? positiveNetCount / usable1h.length
+    : null;
+
+  const latest = usable1h.length
+    ? usable1h[usable1h.length - 1]
+    : null;
+
+  const warnings = [...(structural?.warnings || [])];
+  let score = 0;
+
+  // Evidence depth / persistence — max 20.
+  score += Math.min(15, usable1h.length * 5);
+  if (flowSpanMs >= 15 * 60 * 1000) score += 5;
+
+  // Median verified buy pressure — max 30.
+  if (medianBuyPressurePct !== null) {
+    if (medianBuyPressurePct >= 65) score += 30;
+    else if (medianBuyPressurePct >= 60) score += 26;
+    else if (medianBuyPressurePct >= 55) score += 22;
+    else if (medianBuyPressurePct >= 50) score += 12;
+    else if (medianBuyPressurePct >= 45) score += 4;
+    else score -= 15;
+  }
+
+  // Directional persistence across snapshots — max 25.
+  if (positiveNetShare !== null) {
+    if (positiveNetShare >= 0.80) score += 25;
+    else if (positiveNetShare >= 0.65) score += 20;
+    else if (positiveNetShare >= 0.50) score += 10;
+    else if (positiveNetShare <= 0.25) score -= 20;
+    else if (positiveNetShare < 0.40) score -= 10;
+  }
+
+  // Latest verified direction — max 15.
+  if (latest) {
+    if (latest.netUsd > 0 && latest.buyPressurePct >= 60) score += 15;
+    else if (latest.netUsd > 0 && latest.buyPressurePct >= 55) score += 12;
+    else if (latest.netUsd > 0) score += 7;
+    else if (latest.netUsd < 0 && latest.buyPressurePct < 45) score -= 12;
+    else if (latest.netUsd < 0) score -= 6;
+  }
+
+  // Activity depth — max 10. Avoid treating a tiny trade sample as strong flow.
+  if (medianTrades !== null) {
+    if (medianTrades >= 50) score += 10;
+    else if (medianTrades >= 20) score += 7;
+    else if (medianTrades >= 8) score += 4;
+    else if (medianTrades < 3) score -= 5;
+  }
+
+  if (!usable1h.length) warnings.push("VERIFIED_FLOW_UNAVAILABLE");
+  if (
+    usable1h.length > 0 &&
+    usable1h.length < FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092
+  ) {
+    warnings.push("INSUFFICIENT_REPEATED_VERIFIED_FLOW");
+  }
+  if (
+    usable1h.length > 0 &&
+    flowSpanMs < FLOW_ACCUM_MIN_SPAN_MS_V1092
+  ) {
+    warnings.push("INSUFFICIENT_VERIFIED_FLOW_TIME_SPAN");
+  }
+  if (
+    medianBuyPressurePct !== null &&
+    medianBuyPressurePct < 45
+  ) {
+    warnings.push("SELL_PRESSURE_DOMINANT");
+  }
+  if (
+    positiveNetShare !== null &&
+    positiveNetShare < 0.40
+  ) {
+    warnings.push("NET_FLOW_PERSISTENTLY_NEGATIVE");
+  }
+
+  // Preserve safety evidence from the structural model. Flow must never
+  // overrule severe verified safety/concentration warnings.
+  if (
+    (structural?.warnings || []).includes("VERIFIED_HIGH_RISK") ||
+    (structural?.warnings || []).includes("EXTREME_CONCENTRATION")
+  ) {
+    score -= 25;
+  }
+
+  const flowScore = clampScoreV1078(score);
+  const structuralScore =
+    finiteOrNullV1076(structural?.accumulationScore);
+
+  const combinedShadowScore =
+    evidenceReady && structuralScore !== null
+      ? clampScoreV1078(
+          flowScore * 0.65 +
+          structuralScore * 0.35
+        )
+      : null;
+
+  const state = flowAccumulationStateV1092(
+    flowScore,
+    evidenceReady,
+    strongEvidence,
+    warnings,
+    medianBuyPressurePct,
+    positiveNetShare
+  );
+
+  return {
+    version:"V1092",
+    shadowOnly:true,
+    actionable:false,
+    address:normalizedAddress,
+    symbol:ordered[ordered.length - 1]?.symbol || null,
+    totalHistoryObservations:ordered.length,
+    verifiedFlowObservations:verifiedFlowRows.length,
+    usable1hFlowObservations:usable1h.length,
+    firstVerifiedFlowAt:firstFlowAt || null,
+    lastVerifiedFlowAt:lastFlowAt || null,
+    verifiedFlowSpanMinutes:Number((flowSpanMs / 60000).toFixed(1)),
+    evidenceReady,
+    strongEvidence,
+    flowAccumulationScore:flowScore,
+    structuralAccumulationScore:structuralScore,
+    combinedShadowScore,
+    accumulationState:state,
+    flow:{
+      medianBuyPressurePct:
+        medianBuyPressurePct === null
+          ? null
+          : Number(medianBuyPressurePct.toFixed(2)),
+      positiveNetSharePct:
+        positiveNetShare === null
+          ? null
+          : Number((positiveNetShare * 100).toFixed(1)),
+      medianNetUsd:
+        medianNetUsd === null
+          ? null
+          : Number(medianNetUsd.toFixed(2)),
+      medianTrades:
+        medianTrades === null
+          ? null
+          : Number(medianTrades.toFixed(1)),
+      latest1h:latest
+        ? {
+            capturedAt:latest.capturedAt,
+            trades:latest.trades,
+            buyUsd:Number(latest.buyUsd.toFixed(2)),
+            sellUsd:Number(latest.sellUsd.toFixed(2)),
+            netUsd:Number(latest.netUsd.toFixed(2)),
+            buyPressurePct:Number(latest.buyPressurePct.toFixed(2))
+          }
+        : null
+    },
+    structuralContext:{
+      state:structural?.accumulationState || null,
+      evidenceReady:structural?.evidenceReady === true,
+      observations:safeNumber(structural?.observations),
+      verifiedMarketObservations:
+        safeNumber(structural?.verifiedMarketObservations)
+    },
+    warnings:[...new Set(warnings)],
+    interpretation:
+      !evidenceReady
+        ? "Verified on-chain flow exists only as an incomplete or single-snapshot history; no sustained accumulation conclusion is made."
+        : state === "STRONG_ACCUMULATION"
+          ? "Repeated verified on-chain flow shows strong, persistent accumulation characteristics in shadow mode."
+          : state === "ACCUMULATING"
+            ? "Repeated verified on-chain flow is consistently constructive, but this remains a shadow intelligence signal."
+            : state === "DISTRIBUTION"
+              ? "Repeated verified on-chain flow is predominantly sell-side/distribution."
+              : state === "CAUTION"
+                ? "Flow may contain constructive evidence, but safety or concentration warnings prevent a bullish interpretation."
+                : "Repeated verified flow is mixed or too weak to call sustained accumulation.",
+    methodology:{
+      overlappingRollingWindowsSummed:false,
+      primaryEvidence:"VERIFIED_V212_ONCHAIN_BUY_SELL_USD_HISTORY",
+      flowWeightPctWhenReady:65,
+      structuralWeightPctWhenReady:35,
+      minimumVerifiedFlowObservations:
+        FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092,
+      minimumFlowSpanMinutes:
+        FLOW_ACCUM_MIN_SPAN_MS_V1092 / 60000
+    },
+    productionImpact:{
+      opportunityChanged:false,
+      momentumChanged:false,
+      confidenceChanged:false,
+      riskChanged:false,
+      telegramQualificationChanged:false,
+      telegramCallsChanged:false
+    }
+  };
+}
+
+async function flowAccumulationTokenDiagnosticV1092(env, url) {
+  const token = normalize(url.searchParams.get("token"));
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"FLOW_ACCUMULATION_TOKEN_V1092",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0,
+    token
+  };
+
+  if (!isAddress(token)) {
+    return {...base,status:"INVALID_TOKEN_ADDRESS_V1092",timestamp:now()};
+  }
+
+  const history = await accumulationRowsForAddressV1078(
+    env,
+    token,
+    url.searchParams.get("limit") || 288
+  );
+
+  if (!history.ok) {
+    return {
+      ...base,
+      status:history.status,
+      error:history.error || null,
+      timestamp:now()
+    };
+  }
+
+  return {
+    ...base,
+    success:true,
+    status:"FLOW_ACCUMULATION_TOKEN_OK_V1092",
+    result:flowAwareAccumulationFromRowsV1092(token, history.rows),
+    timestamp:now()
+  };
+}
+
+async function flowAccumulationStatusV1092(env) {
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"FLOW_ACCUMULATION_STATUS_V1092",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0
+  };
+
+  const stateRead = await readState(env);
+  const cohort = ensureIntelligenceCohortV1079(stateRead?.state || {});
+  const addresses = [...new Set(
+    (cohort?.entries || [])
+      .map(entry => normalize(entry?.address))
+      .filter(isAddress)
+  )];
+
+  const results = [];
+  for (const address of addresses.slice(0,20)) {
+    const history = await accumulationRowsForAddressV1078(env, address, 288);
+    if (!history.ok) continue;
+    results.push(flowAwareAccumulationFromRowsV1092(address, history.rows));
+  }
+
+  results.sort((a,b) =>
+    (safeNumber(b?.combinedShadowScore) - safeNumber(a?.combinedShadowScore)) ||
+    (safeNumber(b?.flowAccumulationScore) - safeNumber(a?.flowAccumulationScore)) ||
+    (safeNumber(b?.usable1hFlowObservations) - safeNumber(a?.usable1hFlowObservations))
+  );
+
+  return {
+    ...base,
+    success:true,
+    status:"FLOW_ACCUMULATION_STATUS_OK_V1092",
+    evaluated:results.length,
+    evidenceReady:results.filter(r => r.evidenceReady).length,
+    strongAccumulation:results.filter(
+      r => r.accumulationState === "STRONG_ACCUMULATION"
+    ).length,
+    accumulating:results.filter(
+      r => r.accumulationState === "ACCUMULATING"
+    ).length,
+    distribution:results.filter(
+      r => r.accumulationState === "DISTRIBUTION"
+    ).length,
+    buildingFlowHistory:results.filter(
+      r => r.accumulationState === "BUILDING_FLOW_HISTORY"
+    ).length,
+    tokens:results,
+    note:"Shadow only. Repeated verified V212 flow is required before the model calls accumulation evidence ready. No Telegram or production score changes.",
+    timestamp:now()
+  };
+}
+
+
+/* ============================================================
    V1083 — HISTORY EVIDENCE INTEGRITY DIAGNOSTIC
    ============================================================ */
 async function historyIntegrityV1083(env, url) {
@@ -189431,6 +189866,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         env,
         cohortStateV1079.state
       )
+    );
+  }
+
+  if (
+    path ===
+      "/flow-accumulation-status"
+  ) {
+    return jsonResponse(
+      await flowAccumulationStatusV1092(env)
+    );
+  }
+
+  if (
+    path ===
+      "/flow-accumulation"
+  ) {
+    return jsonResponse(
+      await flowAccumulationTokenDiagnosticV1092(env, url)
     );
   }
 
