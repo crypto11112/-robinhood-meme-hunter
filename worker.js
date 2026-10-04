@@ -1,4 +1,20 @@
 /**
+ * ChainVanta — V1098
+ * /HORIZON SAFE COMPACT DIAGNOSTIC
+ * Builds directly from deployed V1097.
+ * - Replaces the Telegram /horizon rendering path with a defensive compact
+ *   formatter that cannot depend on the large legacy V318 diagnostic body.
+ * - Keeps exact stored horizon data/read-only semantics.
+ * - Shows V1096 1m, V620 5m/15m/30m/1h/6h/12h/24h and legacy V317 fallback
+ *   status where useful.
+ * - Wraps the valid-record rendering path so a malformed historical field
+ *   returns an explicit Telegram diagnostic instead of silently aborting.
+ * - Keeps V1097 chunked transport.
+ * - No outcome maths, storage, scanner, provider, scoring, qualification,
+ *   Telegram-call threshold or request-budget changes.
+ */
+
+/**
  * ChainVanta — V1097
  * /HORIZON TELEGRAM TRANSPORT FIX
  * Builds directly from deployed V1096.
@@ -9332,7 +9348,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1097"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1098"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -138758,6 +138774,129 @@ function callInfoMessageV311(record) {
   return lines.join("\n");
 }
 
+function horizonDiagnosticsMessageV1098(record, nowMs = Date.now()) {
+  if (!record || typeof record !== "object") {
+    return "❌ <b>Call not found.</b>";
+  }
+
+  const fmtMultiple = value => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0
+      ? telegramMultipleV271(n)
+      : "UNVERIFIED";
+  };
+
+  const fmtPct = value => {
+    const n = Number(value);
+    return Number.isFinite(n)
+      ? `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`
+      : "UNVERIFIED";
+  };
+
+  const symbol = escapeHtml(String(record?.symbol || "UNKNOWN"));
+  const address = escapeHtml(String(record?.address || "UNVERIFIED"));
+  const entryAt = safeNumber(record?.entryTimestamp);
+  const entryMc = safeNumber(record?.entryMarketCap);
+
+  const lines = [
+    `🎯 <b>${symbol} — Horizon Performance</b>`,
+    "",
+    `Contract: <code>${address}</code>`,
+    `Entry: <b>${entryAt > 0 ? escapeHtml(telegramDateV271(entryAt)) : "UNVERIFIED"}</b>`,
+    `Entry MC: <b>${entryMc > 0 ? telegramMoneyV271(entryMc) : "UNVERIFIED"}</b>`,
+    ""
+  ];
+
+  const one = record?.oneMinuteOutcomeV1096;
+  const oneOutcome = one?.outcome;
+  if (one?.version === "V1096") {
+    const targetAt = entryAt > 0 ? entryAt + 60000 : 0;
+    const captured =
+      oneOutcome?.verified === true &&
+      oneOutcome?.frozen === true;
+
+    lines.push(
+      `⏱ <b>1m:</b> ${
+        captured
+          ? `${fmtMultiple(oneOutcome?.multipleByMarketCap)} MC | ${fmtPct(oneOutcome?.priceGrowthPct)} price`
+          : (nowMs < targetAt ? "PENDING" : "WAITING FOR VERIFIED OBSERVATION")
+      }`
+    );
+  } else {
+    lines.push("⏱ <b>1m:</b> PRE-V1096 — NOT TRACKED");
+  }
+
+  const growth = record?.growthOutcomesV620;
+  const growthKeys = [
+    ["m5","5m"],
+    ["m15","15m"],
+    ["m30","30m"],
+    ["h1","1h"],
+    ["h6","6h"],
+    ["h12","12h"],
+    ["h24","24h"]
+  ];
+
+  for (const [key,label] of growthKeys) {
+    const row = growth?.outcomes?.[key] || null;
+    const price = row?.price || null;
+    const captured =
+      price?.verified === true &&
+      price?.frozen === true;
+
+    if (captured) {
+      lines.push(
+        `📈 <b>${label}:</b> ${fmtPct(price?.growthPct)} price | ${telegramMoneyV271(price?.priceUsd)}`
+      );
+      continue;
+    }
+
+    // For 1h/6h/24h, expose the older V317 frozen MC result if present.
+    const legacy = record?.fixedHorizonOutcomesV317?.outcomes?.[key] || null;
+    if (
+      legacy?.verified === true &&
+      legacy?.frozen === true
+    ) {
+      lines.push(
+        `📈 <b>${label}:</b> ${fmtMultiple(legacy?.multipleByMarketCap)} MC | legacy V317`
+      );
+      continue;
+    }
+
+    let targetMs = null;
+    if (key === "m5") targetMs = 5 * 60 * 1000;
+    else if (key === "m15") targetMs = 15 * 60 * 1000;
+    else if (key === "m30") targetMs = 30 * 60 * 1000;
+    else if (key === "h1") targetMs = 60 * 60 * 1000;
+    else if (key === "h6") targetMs = 6 * 60 * 60 * 1000;
+    else if (key === "h12") targetMs = 12 * 60 * 60 * 1000;
+    else if (key === "h24") targetMs = 24 * 60 * 60 * 1000;
+
+    const targetAt =
+      entryAt > 0 && targetMs !== null
+        ? entryAt + targetMs
+        : 0;
+
+    if (growth?.version !== "V620") {
+      lines.push(`📈 <b>${label}:</b> PRE-V620 / NOT TRACKED`);
+    } else if (targetAt > nowMs) {
+      lines.push(`📈 <b>${label}:</b> PENDING`);
+    } else {
+      lines.push(`📈 <b>${label}:</b> UNVERIFIED / NO FROZEN OBSERVATION`);
+    }
+  }
+
+  lines.push(
+    "",
+    `🏆 ATH: <b>${fmtMultiple(record?.athMultipleByMarketCap)}</b>`,
+    `⬇️ Lowest MC: <b>${fmtMultiple(record?.lowestMultipleByMarketCapV407)}</b>`,
+    "",
+    "<i>Read-only stored performance. No provider request is made by /horizon.</i>"
+  );
+
+  return lines.join("\n");
+}
+
 function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
   if (!record) {
     return "❌ <b>Call not found.</b>";
@@ -175644,7 +175783,18 @@ async function telegramCommandReplyV271(
         )
       ].join("\n");
     } else if (resolved.record) {
-      reply = horizonDiagnosticsMessageV318(resolved.record);
+      try {
+        reply = horizonDiagnosticsMessageV1098(resolved.record);
+      } catch (horizonErrorV1098) {
+        reply = [
+          "⚠️ <b>/horizon diagnostic error — V1098</b>",
+          "",
+          `Contract: <code>${escapeHtml(String(resolved.record?.address || parsed.argument || "UNKNOWN"))}</code>`,
+          `Error: <code>${escapeHtml(errorString(horizonErrorV1098).slice(0,700))}</code>`,
+          "",
+          "<i>The stored call record was found. This is a rendering diagnostic only; no performance data was changed.</i>"
+        ].join("\n");
+      }
     } else {
       reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
     }
