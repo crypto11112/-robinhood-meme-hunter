@@ -9727,7 +9727,22 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1146"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1147"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1147 — PROTECTED V551 PRIMARY→FALLBACK REQUEST PAIR
+ * - V1146 proved that the collector can reach the correct canonical pool and consume
+ *   its Validation Cloud request, but a failed primary request could still leave no
+ *   usable analysis slot for the already-existing Blockscout fallback.
+ * - V1147 protects two existing analysis requests only when the selected V551 range is
+ *   eligible for the Validation Cloud-first path: one for the primary eth_getLogs and
+ *   one contingency request for the same range's Blockscout fallback.
+ * - The fallback owner may consume only that pre-protected contingency slot and still
+ *   obeys the unchanged real analysis ceiling, pre-Telegram global ceiling and hard
+ *   request limit. Unused contingency headroom is simply released later in the scan.
+ * - No request ceiling, watch capacity, scoring, promotion, risk or Telegram behavior
+ *   changes; this is budget ordering for an existing failure path only.
+ */
 
 /*
  * V1144 — FLOW-BOOTSTRAP ELIGIBILITY PREDICATE AUDIT
@@ -22706,6 +22721,75 @@ function directionalWatchMinimumReserveDecisionV1141(
   return false;
 }
 
+function consumeDirectionalWatchFallbackPairV1147(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return null;
+  if (type !== "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS") return null;
+
+  const reserve = budget?.analysis?.directionalWatchReserveV553;
+  if (
+    reserve?.active !== true ||
+    reserve?.validationCloudFallbackPairArmedV1147 !== true ||
+    reserve?.validationCloudPrimaryConsumedV1147 !== true ||
+    reserve?.blockscoutFallbackConsumedV1147 === true
+  ) {
+    return null;
+  }
+
+  const needed = Math.max(1, safeNumber(amount));
+  if (needed !== 1) return false;
+
+  const notificationReserveRemaining =
+    budget.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+  const preTelegramGlobalLimit = Math.max(
+    0,
+    safeNumber(budget.totalLimit) - notificationReserveRemaining
+  );
+  const analysisLimit = effectiveAnalysisLimitV416(budget);
+
+  const analysisAllowed =
+    safeNumber(budget.analysis?.used) + needed <= analysisLimit;
+  const preTelegramGlobalAllowed =
+    safeNumber(budget.totalUsed) + needed <= preTelegramGlobalLimit;
+  const hardGlobalAllowed =
+    safeNumber(budget.totalUsed) + needed <= safeNumber(budget.totalLimit);
+
+  if (!analysisAllowed || !preTelegramGlobalAllowed || !hardGlobalAllowed) {
+    reserve.fallbackPairBlockedHardBoundaryV1147 = true;
+    reserve.fallbackPairBlockReasonV1147 = !analysisAllowed
+      ? "ANALYSIS_LIMIT_V1147"
+      : !preTelegramGlobalAllowed
+        ? "PRE_TELEGRAM_GLOBAL_LIMIT_V1147"
+        : "HARD_GLOBAL_LIMIT_V1147";
+    budget.skipped.push({
+      phase,
+      type,
+      amount:needed,
+      reason:"V1147_DIRECTIONAL_FALLBACK_PAIR_HARD_BOUNDARY",
+      reservedFor:reserve.targetAddress || null,
+      poolId:reserve.poolId || null
+    });
+    return false;
+  }
+
+  budget.totalUsed += needed;
+  budget.analysis.used += needed;
+  reserve.blockscoutFallbackConsumedV1147 = true;
+  reserve.blockscoutFallbackConsumedAtV1147 = Date.now();
+  reserve.fallbackPairBlockReasonV1147 = null;
+  return true;
+}
+
 function consumeBudget(
   budget,
   phase,
@@ -22721,6 +22805,17 @@ function consumeBudget(
   if (directionalMinimumReserveDecisionV1141 !== null) {
     return directionalMinimumReserveDecisionV1141;
   }
+
+  /* V1147: the Blockscout fallback for the same V551 range may consume only
+   * the contingency request that was pre-protected before ordinary analysis. */
+  const directionalFallbackPairConsumeV1147 =
+    consumeDirectionalWatchFallbackPairV1147(
+      budget, phase, type, amount
+    );
+  if (directionalFallbackPairConsumeV1147 !== null) {
+    return directionalFallbackPairConsumeV1147;
+  }
+
   /* V972: the scoped ReservesLens owner gets first refusal on one existing
    * analysis request. Real ceilings remain enforced inside the helper. */
   const v972MarketLensPriority =
@@ -92070,7 +92165,7 @@ function selectDirectionalWatchCandidateV551(
     })[0] || null;
 }
 
-function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
+function configureDirectionalWatchReserveV553(state,budget,latestNumber,env=null) {
   const reserve = budget?.analysis?.directionalWatchReserveV553;
   if (!reserve?.enabled) return reserve || null;
 
@@ -92176,17 +92271,58 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
       ) > DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
     );
 
-  reserve.configuredAt = Date.now();
-  reserve.active = desiredReserveV559 > 0;
-  reserve.reservedRequests = desiredReserveV559;
-  reserve.expansionCatchupSprintEligibleV568 =
-    expansionCatchupSprintEligibleV568;
-  reserve.minimumGuaranteedRequestsV559 =
+  const estimatedNextSpanV1147 = candidate
+    ? Math.max(
+        DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
+        Math.min(
+          DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+          Math.floor(
+            safeNumber(candidate?.adaptiveBlockSpan) ||
+            DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+          )
+        )
+      )
+    : null;
+
+  const validationCloudFallbackPairEligibleV1147 = Boolean(
+    candidate &&
+    desiredReserveV559 > 0 &&
+    validationCloudConfiguredV627(env) &&
+    Number.isFinite(Number(estimatedNextSpanV1147)) &&
+    Number(estimatedNextSpanV1147) <= V958_VALIDATION_CLOUD_V551_MAX_BLOCKS
+  );
+
+  const baseMinimumGuaranteedRequestsV1147 =
     desiredReserveV559 > 0
       ? (expansionCatchupSprintEligibleV568 ? 2 : 1)
       : 0;
+
+  reserve.configuredAt = Date.now();
+  reserve.active = desiredReserveV559 > 0;
+  reserve.expansionCatchupSprintEligibleV568 =
+    expansionCatchupSprintEligibleV568;
+  reserve.minimumGuaranteedRequestsV559 = Math.max(
+    baseMinimumGuaranteedRequestsV1147,
+    validationCloudFallbackPairEligibleV1147 ? 2 : 0
+  );
   reserve.minimumGuaranteedRequestsV568 =
     reserve.minimumGuaranteedRequestsV559;
+  reserve.reservedRequests = Math.max(
+    desiredReserveV559,
+    reserve.minimumGuaranteedRequestsV559
+  );
+  reserve.validationCloudFallbackPairProtectionV1147 =
+    validationCloudFallbackPairEligibleV1147;
+  reserve.validationCloudFallbackPairArmedV1147 =
+    validationCloudFallbackPairEligibleV1147;
+  reserve.validationCloudFallbackEstimatedSpanV1147 =
+    Number.isFinite(Number(estimatedNextSpanV1147))
+      ? Number(estimatedNextSpanV1147)
+      : null;
+  reserve.validationCloudPrimaryConsumedV1147 = false;
+  reserve.blockscoutFallbackConsumedV1147 = false;
+  reserve.fallbackPairBlockedHardBoundaryV1147 = false;
+  reserve.fallbackPairBlockReasonV1147 = null;
   reserve.hardMinimumProtectionV1141 =
     reserve.minimumGuaranteedRequestsV559 > 0;
   reserve.hardMinimumGuaranteedRequestsV1141 =
@@ -92200,7 +92336,7 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
       ? 0
       : Math.max(
           0,
-          desiredReserveV559 -
+          safeNumber(reserve.reservedRequests) -
           reserve.minimumGuaranteedRequestsV559
         );
   reserve.priorCompletionCatchupPoolCountV581 =
@@ -92559,6 +92695,7 @@ async function advanceDirectionalWatchV551({
       try {
         budget.analysis.v958DirectionalRpcActive = true;
         let vcResultV958;
+        const totalUsedBeforeValidationCloudV1147 = safeNumber(budget?.totalUsed);
         try {
           vcResultV958 = await rpcCall(
             validationCloudRpcUrlV627(env),
@@ -92574,6 +92711,15 @@ async function advanceDirectionalWatchV551({
           );
         } finally {
           budget.analysis.v958DirectionalRpcActive = false;
+          const reserveV1147 =
+            budget?.analysis?.directionalWatchReserveV553;
+          if (
+            reserveV1147?.validationCloudFallbackPairArmedV1147 === true &&
+            safeNumber(budget?.totalUsed) > totalUsedBeforeValidationCloudV1147
+          ) {
+            reserveV1147.validationCloudPrimaryConsumedV1147 = true;
+            reserveV1147.validationCloudPrimaryConsumedAtV1147 = Date.now();
+          }
         }
 
         if (!Array.isArray(vcResultV958)) {
@@ -109271,7 +109417,8 @@ async function scan(
     configureDirectionalWatchReserveV553(
       state,
       budget,
-      latestNumber
+      latestNumber,
+      env
     );
 
   const previousBacklogCursor =
@@ -123661,6 +123808,13 @@ for (
         hardMinimumProtectionV1141:directionalWatchReserveV553?.hardMinimumProtectionV1141 === true,
         hardMinimumGuaranteedRequestsV1141:safeNumber(directionalWatchReserveV553?.hardMinimumGuaranteedRequestsV1141),
         hardMinimumBlocksV1141:safeNumber(directionalWatchReserveV553?.hardMinimumBlocksV1141),
+        validationCloudFallbackPairProtectionV1147:directionalWatchReserveV553?.validationCloudFallbackPairProtectionV1147 === true,
+        validationCloudFallbackPairArmedV1147:directionalWatchReserveV553?.validationCloudFallbackPairArmedV1147 === true,
+        validationCloudFallbackEstimatedSpanV1147:safeNumber(directionalWatchReserveV553?.validationCloudFallbackEstimatedSpanV1147) || null,
+        validationCloudPrimaryConsumedV1147:directionalWatchReserveV553?.validationCloudPrimaryConsumedV1147 === true,
+        blockscoutFallbackConsumedV1147:directionalWatchReserveV553?.blockscoutFallbackConsumedV1147 === true,
+        fallbackPairBlockedHardBoundaryV1147:directionalWatchReserveV553?.fallbackPairBlockedHardBoundaryV1147 === true,
+        fallbackPairBlockReasonV1147:directionalWatchReserveV553?.fallbackPairBlockReasonV1147 || null,
         promotionEvidenceFirstRangePriorityV1142:directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
         promotionEvidenceDurableBridgeV1143:directionalWatchReserveV553?.promotionEvidenceDurableBridgeV1143 === true,
         promotionEvidenceDurablePromotionBridgeV1143:directionalWatchReserveV553?.promotionEvidenceDurablePromotionBridgeV1143 === true,
