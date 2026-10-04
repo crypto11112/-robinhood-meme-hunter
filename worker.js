@@ -9727,9 +9727,16 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1140"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1141"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
+ * V1141 — HARD MINIMUM DIRECTIONAL-WATCH BUDGET PROTECTION
+ * - Makes the existing V559 minimumGuaranteedRequests reserve effective before
+ *   older high-priority analysis lanes can consume the final protected headroom.
+ * - Preserves the existing request ceilings, hard global cap, notification reserve,
+ *   V551 collector selection, watch capacity, scoring, promotion and Telegram behavior.
+ * - Adds no provider/RPC calls; this is request ordering/protection only.
+ *
  * V1140 — EXACT-POOL FLOW COLLECTION SELECTION DIAGNOSTIC
  * - Adds bounded, zero-request telemetry showing why a verified directional-watch pool
  *   did or did not receive an existing V551 collection range during the normal scan.
@@ -22571,12 +22578,116 @@ function consumeV972MarketLensPriority(
   return true;
 }
 
+/* =========================================================
+   V1141 HARD MINIMUM DIRECTIONAL-WATCH BUDGET PROTECTION
+   =========================================================
+   V1140 proved that V553/V559 could report a minimum guaranteed
+   directional reserve while older high-priority analysis lanes, which are
+   evaluated before the V553 guard, still consumed the final analysis/global
+   headroom. V551 then reached its own collector with zero usable budget.
+
+   V1141 makes the already-declared minimum guarantee real at the earliest
+   consumeBudget boundary. It does NOT add requests or raise any ceiling.
+   While the V553 reserve is active, non-V551 analysis requests may consume
+   only capacity above minimumGuaranteedRequestsV559. The V551 owner request
+   itself is exempt and consumes normally inside the unchanged real analysis,
+   pre-Telegram global, and hard-42 ceilings.
+*/
+function directionalWatchMinimumReserveDecisionV1141(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return null;
+
+  const reserve = budget?.analysis?.directionalWatchReserveV553;
+  if (reserve?.active !== true) return null;
+
+  const protectedOwner =
+    type === "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS" ||
+    (
+      type === "RPC:eth_getLogs" &&
+      budget?.analysis?.v958DirectionalRpcActive === true
+    );
+
+  if (protectedOwner) {
+    reserve.ownerRequestsPresentedV1141 =
+      safeNumber(reserve.ownerRequestsPresentedV1141) + Math.max(0, safeNumber(amount));
+    return null;
+  }
+
+  const guaranteed = Math.max(
+    0,
+    safeNumber(reserve.minimumGuaranteedRequestsV559)
+  );
+  if (guaranteed <= 0) return null;
+
+  const needed = Math.max(1, safeNumber(amount));
+  const notificationReserveRemaining =
+    budget.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+  const preTelegramGlobalLimit = Math.max(
+    0,
+    safeNumber(budget.totalLimit) - notificationReserveRemaining
+  );
+
+  const analysisLimit = effectiveAnalysisLimitV416(budget);
+  const analysisWouldInvade =
+    safeNumber(budget.analysis?.used) + needed >
+      Math.max(0, analysisLimit - guaranteed);
+  const globalWouldInvade =
+    safeNumber(budget.totalUsed) + needed >
+      Math.max(0, preTelegramGlobalLimit - guaranteed);
+
+  reserve.hardMinimumProtectionV1141 = true;
+  reserve.hardMinimumGuaranteedRequestsV1141 = guaranteed;
+  reserve.analysisHeadroomBeforeV1141 = Math.max(
+    0, analysisLimit - safeNumber(budget.analysis?.used)
+  );
+  reserve.preTelegramGlobalHeadroomBeforeV1141 = Math.max(
+    0, preTelegramGlobalLimit - safeNumber(budget.totalUsed)
+  );
+
+  if (!analysisWouldInvade && !globalWouldInvade) return null;
+
+  reserve.hardMinimumBlocksV1141 =
+    safeNumber(reserve.hardMinimumBlocksV1141) + 1;
+  reserve.lastHardMinimumBlockedTypeV1141 = String(type || "UNKNOWN");
+  reserve.lastHardMinimumBlockedAtV1141 = Date.now();
+
+  budget.skipped.push({
+    phase,
+    type,
+    amount:needed,
+    reason:"V1141_DIRECTIONAL_MINIMUM_GUARANTEE_PROTECTED",
+    guaranteedRequests:guaranteed,
+    reservedFor:reserve.targetAddress || null,
+    poolId:reserve.poolId || null
+  });
+  return false;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  /* V1141: enforce V559's already-declared minimum before any older
+   * high-priority helper can consume the final protected headroom. */
+  const directionalMinimumReserveDecisionV1141 =
+    directionalWatchMinimumReserveDecisionV1141(
+      budget, phase, type, amount
+    );
+  if (directionalMinimumReserveDecisionV1141 !== null) {
+    return directionalMinimumReserveDecisionV1141;
+  }
   /* V972: the scoped ReservesLens owner gets first refusal on one existing
    * analysis request. Real ceilings remain enforced inside the helper. */
   const v972MarketLensPriority =
@@ -91648,6 +91759,14 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
       : 0;
   reserve.minimumGuaranteedRequestsV568 =
     reserve.minimumGuaranteedRequestsV559;
+  reserve.hardMinimumProtectionV1141 =
+    reserve.minimumGuaranteedRequestsV559 > 0;
+  reserve.hardMinimumGuaranteedRequestsV1141 =
+    reserve.minimumGuaranteedRequestsV559;
+  reserve.hardMinimumBlocksV1141 = 0;
+  reserve.ownerRequestsPresentedV1141 = 0;
+  reserve.lastHardMinimumBlockedTypeV1141 = null;
+  reserve.lastHardMinimumBlockedAtV1141 = null;
   reserve.maxProtectedOverridesV559 =
     priorCompletionCatchupPoolCountV581 >= 2
       ? 0
@@ -123065,6 +123184,11 @@ for (
         reservedRequests:safeNumber(directionalWatchReserveV553?.reservedRequests),
         minimumGuaranteedRequests:safeNumber(directionalWatchReserveV553?.minimumGuaranteedRequestsV559),
         behindPoolCount:safeNumber(directionalWatchReserveV553?.behindPoolCountV559),
+        hardMinimumProtectionV1141:directionalWatchReserveV553?.hardMinimumProtectionV1141 === true,
+        hardMinimumGuaranteedRequestsV1141:safeNumber(directionalWatchReserveV553?.hardMinimumGuaranteedRequestsV1141),
+        hardMinimumBlocksV1141:safeNumber(directionalWatchReserveV553?.hardMinimumBlocksV1141),
+        ownerRequestsPresentedV1141:safeNumber(directionalWatchReserveV553?.ownerRequestsPresentedV1141),
+        lastHardMinimumBlockedTypeV1141:directionalWatchReserveV553?.lastHardMinimumBlockedTypeV1141 || null,
         releaseReason:directionalWatchReserveResultV553?.releaseReason || directionalWatchReserveResultV553?.reason || null
       },
       rows:watchRowsV1140,
