@@ -9727,7 +9727,21 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1142"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1143"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1143 — DURABLE PROMOTION-EVIDENCE → FLOW-BOOTSTRAP ELIGIBILITY BRIDGE
+ * - Fixes the V1142 eligibility handoff: a promotion-evidence candidate that was
+ *   actually admitted/committed can retain first-range bootstrap eligibility across
+ *   later scan cycles instead of depending only on the single latest admission snapshot.
+ * - Persists the admitted promotion-evidence timestamp on the durable cohort entry and
+ *   can recover the immediately preceding committed selection from the cohort-level
+ *   lastPromotionEvidenceSelectedAddress/At fields for pre-V1143 state.
+ * - Reuses the existing conservative Opportunity/Confidence/Risk safeguards and only
+ *   applies to non-raw verified exact-pool watches with zero successful ranges.
+ * - Adds no provider/RPC requests, collection slots or watch capacity; request ceilings,
+ *   scoring, promotion thresholds, risk gates and Telegram production behavior are unchanged.
+ */
 
 /*
  * V1142 — PROMOTION-EVIDENCE FIRST-RANGE FLOW BOOTSTRAP PRIORITY
@@ -91155,14 +91169,67 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     const rawOnlyV740 =
       quoteEligibility?.eligible !== true &&
       candidate?.rawExactPoolWatchV740?.verified === true;
+    const cohortStateV1143 = state?.intelligenceCohortV1079 || null;
     const latestCohortAdmissionV1142 =
-      state?.intelligenceCohortV1079?.lastAdmissionAttemptV1090 || null;
-    const promotionEvidenceBootstrapEligibleV1142 = Boolean(
-      rawOnlyV740 !== true &&
+      cohortStateV1143?.lastAdmissionAttemptV1090 || null;
+    const cohortEntryV1143 = Array.isArray(cohortStateV1143?.entries)
+      ? cohortStateV1143.entries.find(row => normalize(row?.address) === token) || null
+      : null;
+    const currentAdmissionEligibleV1143 = Boolean(
       latestCohortAdmissionV1142?.promotionEvidenceAdmissionV1139 === true &&
       latestCohortAdmissionV1142?.actuallyAdmitted === true &&
       normalize(latestCohortAdmissionV1142?.provisionalAddress) === token
     );
+    // V1143: V1142 looked only at the latest admission snapshot. By the time V551
+    // refreshed the watch, a later scan could have replaced that snapshot even though
+    // this token had already been genuinely admitted through PROMOTION_EVIDENCE_V1138.
+    // Recover that committed fact from durable cohort state. The cohort-level fields
+    // bridge pre-V1143 admissions; new V1143 admissions are also stamped per entry.
+    const durablePromotionSelectedAtV1143 = Math.max(
+      safeNumber(cohortEntryV1143?.lastPromotionEvidenceSelectedAtV1138),
+      normalize(cohortStateV1143?.lastPromotionEvidenceSelectedAddressV1138) === token
+        ? safeNumber(cohortStateV1143?.lastPromotionEvidenceSelectedAtV1138)
+        : 0
+    );
+    const durablePromotionCommittedV1143 = durablePromotionSelectedAtV1143 > 0;
+    const currentOpportunityV1143 = finiteOrNullV1076(cohortEntryV1143?.opportunityScore);
+    const currentConfidenceV1143 = finiteOrNullV1076(cohortEntryV1143?.confidenceScore);
+    const currentRiskV1143 = finiteOrNullV1076(cohortEntryV1143?.riskScore);
+    const qualitySafeBridgeV1143 = Boolean(
+      currentOpportunityV1143 !== null &&
+      currentOpportunityV1143 >= INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128 &&
+      currentConfidenceV1143 !== null &&
+      currentConfidenceV1143 >= INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128 &&
+      currentRiskV1143 !== null &&
+      currentRiskV1143 <= INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128
+    );
+    const durablePromotionBridgeEligibleV1143 = Boolean(
+      durablePromotionCommittedV1143 && qualitySafeBridgeV1143
+    );
+    // A quality-safe retained cohort token with a verified non-raw exact pool and no
+    // collected range needs one bootstrap collection even if its most recent scan no
+    // longer carries the transient V1138 admission flag. This is deliberately bounded
+    // by the same conservative cohort quality floors and the boost self-removes after
+    // successfulRanges becomes non-zero.
+    const durableCohortFlowBootstrapEligibleV1143 = Boolean(
+      cohortEntryV1143 &&
+      qualitySafeBridgeV1143 &&
+      (safeNumber(cohortEntryV1143?.lastSelectedAt) > 0 || safeNumber(cohortEntryV1143?.lastAnalysedAt) > 0)
+    );
+    const durableBridgeEligibleV1143 = Boolean(
+      durablePromotionBridgeEligibleV1143 || durableCohortFlowBootstrapEligibleV1143
+    );
+    const promotionEvidenceBootstrapEligibleV1142 = Boolean(
+      rawOnlyV740 !== true &&
+      (currentAdmissionEligibleV1143 || durableBridgeEligibleV1143)
+    );
+    const promotionEvidenceBootstrapSourceV1143 = currentAdmissionEligibleV1143
+      ? "CURRENT_PROMOTION_EVIDENCE_ADMISSION_V1139"
+      : durablePromotionBridgeEligibleV1143
+        ? "DURABLE_COHORT_PROMOTION_COMMIT_V1143"
+        : durableCohortFlowBootstrapEligibleV1143
+          ? "QUALITY_SAFE_DURABLE_COHORT_FIRST_RANGE_V1143"
+          : null;
     if (rawOnlyV740) {
       telemetryV741.rawHandoffAttempts =
         safeNumber(telemetryV741?.rawHandoffAttempts) + 1;
@@ -91263,10 +91330,17 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       if (promotionEvidenceBootstrapEligibleV1142) {
         existing.promotionEvidenceBootstrapV1142 = {
           eligible:true,
-          admittedAt:safeNumber(latestCohortAdmissionV1142?.at) || now,
-          source:"PROMOTION_EVIDENCE_V1138_ADMITTED_V1139",
+          admittedAt:currentAdmissionEligibleV1143
+            ? (safeNumber(latestCohortAdmissionV1142?.at) || now)
+            : (durablePromotionSelectedAtV1143 || now),
+          source:promotionEvidenceBootstrapSourceV1143 || "PROMOTION_EVIDENCE_V1138_ADMITTED_V1139",
           tokenAddress:token,
-          firstRangeOnly:true
+          firstRangeOnly:true,
+          durableBridgeV1143:durableBridgeEligibleV1143,
+          durablePromotionBridgeV1143:durablePromotionBridgeEligibleV1143,
+          durableCohortFlowBootstrapV1143:durableCohortFlowBootstrapEligibleV1143,
+          currentAdmissionV1143:currentAdmissionEligibleV1143,
+          qualitySafeBridgeV1143
         };
       }
       existing.rawWatchCurrentActivityAdmissionV755 =
@@ -91358,10 +91432,17 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         promotionEvidenceBootstrapEligibleV1142
           ? {
               eligible:true,
-              admittedAt:safeNumber(latestCohortAdmissionV1142?.at) || now,
-              source:"PROMOTION_EVIDENCE_V1138_ADMITTED_V1139",
+              admittedAt:currentAdmissionEligibleV1143
+                ? (safeNumber(latestCohortAdmissionV1142?.at) || now)
+                : (durablePromotionSelectedAtV1143 || safeNumber(cohortEntryV1143?.lastSelectedAt) || safeNumber(cohortEntryV1143?.lastAnalysedAt) || now),
+              source:promotionEvidenceBootstrapSourceV1143 || "PROMOTION_EVIDENCE_V1138_ADMITTED_V1139",
               tokenAddress:token,
-              firstRangeOnly:true
+              firstRangeOnly:true,
+              durableBridgeV1143:durableBridgeEligibleV1143,
+              durablePromotionBridgeV1143:durablePromotionBridgeEligibleV1143,
+              durableCohortFlowBootstrapV1143:durableCohortFlowBootstrapEligibleV1143,
+              currentAdmissionV1143:currentAdmissionEligibleV1143,
+              qualitySafeBridgeV1143
             }
           : null,
       rawWatchCurrentActivityAdmissionV755:
@@ -91846,6 +91927,16 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
     candidate ? directionalWatchPriorityTierV567(candidate) : null;
   reserve.promotionEvidenceFirstRangePriorityV1142 =
     candidate ? directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(candidate) : false;
+  reserve.promotionEvidenceDurableBridgeV1143 =
+    candidate?.promotionEvidenceBootstrapV1142?.durableBridgeV1143 === true;
+  reserve.promotionEvidenceDurablePromotionBridgeV1143 =
+    candidate?.promotionEvidenceBootstrapV1142?.durablePromotionBridgeV1143 === true;
+  reserve.promotionEvidenceDurableCohortFlowBootstrapV1143 =
+    candidate?.promotionEvidenceBootstrapV1142?.durableCohortFlowBootstrapV1143 === true;
+  reserve.promotionEvidenceCurrentAdmissionV1143 =
+    candidate?.promotionEvidenceBootstrapV1142?.currentAdmissionV1143 === true;
+  reserve.promotionEvidenceBootstrapSourceV1143 =
+    candidate?.promotionEvidenceBootstrapV1142?.source || null;
   reserve.rawFirstRangePriorityV744 =
     candidate ? directionalWatchNeedsRawFirstRangePriorityV744(candidate) : false;
   reserve.priorCompletionFirstRangePriorityV577 =
@@ -123204,6 +123295,12 @@ for (
           selectionPriorityTierV567:directionalWatchPriorityTierV567(row),
           promotionEvidenceFirstRangePriorityV1142:directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row),
           promotionEvidenceBootstrapV1142:row?.promotionEvidenceBootstrapV1142 || null,
+          promotionEvidenceDurableBridgeV1143:row?.promotionEvidenceBootstrapV1142?.durableBridgeV1143 === true,
+          promotionEvidenceDurablePromotionBridgeV1143:row?.promotionEvidenceBootstrapV1142?.durablePromotionBridgeV1143 === true,
+          promotionEvidenceDurableCohortFlowBootstrapV1143:row?.promotionEvidenceBootstrapV1142?.durableCohortFlowBootstrapV1143 === true,
+          promotionEvidenceCurrentAdmissionV1143:row?.promotionEvidenceBootstrapV1142?.currentAdmissionV1143 === true,
+          promotionEvidenceBootstrapQualitySafeV1143:row?.promotionEvidenceBootstrapV1142?.qualitySafeBridgeV1143 === true,
+          promotionEvidenceBootstrapSourceV1143:row?.promotionEvidenceBootstrapV1142?.source || null,
           firstRangePriorityV744:directionalWatchNeedsRawFirstRangePriorityV744(row),
           priorCompletionCatchupV578:directionalWatchNeedsPriorCompletionCatchupV578(row,latestNumber),
           expansionReadyV567:directionalWatchExpansionReadyV567(row),
@@ -123247,6 +123344,11 @@ for (
         hardMinimumGuaranteedRequestsV1141:safeNumber(directionalWatchReserveV553?.hardMinimumGuaranteedRequestsV1141),
         hardMinimumBlocksV1141:safeNumber(directionalWatchReserveV553?.hardMinimumBlocksV1141),
         promotionEvidenceFirstRangePriorityV1142:directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
+        promotionEvidenceDurableBridgeV1143:directionalWatchReserveV553?.promotionEvidenceDurableBridgeV1143 === true,
+        promotionEvidenceDurablePromotionBridgeV1143:directionalWatchReserveV553?.promotionEvidenceDurablePromotionBridgeV1143 === true,
+        promotionEvidenceDurableCohortFlowBootstrapV1143:directionalWatchReserveV553?.promotionEvidenceDurableCohortFlowBootstrapV1143 === true,
+        promotionEvidenceCurrentAdmissionV1143:directionalWatchReserveV553?.promotionEvidenceCurrentAdmissionV1143 === true,
+        promotionEvidenceBootstrapSourceV1143:directionalWatchReserveV553?.promotionEvidenceBootstrapSourceV1143 || null,
         ownerRequestsPresentedV1141:safeNumber(directionalWatchReserveV553?.ownerRequestsPresentedV1141),
         lastHardMinimumBlockedTypeV1141:directionalWatchReserveV553?.lastHardMinimumBlockedTypeV1141 || null,
         releaseReason:directionalWatchReserveResultV553?.releaseReason || directionalWatchReserveResultV553?.reason || null
@@ -188081,6 +188183,10 @@ function commitIntelligenceFollowUpAdmissionV1086(
   if (cohort.lastSelectionPurposeV1100 === "PROMOTION_EVIDENCE_V1138") {
     cohort.lastPromotionEvidenceSelectedAddressV1138 = address;
     cohort.lastPromotionEvidenceSelectedAtV1138 = at;
+    // V1143: persist the committed promotion-evidence admission on the token's own
+    // durable cohort entry so V551 bootstrap eligibility survives later scan snapshots.
+    entry.lastPromotionEvidenceSelectedAtV1138 = at;
+    entry.lastPromotionEvidenceSelectionPurposeV1143 = "PROMOTION_EVIDENCE_V1138";
   }
   cohort.updatedAt = at;
 
