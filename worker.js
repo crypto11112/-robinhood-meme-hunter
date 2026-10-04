@@ -1,4 +1,20 @@
 /**
+ * ChainVanta — V1105
+ * ESTABLISHED-TOKEN LONGER RETENTION
+ * Builds directly from deployed V1104.
+ * - Extends the durable established-token intelligence cohort inactivity window
+ *   from 48 hours to 7 days.
+ * - Extends the matching V1077 intelligence-watch eligibility age from
+ *   48 hours to 7 days so the longer cohort retention is actually usable.
+ * - Keeps the cohort bounded at 8 tokens and keeps the existing ranking,
+ *   quality pruning, severe-risk eviction and replacement behavior.
+ * - A better/newer candidate can still displace a weaker retained token.
+ * - Keeps the same single established-token follow-up lane; no extra provider
+ *   calls per scan, no higher request ceiling, and no fresh-launch priority loss.
+ * - No production scoring, qualification, Telegram or payment changes.
+ */
+
+/**
  * ChainVanta — V1104
  * BREAKOUT ENTRY-QUALITY INTEGRITY FIX
  * Builds directly from deployed V1103.
@@ -437,7 +453,7 @@
  *   and only when current/live verified-launch pressure is low.
  * - Fresh launches, carried completion, holder retry and evidence-completion lanes
  *   keep priority. MAX_TOKEN_CHECKS and all hard/provider request ceilings remain unchanged.
- * - Cohort entries expire after 48h and are bounded to limit state growth.
+ * - V1105 extends cohort inactivity retention to 7 days; the cohort remains bounded to limit state growth.
  * - Adds /intelligence-cohort-status read-only diagnostic.
  * - V1078 accumulation remains shadow-only: no Opportunity/Momentum/Confidence/Risk
  *   weights, Telegram qualification, Telegram calls, Stripe, provider routing,
@@ -9467,7 +9483,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1104"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1105"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -186505,7 +186521,7 @@ function seedIntelligenceCohortFromAnalysedCandidateV1080(
    a second, tiny, bounded cohort so D1 history can actually become longitudinal.
 */
 const INTELLIGENCE_COHORT_MAX_V1079 = 8;
-const INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 = 48 * 60 * 60 * 1000;
+const INTELLIGENCE_COHORT_MAX_AGE_MS_V1079 = 7 * 24 * 60 * 60 * 1000; // V1105: 7-day inactivity retention
 const INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 = 4 * 60 * 1000;
 
 function ensureIntelligenceCohortV1079(state) {
@@ -189464,7 +189480,7 @@ async function cohortFlowStatusV1085(env) {
    - Never increase provider/RPC request ceilings.
 */
 const INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077 = 1;
-const INTELLIGENCE_WATCH_MAX_AGE_MS_V1077 = 48 * 60 * 60 * 1000;
+const INTELLIGENCE_WATCH_MAX_AGE_MS_V1077 = 7 * 24 * 60 * 60 * 1000; // V1105: aligned 7-day eligibility
 const INTELLIGENCE_WATCH_MAX_TOP1_PCT_V1077 = 50;
 const INTELLIGENCE_WATCH_MAX_TOP10_PCT_V1077 = 80;
 const INTELLIGENCE_WATCH_MAX_VERIFIED_RISK_V1077 = 60;
