@@ -1,4 +1,21 @@
 /**
+ * ChainVanta — V1117
+ * FORWARD-ONLY LIVE DECISION OUTCOME AUDIT — SHADOW V1
+ * Builds directly from deployed V1116.
+ * - Freezes meaningful V1116 decision transitions (ENTRY_FORMING / ENTRY_READY / HOLD / CAUTION / EXIT_RISK).
+ * - Captures the best VERIFIED decision-time price/market-cap snapshot available from
+ *   existing live evidence only: fresh pinned market data first, otherwise exact-RPC
+ *   execution price derived from already-decoded swaps plus verified token decimals/supply.
+ * - Freezes first verified post-target outcomes at 1m/5m/15m/30m/1h/2h/4h.
+ * - Forward-only: no hindsight backfill and no new RPC/provider requests. Missing price
+ *   evidence stays pending/unavailable rather than being guessed.
+ * - Stores audit records separately from the max-3 live roster so completed/expired lane
+ *   rows do not erase already-frozen decision evidence.
+ * - Adds /live-decision-audit-status.
+ * - Shadow/read-only only: no Telegram, scoring, qualification or production action changes.
+ */
+
+/**
  * ChainVanta — V1116
  * COMBINED LIVE ENTRY / HOLD / CAUTION / EXIT DECISION — SHADOW V1
  * Builds directly from deployed V1115.
@@ -9681,7 +9698,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1116"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1117"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192278,6 +192295,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-decision-audit-status"
+  ) {
+    return jsonResponse(
+      await liveDecisionAuditStatusV1117(env)
+    );
+  }
+
+  if (
+    path ===
       "/live-budget-status"
   ) {
     return jsonResponse(
@@ -195549,6 +195575,101 @@ const PRIORITY_LIVE_BLOCKSCOUT_CREDITS_PER_REQUEST_V1115 = 20;
 const PRIORITY_LIVE_BLOCKSCOUT_MAX_SEED_WALLETS_V1115 = 10;
 
 
+// V1117: bounded, forward-only audit of the combined live decision layer.
+// It reuses already-collected observations and deliberately adds ZERO network requests.
+const PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117 = "v1117:priorityLiveDecisionAudit";
+const PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117 = 100;
+const PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117 = 7 * 24 * 60 * 60 * 1000;
+const PRIORITY_LIVE_DECISION_AUDIT_STATES_V1117 = new Set(["ENTRY_FORMING","ENTRY_READY","HOLD","CAUTION","EXIT_RISK"]);
+const PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117 = Object.freeze({
+  m1:60*1000,m5:5*60*1000,m15:15*60*1000,m30:30*60*1000,h1:60*60*1000,h2:2*60*60*1000,h4:4*60*60*1000
+});
+
+function priorityLiveTokenScaleV1117(row){
+  const points=Array.isArray(row?.holderDeltaPointsV1114)?row.holderDeltaPointsV1114:[];
+  for(let i=points.length-1;i>=0;i--){
+    const d=Number(points[i]?.decimals);
+    let supply=null; try{ if(points[i]?.totalSupply!==undefined&&points[i]?.totalSupply!==null) supply=BigInt(String(points[i].totalSupply)); }catch(_){}
+    if(Number.isInteger(d)&&d>=0&&d<=36&&supply!==null&&supply>0n) return {decimals:d,totalSupplyRaw:supply,source:"VERIFIED_TRANSFER_POINT_V1114"};
+  }
+  return null;
+}
+
+function priorityLivePriceSnapshotV1117(row, nowMs=Date.now()){
+  const market=row?.latestObservationV1109;
+  const marketAt=safeNumber(market?.observedAt);
+  const marketPrice=Number(market?.priceUsd), marketCap=Number(market?.marketCap);
+  if(market?.verified===true && marketAt>0 && nowMs-marketAt<=10*60*1000 && Number.isFinite(marketPrice)&&marketPrice>0){
+    return {verified:true,observedAt:marketAt,priceUsd:marketPrice,marketCap:Number.isFinite(marketCap)&&marketCap>0?marketCap:null,source:"PINNED_PROVIDER_MARKET_V1109",priceBasis:"VERIFIED_PROVIDER_PRICE"};
+  }
+  const scale=priorityLiveTokenScaleV1117(row);
+  if(!scale) return {verified:false,status:"NO_VERIFIED_PRICE_SCALE_V1117"};
+  const trades=(Array.isArray(row?.rpcTradesV1112)?row.rpcTradesV1112:[]).filter(t=>{
+    const at=safeNumber(t?.observedAt); return t?.exactUsdVerified===true&&at>0&&nowMs-at<=5*60*1000&&Number.isFinite(Number(t?.exactUsdAmount))&&Number(t.exactUsdAmount)>0&&t?.candidateAmountRaw!==undefined;
+  });
+  const priced=[];
+  for(const t of trades){
+    let qty=null; try{ qty=bigintDecimalToNumberV187(BigInt(String(t.candidateAmountRaw)),scale.decimals); }catch(_){}
+    const usd=Number(t.exactUsdAmount);
+    if(Number.isFinite(qty)&&qty>0&&Number.isFinite(usd)&&usd>0) priced.push({price:usd/qty,observedAt:safeNumber(t.observedAt)});
+  }
+  if(!priced.length) return {verified:false,status:"NO_RECENT_EXACT_RPC_EXECUTION_PRICE_V1117"};
+  const sorted=priced.map(x=>x.price).sort((a,b)=>a-b);
+  const mid=Math.floor(sorted.length/2);
+  const price=sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;
+  const supply=bigintDecimalToNumberV187(scale.totalSupplyRaw,scale.decimals);
+  const cap=Number.isFinite(supply)&&supply>0?price*supply:null;
+  return {verified:true,observedAt:Math.max(...priced.map(x=>x.observedAt)),priceUsd:price,marketCap:Number.isFinite(cap)&&cap>0?cap:null,source:"EXACT_RPC_MEDIAN_EXECUTION_PRICE_V1117",priceBasis:`${priced.length}_RECENT_EXACT_USD_TRADES`,sampleCount:priced.length,decimals:scale.decimals};
+}
+
+function pctOutcomeV1117(before,after){
+  const a=Number(before),b=Number(after); if(!Number.isFinite(a)||!Number.isFinite(b)||a<=0) return null; return ((b-a)/a)*100;
+}
+
+function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
+  const state=(audit&&typeof audit==="object"&&!Array.isArray(audit))?audit:{};
+  let records=Array.isArray(state.records)?state.records:[];
+  records=records.filter(r=>safeNumber(r?.decisionAt)>0&&nowMs-safeNumber(r.decisionAt)<=PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117);
+  const rowMap=new Map((Array.isArray(liveRows)?liveRows:[]).map(r=>[normalize(r?.address||""),r]));
+  let changed=false,newRecords=0,outcomesFrozen=0;
+  for(const row of (Array.isArray(liveRows)?liveRows:[])){
+    const address=normalize(row?.address||""); if(!isAddress(address)) continue;
+    const decision=row?.liveDecisionV1116||priorityLiveDecisionV1116(row,nowMs);
+    const decisionState=String(decision?.state||"BUILDING_EVIDENCE").toUpperCase();
+    const prior=String(row?.lastDecisionAuditStateV1117||"").toUpperCase();
+    if(decisionState!==prior){
+      row.lastDecisionAuditStateV1117=decisionState;
+      if(PRIORITY_LIVE_DECISION_AUDIT_STATES_V1117.has(decisionState)){
+        const snap=priorityLivePriceSnapshotV1117(row,nowMs);
+        const horizons={}; for(const key of Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)) horizons[key]={status:"PENDING",targetAt:nowMs+PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117[key]};
+        records.push({
+          id:`${address}:${decisionState}:${nowMs}`,address,symbol:row?.symbol||null,state:decisionState,decisionAt:nowMs,
+          confidence:decision?.confidence||null,evidenceCoveragePct:safeNumber(decision?.evidenceCoveragePct),
+          controlledShadowTest:row?.controlledShadowTestV1110===true,genuinePromotion:row?.controlledShadowTestV1110!==true&&!!row?.promotedAt,
+          baseline:snap?.verified===true?snap:{verified:false,status:snap?.status||"DECISION_BASELINE_PRICE_UNAVAILABLE_V1117",observedAt:null,priceUsd:null,marketCap:null},
+          decisionEvidence:{bullishPillars:Array.isArray(decision?.bullishPillars)?decision.bullishPillars:[],bearishPillars:Array.isArray(decision?.bearishPillars)?decision.bearishPillars:[],blockers:Array.isArray(decision?.blockers)?decision.blockers:[],reasons:Array.isArray(decision?.reasons)?decision.reasons:[]},
+          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1117"
+        });
+        newRecords++; changed=true;
+      }
+    }
+  }
+  for(const rec of records){
+    const row=rowMap.get(normalize(rec?.address||"")); if(!row) continue;
+    const baseline=rec?.baseline; if(baseline?.verified!==true||!(Number(baseline?.priceUsd)>0)) continue;
+    for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
+      const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN"||nowMs<safeNumber(h.targetAt||rec.decisionAt+ms)) continue;
+      const snap=priorityLivePriceSnapshotV1117(row,nowMs);
+      const targetAt=safeNumber(h.targetAt||rec.decisionAt+ms);
+      if(snap?.verified!==true||safeNumber(snap?.observedAt)<targetAt) continue;
+      rec.horizons[key]={status:"FROZEN",targetAt,capturedAt:nowMs,observationAt:snap.observedAt,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),priceUsd:snap.priceUsd,marketCap:snap.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,snap.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,snap.marketCap),source:snap.source,priceBasis:snap.priceBasis||null};
+      outcomesFrozen++; changed=true;
+    }
+  }
+  if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
+  return {audit:{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs},changed,newRecords,outcomesFrozen};
+}
+
 // V1116 combined decision layer. This is deliberately downstream of all existing
 // evidence collectors and adds no provider/RPC requests of its own.
 const PRIORITY_LIVE_DECISION_MIN_ENTRY_TRADES_V1116 = 5;
@@ -196498,7 +196619,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1116",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1117",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -196578,11 +196699,31 @@ async function livePriorityLaneStatusV1109(env) {
       blockscoutLiveDailyCreditGuardV1115:"10000_DEFAULT_CREDITS_PER_UTC_DAY_INTERNAL_GUARD",
       combinedLiveDecisionV1116:"EXACT_RPC_FLOW_PLUS_HOLDER_DELTA_PLUS_SEEDED_WHALES_PLUS_STRUCTURE_PLUS_MARKET_CONTEXT",
       decisionStatesV1116:["BUILDING_EVIDENCE","ENTRY_FORMING","ENTRY_READY","HOLD","CAUTION","EXIT_RISK"],
+      decisionOutcomeAuditV1117:"FORWARD_ONLY_1M_5M_15M_30M_1H_2H_4H_NO_NEW_REQUESTS",
       telegramMutation:false
     },
-    nextStage:"V1116 combines the proven live evidence into one shadow entry/hold/caution/exit decision. After live calibration shows decisions are timely and sensible, add a forward-only decision outcome audit before any Telegram activation.",
+    nextStage:"V1117 freezes forward-only outcomes for meaningful live-decision transitions. After enough audited decisions mature, calibrate thresholds from measured results before any Telegram activation.",
     timestamp:now()
   };
+}
+
+async function readLiveDecisionAuditV1117(env){
+  const ns=env?.[V3_LIVE_DO_BINDING_V363];
+  if(!ns||typeof ns.idFromName!=="function"||typeof ns.get!=="function") return {available:false,status:"V1117_DO_BINDING_UNAVAILABLE",records:[]};
+  try{
+    const stub=ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response=await stub.fetch("https://v3-live.internal/priority-decision-audit-v1117");
+    const body=await response.json().catch(()=>({}));
+    return response.ok?body:{available:false,status:`V1117_AUDIT_HTTP_${response.status}`,records:[]};
+  }catch(error){ return {available:false,status:"V1117_AUDIT_FETCH_FAILED",error:errorString(error),records:[]}; }
+}
+
+async function liveDecisionAuditStatusV1117(env){
+  const snap=await readLiveDecisionAuditV1117(env);
+  const records=Array.isArray(snap?.records)?snap.records:[];
+  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0;
+  for(const r of records){ stateCounts[r?.state]=(stateCounts[r?.state]||0)+1; for(const h of Object.values(r?.horizons||{})){ if(h?.status==="FROZEN") frozenOutcomes++; else if(h?.status==="PENDING") pendingOutcomes++; } }
+  return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1117",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,forwardOnly:true,hindsightBackfillAllowed:false,records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),note:"Outcomes freeze only from verified observations seen at/after each target while the token remains observable in the live lane. Missing evidence is never hindsight-backfilled.",timestamp:now()};
 }
 
 async function readLiveHorizonSnapshotsV413(env) {
@@ -198320,6 +198461,11 @@ export class V3LiveCollectorV363 {
     };
   }
 
+  async priorityDecisionAuditSnapshotV1117(){
+    const audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
+    return {version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:Array.isArray(audit?.records)?audit.records:[],lastUpdatedAt:audit?.lastUpdatedAt||null};
+  }
+
   async priorityLiveRpcBatchV1112(liveRows, nowMs=Date.now()) {
     const eligible=(Array.isArray(liveRows)?liveRows:[]).filter(row=>{
       const id=row?.exactPoolLiveIdentityV1112||{};
@@ -198671,6 +198817,14 @@ export class V3LiveCollectorV363 {
       if(!isAddress(address)) continue;
       row.liveDecisionV1116=priorityLiveDecisionV1116(row,Date.now());
       entries[address]=row;
+    }
+
+    // V1117: freeze decision transitions and first verified post-target outcomes.
+    // This consumes only evidence already present in the live rows and adds no network request.
+    const priorDecisionAuditV1117=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",records:[]};
+    const decisionAuditUpdateV1117=priorityDecisionAuditUpdateV1117(priorDecisionAuditV1117,liveRows,Date.now());
+    if(decisionAuditUpdateV1117.changed){
+      await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,decisionAuditUpdateV1117.audit);
     }
 
     await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
@@ -199327,6 +199481,7 @@ export class V3LiveCollectorV363 {
     if (url.pathname === "/priority-live-budget-v1111") return Response.json(await this.priorityLiveBudgetSnapshotV1111());
     if (url.pathname === "/priority-live-budget-control-v1111" && request.method === "POST") return Response.json(await this.priorityLiveBudgetControlV1111(request));
     if (url.pathname === "/priority-live-snapshot-v1109") return Response.json(await this.priorityLiveSnapshotV1109());
+    if (url.pathname === "/priority-decision-audit-v1117") return Response.json(await this.priorityDecisionAuditSnapshotV1117());
     if (url.pathname === "/start") {
       const cfg = {
         token: normalize(url.searchParams.get("token") || ""),
