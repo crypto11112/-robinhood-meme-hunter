@@ -1,13 +1,14 @@
 /**
- * ChainVanta — V1150
- * V1150: first-range bootstrap collection fairness.
- * - Keeps the existing V1142 highest priority tier for promotion-evidence watches with zero
- *   successful ranges, but makes equal-tier scheduling starvation-safe.
- * - Within Tier 6 only, the oldest waiting watch is selected first; if equally old, the watch
- *   furthest behind head wins. After its first successful range it automatically leaves Tier 6.
- * - Applies the same ordering to V553 reserve targeting and V551 collection selection.
- * - Adds zero provider/RPC requests, changes no request ceilings, collection slots, scoring,
- *   promotion, watch capacity, risk, or Telegram behavior.
+ * ChainVanta — V1151
+ * V1151: durable V551 directional-watch cursor persistence.
+ * - Persists the compact directional exact-pool watch root immediately after V551/V554 collection.
+ * - Rehydrates that dedicated watch state at the start of the next scan before reserve selection/pruning.
+ * - Prevents successfulRanges/lastCollectedBlock/lastCollectedAt/exactUsdTrades from reverting when
+ *   a later main-state write or handoff refresh carries older watch data.
+ * - Preserves V1150 fairness: once a bootstrap watch completes its first successful range it stays
+ *   out of Tier 6 on the next scan and the next oldest waiting bootstrap watch gets the turn.
+ * - Adds one compact KV watch-state write per normal scan, zero provider/RPC requests, and changes
+ *   no request ceilings, collection slots, scoring, promotion, watch capacity, risk, or Telegram behavior.
  *
  * Historical source-lineage changelog follows below.
  *
@@ -9738,7 +9739,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1150"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1151"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -26259,6 +26260,180 @@ function newState() {
  */
 const EXACT_POOL_FLOW_TRACE_KEY_V1149 =
   "robinhood-meme-hunter-exact-pool-flow-trace-v1149";
+
+
+/*
+ * V1151: keep the live directional-watch cursor on a small, dedicated KV key.
+ * The large authoritative state still persists normally; this key only prevents
+ * a newer V551 cursor from being replaced by an older watch snapshot.
+ */
+const DIRECTIONAL_WATCH_STATE_KEY_V1151 =
+  "robinhood-meme-hunter-directional-watch-state-v1151";
+
+function compactDirectionalWatchStateV1151(state) {
+  const root = directionalWatchRootV551(state);
+  const entries = {};
+  for (const [key,row] of Object.entries(root?.entries || {})) {
+    if (!row || typeof row !== "object") continue;
+    entries[key] = {
+      ...row
+    };
+  }
+  return {
+    schemaVersion:"V1151_1",
+    keySchemaV563:"TOKEN_ADDRESS_PLUS_EXACT_POOL_ID",
+    capturedAt:Date.now(),
+    rootUpdatedAt:safeNumber(root?.updatedAt) || null,
+    entries
+  };
+}
+
+async function persistDirectionalWatchStateV1151(env,state) {
+  const {kv,binding} = getKV(env);
+  if (!kv) {
+    return {saved:false,binding:null,error:"KV_NOT_CONFIGURED_V1151"};
+  }
+  try {
+    const payload = compactDirectionalWatchStateV1151(state);
+    await kv.put(
+      DIRECTIONAL_WATCH_STATE_KEY_V1151,
+      jsonStringifySafeV246(payload,0)
+    );
+    return {
+      saved:true,
+      binding,
+      error:null,
+      capturedAt:payload.capturedAt,
+      entries:Object.keys(payload.entries || {}).length
+    };
+  } catch (error) {
+    return {
+      saved:false,
+      binding,
+      error:errorString(error)
+    };
+  }
+}
+
+async function hydrateDirectionalWatchStateV1151(env,state) {
+  const {kv,binding} = getKV(env);
+  if (!kv) {
+    return {
+      hydrated:false,
+      binding:null,
+      error:"KV_NOT_CONFIGURED_V1151",
+      dedicatedEntries:0,
+      replaced:0,
+      inserted:0,
+      preservedMainNewer:0
+    };
+  }
+
+  try {
+    const raw = await kv.get(DIRECTIONAL_WATCH_STATE_KEY_V1151);
+    if (!raw) {
+      return {
+        hydrated:false,
+        binding,
+        error:null,
+        status:"NO_DEDICATED_WATCH_STATE_V1151",
+        dedicatedEntries:0,
+        replaced:0,
+        inserted:0,
+        preservedMainNewer:0
+      };
+    }
+
+    const payload = JSON.parse(raw);
+    const dedicatedEntries =
+      payload?.entries && typeof payload.entries === "object"
+        ? payload.entries
+        : {};
+
+    const root = directionalWatchRootV551(state);
+    let replaced = 0;
+    let inserted = 0;
+    let preservedMainNewer = 0;
+
+    for (const [key,dedicatedRow] of Object.entries(dedicatedEntries)) {
+      if (!dedicatedRow || typeof dedicatedRow !== "object") continue;
+
+      const current = root.entries?.[key];
+      if (!current || typeof current !== "object") {
+        root.entries[key] = {...dedicatedRow};
+        inserted += 1;
+        continue;
+      }
+
+      /*
+       * Cursor progress is monotonic. Prefer the row with the furthest proven
+       * lastCollectedBlock; if equal, prefer more successful ranges and then
+       * the newer collection timestamp. This avoids rolling a completed range
+       * backwards while still allowing legitimately newer main-state metadata.
+       */
+      const currentBlock = safeNumber(current?.lastCollectedBlock);
+      const dedicatedBlock = safeNumber(dedicatedRow?.lastCollectedBlock);
+      const currentRanges = safeNumber(current?.successfulRanges);
+      const dedicatedRanges = safeNumber(dedicatedRow?.successfulRanges);
+      const currentAt = safeNumber(current?.lastCollectedAt);
+      const dedicatedAt = safeNumber(dedicatedRow?.lastCollectedAt);
+
+      const dedicatedNewer =
+        dedicatedBlock > currentBlock ||
+        (
+          dedicatedBlock === currentBlock &&
+          (
+            dedicatedRanges > currentRanges ||
+            (
+              dedicatedRanges === currentRanges &&
+              dedicatedAt > currentAt
+            )
+          )
+        );
+
+      if (dedicatedNewer) {
+        root.entries[key] = {
+          ...current,
+          ...dedicatedRow
+        };
+        replaced += 1;
+      } else {
+        preservedMainNewer += 1;
+      }
+    }
+
+    if (replaced || inserted) {
+      root.updatedAt = Math.max(
+        safeNumber(root?.updatedAt),
+        safeNumber(payload?.rootUpdatedAt),
+        safeNumber(payload?.capturedAt)
+      ) || Date.now();
+    }
+
+    return {
+      hydrated:true,
+      binding,
+      error:null,
+      status:"DEDICATED_WATCH_STATE_HYDRATED_V1151",
+      dedicatedCapturedAt:safeNumber(payload?.capturedAt) || null,
+      dedicatedEntries:Object.keys(dedicatedEntries).length,
+      replaced,
+      inserted,
+      preservedMainNewer
+    };
+  } catch (error) {
+    return {
+      hydrated:false,
+      binding,
+      error:errorString(error),
+      status:"DEDICATED_WATCH_STATE_HYDRATE_EXCEPTION_V1151",
+      dedicatedEntries:0,
+      replaced:0,
+      inserted:0,
+      preservedMainNewer:0
+    };
+  }
+}
 
 async function persistExactPoolFlowTraceV1149(env, trace) {
   const { kv, binding } = getKV(env);
@@ -109517,6 +109692,16 @@ async function scan(
     stateResult.state;
 
   /*
+   * V1151: restore the newest proven V551 cursor before any pruning, reserve
+   * selection, or handoff refresh can act on an older watch snapshot.
+   */
+  const directionalWatchHydrationV1151 =
+    await hydrateDirectionalWatchStateV1151(
+      env,
+      state
+    );
+
+  /*
    * V664: reset only the diagnostic trace for this scanner run. It is persisted
    * later in the normal existing state write and does not consume a request.
    */
@@ -122882,6 +123067,17 @@ for (
   };
 
 
+
+  /*
+   * V1151: checkpoint the actual V551 watch/cursor state before any later scan
+   * work or full-state persistence can replace it with an older snapshot.
+   */
+  const directionalWatchPersistenceV1151 =
+    await persistDirectionalWatchStateV1151(
+      env,
+      state
+    );
+
   /*
    * V1149: persist the latest V551/V958 collection trace immediately after the
    * directional collection/catch-up work finishes. This happens before later
@@ -123079,6 +123275,12 @@ for (
         key:EXACT_POOL_FLOW_TRACE_KEY_V1149,
         mainStateIndependent:true,
         stage:"IMMEDIATELY_AFTER_V551_V554_COLLECTION_V1149"
+      },
+      directionalWatchPersistenceV1151:{
+        hydration:directionalWatchHydrationV1151 || null,
+        checkpoint:directionalWatchPersistenceV1151 || null,
+        key:DIRECTIONAL_WATCH_STATE_KEY_V1151,
+        monotonicCursorMerge:true
       },
       externalRequestsAdded:0,
       diagnosticStateWritesAdded:1,
@@ -208677,6 +208879,8 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
     traceSourceV1149,
     dedicatedTraceReadOkV1149:dedicatedReadV1149?.ok === true,
     dedicatedTraceReadErrorV1149:dedicatedReadV1149?.error || null,
+    directionalWatchPersistenceV1151:
+      trace?.directionalWatchPersistenceV1151 || null,
     requestedToken:isAddress(requested)?requested:null,
     status:trace?"EXACT_POOL_FLOW_COLLECTION_CLASSIFIED_V1140":"NO_V1140_FLOW_COLLECTION_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
     trace:trace?{
@@ -208693,7 +208897,7 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
       zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
     },
-    note:"V1149 keeps the V1140 diagnostic semantics but persists the latest compact flow trace to a dedicated KV key immediately after V551/V554 collection, adding one diagnostic KV write per normal scan and zero provider/RPC requests.",
+    note:"V1151 keeps V1149 diagnostic persistence and additionally checkpoints the compact V551 directional-watch cursor to a dedicated KV key after collection, then hydrates it before the next scan. Adds one compact watch-state KV write per normal scan and zero provider/RPC requests.",
     timestamp:now()
   };
 }
