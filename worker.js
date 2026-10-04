@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1145"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1146"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1144 — FLOW-BOOTSTRAP ELIGIBILITY PREDICATE AUDIT
@@ -90076,6 +90076,86 @@ function retireStaleSinglePoolRawWatchesV754(state, latestNumber) {
 }
 
 
+
+// V1146: preserve the last proven non-raw exact-pool watch identity and its
+// forward collection cursor across capacity/age pruning. This prevents a
+// durable cohort token from being re-registered on a different supported pool
+// merely because that pool is fresher in the registry.
+function canonicalPoolContinuityRootV1146(state) {
+  if (!state.directionalCanonicalPoolContinuityV1146 ||
+      typeof state.directionalCanonicalPoolContinuityV1146 !== "object") {
+    state.directionalCanonicalPoolContinuityV1146 = {
+      schema:"DIRECTIONAL_CANONICAL_POOL_CONTINUITY_V1146",
+      updatedAt:0,
+      byToken:{}
+    };
+  }
+  const root=state.directionalCanonicalPoolContinuityV1146;
+  if(!root.byToken || typeof root.byToken!=="object") root.byToken={};
+  return root;
+}
+
+function rememberProvenDirectionalPoolV1146(state,row,reason) {
+  const token=normalize(row?.tokenAddress||"");
+  const poolId=normalize(row?.poolId||"");
+  const quote=normalize(row?.quoteTokenAddress||"");
+  if(!isAddress(token) ||
+     !/^0x[a-f0-9]{64}$/.test(String(poolId||"")) ||
+     row?.rawOnlyV740===true ||
+     safeNumber(row?.successfulRanges)<1 ||
+     ![ZERO,CANONICAL_WETH_V179,CANONICAL_USDG_V179].includes(quote)) return false;
+  const root=canonicalPoolContinuityRootV1146(state);
+  const prior=root.byToken[token]||null;
+  const candidate={
+    schema:"PROVEN_DIRECTIONAL_POOL_CONTINUITY_ROW_V1146",
+    tokenAddress:token,
+    symbol:row?.symbol||prior?.symbol||null,
+    poolId,
+    quoteTokenAddress:quote,
+    currency0V740:normalize(row?.currency0V740)||prior?.currency0V740||null,
+    currency1V740:normalize(row?.currency1V740)||prior?.currency1V740||null,
+    registeredAt:safeNumber(row?.registeredAt)||safeNumber(prior?.registeredAt)||null,
+    coverageStartBlock:safeNumber(row?.coverageStartBlock)||safeNumber(prior?.coverageStartBlock)||null,
+    coverageEndBlock:safeNumber(row?.coverageEndBlock)||safeNumber(prior?.coverageEndBlock)||null,
+    lastCollectedBlock:safeNumber(row?.lastCollectedBlock)||safeNumber(prior?.lastCollectedBlock)||null,
+    lastCollectedAt:safeNumber(row?.lastCollectedAt)||safeNumber(prior?.lastCollectedAt)||null,
+    successfulRanges:safeNumber(row?.successfulRanges),
+    exactUsdTrades:safeNumber(row?.exactUsdTrades),
+    returnedLogs:safeNumber(row?.returnedLogs),
+    adaptiveBlockSpan:safeNumber(row?.adaptiveBlockSpan)||safeNumber(prior?.adaptiveBlockSpan)||DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+    saturatedAttempts:safeNumber(row?.saturatedAttempts),
+    gapDetected:row?.gapDetected===true,
+    everCaughtUpV565:row?.everCaughtUpV565===true,
+    lastStatus:row?.lastStatus||prior?.lastStatus||null,
+    registrationSourceV552:row?.registrationSourceV552||prior?.registrationSourceV552||null,
+    rememberedAt:Date.now(),
+    reason:reason||"PROVEN_WATCH_STATE_V1146"
+  };
+  const priorStrength=(safeNumber(prior?.successfulRanges)*1_000_000)+safeNumber(prior?.exactUsdTrades);
+  const nextStrength=(safeNumber(candidate.successfulRanges)*1_000_000)+safeNumber(candidate.exactUsdTrades);
+  const samePool=normalize(prior?.poolId||"")===poolId;
+  if(!prior || samePool || nextStrength>=priorStrength) root.byToken[token]=candidate;
+  root.updatedAt=Date.now();
+  const entries=Object.entries(root.byToken);
+  if(entries.length>64){
+    entries.sort((a,b)=>safeNumber(b[1]?.rememberedAt)-safeNumber(a[1]?.rememberedAt));
+    root.byToken=Object.fromEntries(entries.slice(0,64));
+  }
+  return true;
+}
+
+function provenDirectionalPoolContinuityV1146(state,token) {
+  const t=normalize(token||"");
+  if(!isAddress(t)) return null;
+  const root=state?.directionalCanonicalPoolContinuityV1146;
+  const row=root?.byToken?.[t]||null;
+  if(!row || normalize(row?.tokenAddress||"")!==t ||
+     !/^0x[a-f0-9]{64}$/.test(String(normalize(row?.poolId||"")||"")) ||
+     safeNumber(row?.successfulRanges)<1 ||
+     row?.rawOnlyV740===true) return null;
+  return row;
+}
+
 // V1145: keep/recover a quality-safe durable cohort exact pool long enough to
 // complete its first forward-only V551 collection range. This uses only
 // persisted ChainVanta cohort + canonical pool-registry state; it adds no RPC
@@ -90136,11 +90216,16 @@ function durableCohortDirectionalRecoveryCandidatesV1145(state,latestNumber) {
     }
     if(!matches.length) continue;
     matches.sort((a,b)=>b.swapBlock-a.swapBlock||b.activityBlock-a.activityBlock||String(a.poolId).localeCompare(String(b.poolId)));
-    const top=matches[0];
-    const second=matches[1]||null;
-    // Multiple supported pools are only recovered when the canonical registry has
-    // a unique freshest retained swap/activity winner. Ambiguous ties stay out.
-    if(second && top.swapBlock===second.swapBlock && top.activityBlock===second.activityBlock) continue;
+    const continuityV1146=provenDirectionalPoolContinuityV1146(state,token);
+    const continuityMatchV1146=continuityV1146
+      ? matches.find(row=>normalize(row?.poolId||"")===normalize(continuityV1146?.poolId||""))||null
+      : null;
+    const top=continuityMatchV1146 || matches[0];
+    const second=matches.find(row=>normalize(row?.poolId||"")!==normalize(top?.poolId||""))||null;
+    // V1146: a previously successful exact-pool watch wins recovery continuity
+    // while that same supported pool still exists in the canonical registry.
+    // Only when no proven continuity exists do we use V1145's unique-freshest rule.
+    if(!continuityMatchV1146 && second && top.swapBlock===second.swapBlock && top.activityBlock===second.activityBlock) continue;
     recovered.push({
       address:token,
       symbol:entry?.symbol||null,
@@ -90150,8 +90235,8 @@ function durableCohortDirectionalRecoveryCandidatesV1145(state,latestNumber) {
       risk:{score:risk},
       onChainPoolIdentityV153:{
         verified:true,
-        status:"DURABLE_COHORT_CANONICAL_EXACT_POOL_RECOVERY_V1145",
-        source:"DURABLE_COHORT_PLUS_CANONICAL_POOL_REGISTRY_V1145",
+        status:continuityMatchV1146 ? "DURABLE_COHORT_PROVEN_POOL_CONTINUITY_V1146" : "DURABLE_COHORT_CANONICAL_EXACT_POOL_RECOVERY_V1145",
+        source:continuityMatchV1146 ? "PROVEN_DIRECTIONAL_POOL_PLUS_REGISTRY_V1146" : "DURABLE_COHORT_PLUS_CANONICAL_POOL_REGISTRY_V1145",
         poolId:top.poolId,
         pairAddress:top.poolId,
         candidateAddress:token,
@@ -90160,7 +90245,8 @@ function durableCohortDirectionalRecoveryCandidatesV1145(state,latestNumber) {
         currency1V740:top.currency1,
         rawActivityOnlyV740:false,
         registryIdentityRecoveryV742:false,
-        durableCohortRecoveryV1145:true
+        durableCohortRecoveryV1145:true,
+        canonicalPoolContinuityV1146:!!continuityMatchV1146
       },
       activity:{poolSpecific:true,swaps:0,liquidityEvents:0},
       cohortExactPoolHandoffV1087:{
@@ -90175,8 +90261,10 @@ function durableCohortDirectionalRecoveryCandidatesV1145(state,latestNumber) {
       },
       durableFirstRangeRecoveryV1145:{
         verified:true,
-        source:"DURABLE_COHORT_CANONICAL_REGISTRY_V1145",
+        source:continuityMatchV1146 ? "PROVEN_DIRECTIONAL_POOL_CONTINUITY_V1146" : "DURABLE_COHORT_CANONICAL_REGISTRY_V1145",
         registryMatches:matches.length,
+        canonicalPoolContinuityV1146:!!continuityMatchV1146,
+        priorWatchStateV1146:continuityMatchV1146 ? continuityV1146 : null,
         selectedSwapBlock:top.swapBlock||null,
         selectedActivityBlock:top.activityBlock||null,
         latestNumber:Number.isFinite(Number(latestNumber))?Number(latestNumber):null,
@@ -90408,6 +90496,16 @@ function pruneDirectionalWatchV551(state) {
     telemetryV741.lastPruneAt = now;
   }
 
+  // V1146 persists proven collection identity/cursor before any watch row is
+  // removed, so later durable-cohort recovery cannot silently switch pools.
+  let canonicalContinuityRememberedV1146=0;
+  for(const row of beforeRows){
+    if(rememberProvenDirectionalPoolV1146(state,row,
+      keptKeys.has(directionalWatchKeyV563(row?.tokenAddress,row?.poolId))
+        ? "WATCH_SNAPSHOT_V1146"
+        : "WATCH_PRUNE_CONTINUITY_V1146")) canonicalContinuityRememberedV1146++;
+  }
+
   root.entries = Object.fromEntries(
     rows
       .map(row => [
@@ -90435,6 +90533,9 @@ function pruneDirectionalWatchV551(state) {
     durableFirstRangeRetentionV1145:true,
     durableFirstRangeKeptV1145:rows.filter(row=>durableCohortFirstRangeRetentionEligibleV1145(state,row)).length,
     durableFirstRangeDroppedV1145:droppedRows.filter(row=>durableCohortFirstRangeRetentionEligibleV1145(state,row)).length,
+    canonicalPoolContinuityV1146:true,
+    canonicalContinuityRememberedV1146,
+    canonicalContinuityRowsV1146:Object.keys(state?.directionalCanonicalPoolContinuityV1146?.byToken||{}).length,
     keptEverCaughtUp: rows.filter(row => row?.everCaughtUpV565 === true).length,
     keptWithExactUsdEvidence: rows.filter(
       row =>
@@ -91584,6 +91685,16 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       continue;
     }
 
+    const priorWatchStateV1146 =
+      candidate?.durableFirstRangeRecoveryV1145?.canonicalPoolContinuityV1146 === true
+        ? (candidate?.durableFirstRangeRecoveryV1145?.priorWatchStateV1146 || null)
+        : null;
+    const preserveCanonicalProgressV1146=Boolean(
+      priorWatchStateV1146 &&
+      normalize(priorWatchStateV1146?.poolId||"")===poolId &&
+      safeNumber(priorWatchStateV1146?.successfulRanges)>0
+    );
+
     root.entries[watchKeyV563] = {
       schema:"CONTINUOUS_EXACT_POOL_DIRECTIONAL_WATCH_V551",
       tokenAddress:token,
@@ -91625,22 +91736,38 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       lastRawSwapAtV740:null,
       lastRawCandidateAmountV740:null,
       lastRawQuoteAmountV740:null,
-      registeredAt:now,
+      registeredAt:preserveCanonicalProgressV1146
+        ? (safeNumber(priorWatchStateV1146?.registeredAt)||now)
+        : now,
       lastQualifiedAt:now,
       updatedAt:now,
       forwardOnly:true,
-      coverageStartBlock:Number(latestNumber) + 1,
-      coverageEndBlock:Number(latestNumber),
-      lastCollectedBlock:Number(latestNumber),
-      lastCollectedAt:null,
+      coverageStartBlock:preserveCanonicalProgressV1146
+        ? (safeNumber(priorWatchStateV1146?.coverageStartBlock)||Number(latestNumber)+1)
+        : Number(latestNumber) + 1,
+      coverageEndBlock:preserveCanonicalProgressV1146
+        ? (safeNumber(priorWatchStateV1146?.coverageEndBlock)||safeNumber(priorWatchStateV1146?.lastCollectedBlock)||Number(latestNumber))
+        : Number(latestNumber),
+      lastCollectedBlock:preserveCanonicalProgressV1146
+        ? (safeNumber(priorWatchStateV1146?.lastCollectedBlock)||Number(latestNumber))
+        : Number(latestNumber),
+      lastCollectedAt:preserveCanonicalProgressV1146
+        ? (safeNumber(priorWatchStateV1146?.lastCollectedAt)||null)
+        : null,
       lastAttemptAt:null,
-      lastStatus:"REGISTERED_FORWARD_ONLY_AT_CURRENT_HEAD_V551",
-      adaptiveBlockSpan:DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
-      saturatedAttempts:0,
-      successfulRanges:0,
-      exactUsdTrades:0,
-      returnedLogs:0,
-      gapDetected:false,
+      lastStatus:preserveCanonicalProgressV1146
+        ? "RE_REGISTERED_PROVEN_CANONICAL_POOL_CONTINUITY_V1146"
+        : "REGISTERED_FORWARD_ONLY_AT_CURRENT_HEAD_V551",
+      adaptiveBlockSpan:preserveCanonicalProgressV1146
+        ? (safeNumber(priorWatchStateV1146?.adaptiveBlockSpan)||DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551)
+        : DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+      saturatedAttempts:preserveCanonicalProgressV1146?safeNumber(priorWatchStateV1146?.saturatedAttempts):0,
+      successfulRanges:preserveCanonicalProgressV1146?safeNumber(priorWatchStateV1146?.successfulRanges):0,
+      exactUsdTrades:preserveCanonicalProgressV1146?safeNumber(priorWatchStateV1146?.exactUsdTrades):0,
+      returnedLogs:preserveCanonicalProgressV1146?safeNumber(priorWatchStateV1146?.returnedLogs):0,
+      gapDetected:preserveCanonicalProgressV1146?priorWatchStateV1146?.gapDetected===true:false,
+      canonicalPoolContinuityV1146:preserveCanonicalProgressV1146,
+      canonicalPoolContinuitySourceV1146:preserveCanonicalProgressV1146?"PROVEN_DIRECTIONAL_POOL_CONTINUITY_V1146":null,
       fullTimeWindowCoverageClaimed:false,
       fullTokenMarketCoverageClaimed:false,
       lastOpportunityScore:safeNumber(candidate?.opportunity?.score),
@@ -120819,7 +120946,11 @@ for (
     watchCapacityUnchanged:24,
     requestCeilingsChanged:false,
     externalRequestsAdded:0,
-    firstRangeOnly:true
+    firstRangeOnly:true,
+    canonicalPoolContinuityV1146:true,
+    continuityRecoveriesV1146:directionalDurableCohortRecoveryCandidatesV1145.filter(
+      candidate=>candidate?.durableFirstRangeRecoveryV1145?.canonicalPoolContinuityV1146===true
+    ).length
   };
 
   directionalWatchRegistrationV551.v737EarlyProviderCorroboratedHandoff = {
