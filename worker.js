@@ -1,4 +1,15 @@
 /**
+ * ChainVanta — V1097
+ * /HORIZON TELEGRAM TRANSPORT FIX
+ * Builds directly from deployed V1096.
+ * - Fixes /horizon appearing to do nothing when its expanded diagnostics exceed
+ *   Telegram's safe single-message size.
+ * - Routes /horizon through the already-proven chunked manual reply sender.
+ * - Diagnostic transport only: no horizon maths, outcomes, performance data,
+ *   scoring, qualification, scanner cadence, provider use or request budgets change.
+ */
+
+/**
  * ChainVanta — V1096
  * FORWARD-ONLY 1-MINUTE CALL PERFORMANCE
  * Builds directly from deployed V1095.
@@ -9321,7 +9332,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1096"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1097"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -175766,6 +175777,7 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyze" ||
     parsed.command === "/help" ||
     parsed.command === "/start" ||
+    parsed.command === "/horizon" ||
     parsed.command === "/learning" ||
     parsed.command === "/signallearn" ||
     parsed.command === "/launchcoverage" ||
