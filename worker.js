@@ -1,5 +1,17 @@
 /**
- * ChainVanta — V1153
+ * ChainVanta — V1154
+ * V1154: direct collector cursor floor at fromBlock construction.
+ * - V1153 proved the final boundary reapply was running, but SCHIFFY could still
+ *   request the previously completed block range.
+ * - Immediately before fromBlock is calculated, resolves the selected exact-pool
+ *   cursor against three local sources: selected candidate, hydrated V1153 snapshot,
+ *   and V1146 proven canonical-pool continuity.
+ * - Uses the maximum proven lastCollectedBlock only for the exact same token+pool.
+ * - If the floor is ahead, updates the selected row's monotonic collector fields
+ *   before deriving fromBlock, making a completed range impossible to request again.
+ * - Adds zero provider/RPC requests and changes no request ceilings, collection
+ *   slots, scoring, promotion, watch capacity, risk, or Telegram behavior.
+ *
  * V1153: final collector-boundary cursor floor.
  * - V1152 protected hydrated progress after watch registration, but the final V551 collector could
  *   still see a stale same-scan watch copy after later scanner work.
@@ -9739,7 +9751,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1153"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1154"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -92919,6 +92931,162 @@ function releaseDirectionalWatchReserveV553(budget,reason,consumed=false) {
   return reserve;
 }
 
+function resolveFinalCollectorCursorFloorV1154(
+  state,
+  candidate,
+  cursorFloorSnapshotV1153
+) {
+  const token = normalize(candidate?.tokenAddress);
+  const poolId = normalize(candidate?.poolId);
+  const key = directionalWatchKeyV563(token,poolId);
+
+  const candidateBlock = Number(candidate?.lastCollectedBlock);
+  const candidateRanges = safeNumber(candidate?.successfulRanges);
+  const candidateAt = safeNumber(candidate?.lastCollectedAt);
+
+  const snapshotRow =
+    key &&
+    cursorFloorSnapshotV1153?.entries &&
+    typeof cursorFloorSnapshotV1153.entries === "object"
+      ? cursorFloorSnapshotV1153.entries[key] || null
+      : null;
+
+  const snapshotSamePool = Boolean(
+    snapshotRow &&
+    normalize(snapshotRow?.tokenAddress) === token &&
+    normalize(snapshotRow?.poolId) === poolId
+  );
+
+  const continuity = provenDirectionalPoolContinuityV1146(state,token);
+  const continuitySamePool = Boolean(
+    continuity &&
+    normalize(continuity?.poolId) === poolId
+  );
+
+  const sources = [
+    {
+      source:"SELECTED_CANDIDATE_V1154",
+      block:Number.isFinite(candidateBlock) ? candidateBlock : null,
+      successfulRanges:candidateRanges,
+      lastCollectedAt:candidateAt || null,
+      row:candidate
+    },
+    {
+      source:"HYDRATED_CURSOR_SNAPSHOT_V1153",
+      block:snapshotSamePool && Number.isFinite(Number(snapshotRow?.lastCollectedBlock))
+        ? Number(snapshotRow.lastCollectedBlock)
+        : null,
+      successfulRanges:snapshotSamePool ? safeNumber(snapshotRow?.successfulRanges) : 0,
+      lastCollectedAt:snapshotSamePool ? safeNumber(snapshotRow?.lastCollectedAt) || null : null,
+      row:snapshotSamePool ? snapshotRow : null
+    },
+    {
+      source:"PROVEN_CANONICAL_CONTINUITY_V1146",
+      block:continuitySamePool && Number.isFinite(Number(continuity?.lastCollectedBlock))
+        ? Number(continuity.lastCollectedBlock)
+        : null,
+      successfulRanges:continuitySamePool ? safeNumber(continuity?.successfulRanges) : 0,
+      lastCollectedAt:continuitySamePool ? safeNumber(continuity?.lastCollectedAt) || null : null,
+      row:continuitySamePool ? continuity : null
+    }
+  ].filter(item => Number.isFinite(Number(item.block)));
+
+  sources.sort((a,b) => {
+    const blockDelta = Number(b.block) - Number(a.block);
+    if (blockDelta !== 0) return blockDelta;
+    const rangeDelta = safeNumber(b.successfulRanges) - safeNumber(a.successfulRanges);
+    if (rangeDelta !== 0) return rangeDelta;
+    return safeNumber(b.lastCollectedAt) - safeNumber(a.lastCollectedAt);
+  });
+
+  const winner = sources[0] || null;
+  const before = {
+    lastCollectedBlock:Number.isFinite(candidateBlock) ? candidateBlock : null,
+    successfulRanges:candidateRanges,
+    lastCollectedAt:candidateAt || null
+  };
+
+  let applied = false;
+  if (
+    winner &&
+    Number.isFinite(Number(winner.block)) &&
+    (
+      !Number.isFinite(candidateBlock) ||
+      Number(winner.block) > candidateBlock ||
+      (
+        Number(winner.block) === candidateBlock &&
+        (
+          safeNumber(winner.successfulRanges) > candidateRanges ||
+          (
+            safeNumber(winner.successfulRanges) === candidateRanges &&
+            safeNumber(winner.lastCollectedAt) > candidateAt
+          )
+        )
+      )
+    )
+  ) {
+    const row = winner.row || {};
+    candidate.lastCollectedBlock = Number(winner.block);
+    candidate.successfulRanges = Math.max(
+      safeNumber(candidate?.successfulRanges),
+      safeNumber(row?.successfulRanges)
+    );
+    candidate.exactUsdTrades = Math.max(
+      safeNumber(candidate?.exactUsdTrades),
+      safeNumber(row?.exactUsdTrades)
+    );
+    candidate.returnedLogs = Math.max(
+      safeNumber(candidate?.returnedLogs),
+      safeNumber(row?.returnedLogs)
+    );
+    candidate.lastCollectedAt = Math.max(
+      safeNumber(candidate?.lastCollectedAt),
+      safeNumber(row?.lastCollectedAt)
+    ) || null;
+
+    const rowCoverageEnd = Number(row?.coverageEndBlock);
+    const currentCoverageEnd = Number(candidate?.coverageEndBlock);
+    if (
+      Number.isFinite(rowCoverageEnd) &&
+      (!Number.isFinite(currentCoverageEnd) || rowCoverageEnd > currentCoverageEnd)
+    ) {
+      candidate.coverageEndBlock = rowCoverageEnd;
+    }
+
+    candidate.finalCollectorCursorFloorAppliedV1154 = true;
+    candidate.finalCollectorCursorFloorSourceV1154 = winner.source;
+    candidate.finalCollectorCursorFloorAppliedAtV1154 = Date.now();
+    applied = true;
+  }
+
+  return {
+    enabled:true,
+    tokenAddress:token || null,
+    poolId:poolId || null,
+    before,
+    sources:sources.map(({source,block,successfulRanges,lastCollectedAt}) => ({
+      source,
+      block,
+      successfulRanges,
+      lastCollectedAt
+    })),
+    selectedFloorSource:winner?.source || null,
+    selectedFloorBlock:winner?.block ?? null,
+    applied,
+    after:{
+      lastCollectedBlock:Number.isFinite(Number(candidate?.lastCollectedBlock))
+        ? Number(candidate.lastCollectedBlock)
+        : null,
+      successfulRanges:safeNumber(candidate?.successfulRanges),
+      lastCollectedAt:safeNumber(candidate?.lastCollectedAt) || null
+    },
+    sameExactPoolOnly:true,
+    externalRequestsAdded:0,
+    requestCeilingsChanged:false
+  };
+}
+
+
 async function advanceDirectionalWatchV551({
   state,
   budget,
@@ -93015,6 +93183,19 @@ async function advanceDirectionalWatchV551({
     candidate.lastStatus = "WATCH_QUOTE_BASIS_CURRENTLY_UNVERIFIED_V551";
     return {...base,status:candidate.lastStatus};
   }
+
+  /*
+   * V1154: do not rely on a prior merge having survived every local handoff.
+   * Resolve the cursor again at the exact point that determines fromBlock.
+   */
+  const finalCollectorCursorFloorV1154 =
+    resolveFinalCollectorCursorFloorV1154(
+      state,
+      candidate,
+      cursorFloorSnapshotV1153
+    );
+  base.finalCollectorCursorFloorV1154 =
+    finalCollectorCursorFloorV1154;
 
   const lastCollectedBlock = Number(candidate?.lastCollectedBlock);
   const head = Number(latestNumber);
@@ -93149,6 +93330,17 @@ async function advanceDirectionalWatchV551({
 
   const fromBlock = lastCollectedBlock + 1;
   const toBlock = Math.min(head, fromBlock + configuredSpan - 1);
+
+  base.finalCollectorCursorFloorV1154 = {
+    ...(base.finalCollectorCursorFloorV1154 || {}),
+    derivedLastCollectedBlock:lastCollectedBlock,
+    derivedFromBlock:fromBlock,
+    derivedToBlock:toBlock,
+    repeatOfCompletedRangePrevented:
+      safeNumber(base?.finalCollectorCursorFloorV1154?.selectedFloorBlock) > 0 &&
+      fromBlock >
+        safeNumber(base.finalCollectorCursorFloorV1154.selectedFloorBlock)
+  };
 
   /*
    * V958: V551 used Blockscout indexed getLogs for every exact-pool advance.
@@ -209124,6 +209316,8 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       trace?.directionalWatchMonotonicProtectionV1152 || null,
     finalCollectorBoundaryProtectionV1153:
       trace?.finalCollectorBoundaryProtectionV1153 || null,
+    finalCollectorCursorFloorV1154:
+      trace?.finalCollectorCursorFloorV1154 || null,
     requestedToken:isAddress(requested)?requested:null,
     status:trace?"EXACT_POOL_FLOW_COLLECTION_CLASSIFIED_V1140":"NO_V1140_FLOW_COLLECTION_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
     trace:trace?{
@@ -209140,7 +209334,7 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
       zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
     },
-    note:"V1153 keeps V1151/V1152 persistence protections and reapplies the hydrated cursor floor again at the final V551 collector boundary before selection and fromBlock calculation. Adds zero KV/provider/RPC requests.",
+    note:"V1154 keeps V1151/V1152 persistence protections and reapplies the hydrated cursor floor again at the final V551 collector boundary before selection and fromBlock calculation. Adds zero KV/provider/RPC requests.",
     timestamp:now()
   };
 }
