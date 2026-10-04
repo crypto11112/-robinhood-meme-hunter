@@ -9727,7 +9727,20 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1138"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1139"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1139 — GUARDED PROMOTION-EVIDENCE COHORT ADMISSION
+ * - Keeps MAX_TOKEN_CHECKS at 4 and adds no analysis/provider/RPC capacity.
+ * - When V1138 selects a quality-safe PROMOTION_EVIDENCE cohort candidate,
+ *   fresh-launch pressure no longer automatically discards that existing cohort slot.
+ * - The candidate is inserted behind existing protected completion/retry/market lanes
+ *   and ahead of the ordinary selected tail, so the final slice replaces only the
+ *   lowest remaining ordinary analysis candidate rather than creating a fifth slot.
+ * - Ordinary BREADTH/DEPTH/FAIRNESS cohort follow-ups remain subject to the V1090
+ *   fresh-launch-pressure gate. Scoring, promotion, risk, request ceilings, watch/fast
+ *   lane size and Telegram production behavior are unchanged.
+ */
 
 /*
  * V1138 — PROMOTION-AWARE DURABLE-COHORT SCHEDULING FIX
@@ -110679,11 +110692,31 @@ for (
     currentLiveVerifiedLaunchWatchedV621.length <=
       INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077;
 
+  /* V1139: the V1138 promotion-evidence selector already applies the existing
+   * quality/risk safeguards. Allow only that selection class to use the same
+   * cohort slot during fresh-launch pressure. This adds no fifth slot: the final
+   * MAX_TOKEN_CHECKS slice still caps the queue at four. */
+  const intelligencePromotionEvidenceAdmissionV1139 =
+    Boolean(
+      intelligenceFollowUpSelectionV1077?.selectionPurposeV1100 ===
+        "PROMOTION_EVIDENCE_V1138" &&
+      intelligenceFollowUpSelectionV1077?.selectedFromDurableCohort === true
+    );
+
+  const intelligenceFreshPressureOverrideV1139 =
+    Boolean(
+      intelligencePromotionEvidenceAdmissionV1139 &&
+      intelligenceFreshLaunchPressureLowV1077 !== true
+    );
+
   const intelligenceSlotEligibleV1077 =
     Boolean(
       scheduled === true &&
       intelligenceFollowUpTokenV1077 &&
-      intelligenceFreshLaunchPressureLowV1077
+      (
+        intelligenceFreshLaunchPressureLowV1077 ||
+        intelligencePromotionEvidenceAdmissionV1139
+      )
     );
 
   const analysisSelectedRawV142 =
@@ -110691,7 +110724,8 @@ for (
     protectedCarriedAnalysisTargetV178 ||
     holderEvidenceRetryTokenV422 ||
     evidenceCompletionRetryTokenV658 ||
-    pendingDirectionalUsdTokenV176
+    pendingDirectionalUsdTokenV176 ||
+    (intelligenceSlotEligibleV1077 && !intelligenceAlreadyInSelectedV1077)
       ? uniqueBy(
           [
             ...(
@@ -110782,6 +110816,12 @@ for (
       INTELLIGENCE_WATCH_MAX_FRESH_LAUNCHES_V1077,
     freshLaunchPressureLow:
       intelligenceFreshLaunchPressureLowV1077 === true,
+    promotionEvidenceAdmissionV1139:
+      intelligencePromotionEvidenceAdmissionV1139 === true,
+    freshPressureOverrideV1139:
+      intelligenceFreshPressureOverrideV1139 === true,
+    maxTokenChecksUnchangedV1139:
+      MAX_TOKEN_CHECKS === 4,
     alreadyInSelected:
       intelligenceAlreadyInSelectedV1077 === true,
     slotEligible:
@@ -110799,7 +110839,8 @@ for (
       intelligenceFollowUpSelectionV1077?.status !==
         "DURABLE_INTELLIGENCE_FOLLOW_UP_SELECTED_V1079"
         ? intelligenceFollowUpSelectionV1077?.status || "SELECTOR_DID_NOT_SELECT_V1090"
-        : intelligenceFreshLaunchPressureLowV1077 !== true
+        : intelligenceFreshLaunchPressureLowV1077 !== true &&
+          intelligencePromotionEvidenceAdmissionV1139 !== true
           ? "FRESH_LAUNCH_PRESSURE_BLOCKED_COHORT_SLOT_V1090"
           : intelligenceSlotEligibleV1077 !== true
             ? "COHORT_SLOT_NOT_ELIGIBLE_V1090"
