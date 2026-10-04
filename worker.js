@@ -1,4 +1,25 @@
 /**
+ * ChainVanta — V1103
+ * BREAKOUT ANTI-CHASE / ENTRY-QUALITY SHADOW LAYER
+ * Builds directly from deployed V1102.
+ * - Adds entry-quality logic so a real breakout is not automatically treated
+ *   as a good buy-side entry after price has already expanded too far.
+ * - Keeps the proven V1101 breakout evidence gates unchanged:
+ *   material verified V212 flow + verified changed price sequence + safety.
+ * - Adds a conservative anti-chase threshold:
+ *     <3%      = PRE_BREAKOUT / not confirmed
+ *     3%-15%   = EARLY_BREAKOUT_WINDOW
+ *     15%-25%  = CONFIRMED_ENTRY_WINDOW
+ *     >=25%    = BREAKOUT_EXTENDED_DO_NOT_CHASE
+ * - BREAKOUT_EXTENDED is shadow-only and explicitly not buy-side eligible.
+ * - BREAKOUT_CONFIRMED remains the strongest buy-side setup only while price
+ *   is still inside the allowed entry window.
+ * - Adds anti-chase telemetry to /breakout-status and /breakout?token=...
+ * - No production score, Telegram qualification/calls, scanner cadence,
+ *   provider/RPC usage, or request-budget changes.
+ */
+
+/**
  * ChainVanta — V1102
  * WEAKENING / EXIT INTELLIGENCE — SHADOW V1
  * Builds directly from deployed V1101.
@@ -9432,7 +9453,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1102"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1103"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -187987,6 +188008,9 @@ async function flowAccumulationStatusV1092(env) {
    ============================================================ */
 const BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094 = 2;
 const BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094 = 5 * 60 * 1000;
+const BREAKOUT_EARLY_MIN_PCT_V1103 = 3;
+const BREAKOUT_EARLY_MAX_PCT_V1103 = 15;
+const BREAKOUT_ENTRY_MAX_PCT_V1103 = 25;
 
 function breakoutFromRowsV1094(address, rows) {
   const normalizedAddress = normalize(address);
@@ -188171,6 +188195,27 @@ function breakoutFromRowsV1094(address, rows) {
       selectedPriceSequenceV1101?.changePct
     );
 
+  let entryQualityV1103 = "NOT_READY";
+  let buySideEligibleV1103 = false;
+  let antiChaseBlockedV1103 = false;
+
+  if (verifiedChangedPricePct !== null) {
+    if (verifiedChangedPricePct < BREAKOUT_EARLY_MIN_PCT_V1103) {
+      entryQualityV1103 = "PRE_BREAKOUT";
+    } else if (
+      verifiedChangedPricePct < BREAKOUT_EARLY_MAX_PCT_V1103
+    ) {
+      entryQualityV1103 = "EARLY_BREAKOUT_WINDOW";
+    } else if (
+      verifiedChangedPricePct < BREAKOUT_ENTRY_MAX_PCT_V1103
+    ) {
+      entryQualityV1103 = "CONFIRMED_ENTRY_WINDOW";
+    } else {
+      entryQualityV1103 = "BREAKOUT_EXTENDED_DO_NOT_CHASE";
+      antiChaseBlockedV1103 = true;
+    }
+  }
+
   const momentumRows = ordered
     .map(row => ({
       at:safeNumber(row?.captured_at),
@@ -188336,12 +188381,20 @@ function breakoutFromRowsV1094(address, rows) {
     ) {
       breakoutState = "REVERSAL_ATTEMPT";
     } else if (
+      antiChaseBlockedV1103 &&
+      verifiedChangedPricePct !== null &&
+      verifiedChangedPricePct >= BREAKOUT_ENTRY_MAX_PCT_V1103
+    ) {
+      breakoutState = "BREAKOUT_EXTENDED";
+    } else if (
       breakoutScore >= 75 &&
       verifiedChangedPricePct !== null &&
-      verifiedChangedPricePct >= 3 &&
+      verifiedChangedPricePct >= BREAKOUT_EARLY_MIN_PCT_V1103 &&
+      verifiedChangedPricePct < BREAKOUT_ENTRY_MAX_PCT_V1103 &&
       latestFlowPositive
     ) {
       breakoutState = "BREAKOUT_CONFIRMED";
+      buySideEligibleV1103 = true;
     } else if (breakoutScore >= 60) {
       breakoutState = "BREAKOUT_WATCH";
     } else if (breakoutScore >= 40) {
@@ -188363,6 +188416,9 @@ function breakoutFromRowsV1094(address, rows) {
     safetyWarning,
     breakoutScore,
     breakoutState,
+    entryQualityV1103,
+    buySideEligibleV1103,
+    antiChaseBlockedV1103,
     verifiedChangedMarketRows:changedMarketRows.length,
     verifiedPriceObservationsV1101:
       safeNumber(selectedPriceSequenceV1101?.observationCount),
@@ -188425,7 +188481,9 @@ function breakoutFromRowsV1094(address, rows) {
     warnings:[...new Set(warnings)],
     interpretation:
       breakoutState === "BREAKOUT_CONFIRMED"
-        ? "Verified material flow, changed market evidence and momentum are aligning in a breakout configuration. Shadow only."
+        ? "Verified material flow, changed market evidence and momentum align while price remains inside the V1103 entry window. Shadow buy-side setup only."
+        : breakoutState === "BREAKOUT_EXTENDED"
+          ? "The breakout is verified but price has already expanded beyond the V1103 anti-chase limit. Do not treat this as a fresh buy-side entry."
         : breakoutState === "BREAKOUT_WATCH"
           ? "Breakout pressure is elevated, but not all confirmation conditions are strong enough yet."
           : breakoutState === "PRESSURE_BUILDING"
@@ -188449,6 +188507,13 @@ function breakoutFromRowsV1094(address, rows) {
         BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094 / 60000,
       baselineSemanticsV1101:
         "PRIOR_VERIFIED_BASELINE_TO_LATEST_CHANGED_OBSERVATION",
+      antiChaseV1103:{
+        earlyMinPct:BREAKOUT_EARLY_MIN_PCT_V1103,
+        earlyMaxPct:BREAKOUT_EARLY_MAX_PCT_V1103,
+        entryMaxPct:BREAKOUT_ENTRY_MAX_PCT_V1103,
+        extendedState:"BREAKOUT_EXTENDED",
+        extendedBuySideEligible:false
+      },
       requiresMaterialFlowAccumulationEvidence:true,
       productionImpact:false
     },
@@ -188537,7 +188602,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_TOKEN_V1101",
+    diagnostic:"BREAKOUT_TOKEN_V1103",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188571,7 +188636,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_TOKEN_OK_V1101",
+    status:"BREAKOUT_TOKEN_OK_V1103",
     result:breakoutFromRowsV1094(token, history.rows),
     timestamp:now()
   };
@@ -188581,7 +188646,7 @@ async function breakoutStatusV1094(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_STATUS_V1101",
+    diagnostic:"BREAKOUT_STATUS_V1103",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188618,11 +188683,17 @@ async function breakoutStatusV1094(env) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_STATUS_OK_V1101",
+    status:"BREAKOUT_STATUS_OK_V1103",
     evaluated:results.length,
     evidenceReady:results.filter(r => r.evidenceReady).length,
     confirmed:results.filter(
       r => r.breakoutState === "BREAKOUT_CONFIRMED"
+    ).length,
+    extended:results.filter(
+      r => r.breakoutState === "BREAKOUT_EXTENDED"
+    ).length,
+    buySideEligible:results.filter(
+      r => r.buySideEligibleV1103 === true
     ).length,
     watch:results.filter(
       r => r.breakoutState === "BREAKOUT_WATCH"
@@ -188637,7 +188708,7 @@ async function breakoutStatusV1094(env) {
       r => r.breakoutState === "BUILDING_BREAKOUT_HISTORY"
     ).length,
     tokens:results,
-    note:"Shadow only. Breakout requires materially sized verified V212 flow plus genuinely changed verified provider or V438 on-chain execution-price evidence; stale/cache repeats do not count.",
+    note:"Shadow only. V1103 adds anti-chase entry quality on top of materially sized verified V212 flow and changed verified provider/V438 price evidence. BREAKOUT_EXTENDED is never buy-side eligible.",
     timestamp:now()
   };
 }
