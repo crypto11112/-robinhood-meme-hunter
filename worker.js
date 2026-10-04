@@ -9727,7 +9727,19 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1141"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1142"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1142 — PROMOTION-EVIDENCE FIRST-RANGE FLOW BOOTSTRAP PRIORITY
+ * - Gives a non-raw exact-pool watch that was actually admitted through the V1138/V1139
+ *   promotion-evidence cohort lane temporary highest V551 scheduler priority while
+ *   successfulRanges remains zero.
+ * - The boost ends automatically after the first successful contiguous collection range,
+ *   after which the watch returns to the existing V578/V567 rotation.
+ * - Uses only the existing V551 collection chunks and V1141 protected reserve; watch cap,
+ *   MAX_TOKEN_CHECKS, provider/RPC ceilings, scoring, promotion, risk and Telegram are unchanged.
+ * - Adds no provider/RPC requests and no collection slots.
+ */
 
 /*
  * V1141 — HARD MINIMUM DIRECTIONAL-WATCH BUDGET PROTECTION
@@ -91143,6 +91155,14 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     const rawOnlyV740 =
       quoteEligibility?.eligible !== true &&
       candidate?.rawExactPoolWatchV740?.verified === true;
+    const latestCohortAdmissionV1142 =
+      state?.intelligenceCohortV1079?.lastAdmissionAttemptV1090 || null;
+    const promotionEvidenceBootstrapEligibleV1142 = Boolean(
+      rawOnlyV740 !== true &&
+      latestCohortAdmissionV1142?.promotionEvidenceAdmissionV1139 === true &&
+      latestCohortAdmissionV1142?.actuallyAdmitted === true &&
+      normalize(latestCohortAdmissionV1142?.provisionalAddress) === token
+    );
     if (rawOnlyV740) {
       telemetryV741.rawHandoffAttempts =
         safeNumber(telemetryV741?.rawHandoffAttempts) + 1;
@@ -91240,6 +91260,15 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         ? (quoteEligibility?.basis || existing.quoteBasis || null)
         : (existing.quoteBasis || null);
       existing.rawOnlyV740 = rawOnlyV740;
+      if (promotionEvidenceBootstrapEligibleV1142) {
+        existing.promotionEvidenceBootstrapV1142 = {
+          eligible:true,
+          admittedAt:safeNumber(latestCohortAdmissionV1142?.at) || now,
+          source:"PROMOTION_EVIDENCE_V1138_ADMITTED_V1139",
+          tokenAddress:token,
+          firstRangeOnly:true
+        };
+      }
       existing.rawWatchCurrentActivityAdmissionV755 =
         rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || existing.rawWatchCurrentActivityAdmissionV755 || null) : null;
       existing.rawWatchActivityAdmissionV756 =
@@ -91325,6 +91354,16 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       quoteTokenAddress:quoteTokenAddress || null,
       quoteBasis:quoteEligibility?.eligible === true ? (quoteEligibility?.basis || null) : null,
       rawOnlyV740,
+      promotionEvidenceBootstrapV1142:
+        promotionEvidenceBootstrapEligibleV1142
+          ? {
+              eligible:true,
+              admittedAt:safeNumber(latestCohortAdmissionV1142?.at) || now,
+              source:"PROMOTION_EVIDENCE_V1138_ADMITTED_V1139",
+              tokenAddress:token,
+              firstRangeOnly:true
+            }
+          : null,
       rawWatchCurrentActivityAdmissionV755:
         rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || null) : null,
       rawWatchActivityAdmissionV756:
@@ -91488,6 +91527,15 @@ function directionalWatchHasOtherPriorCompletionCatchupV579(
   );
 }
 
+function directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row) {
+  return Boolean(
+    row?.rawOnlyV740 !== true &&
+    row?.promotionEvidenceBootstrapV1142?.eligible === true &&
+    safeNumber(row?.successfulRanges) === 0 &&
+    Number.isFinite(Number(row?.lastCollectedBlock))
+  );
+}
+
 function directionalWatchNeedsRawFirstRangePriorityV744(row) {
   return Boolean(
     row?.rawOnlyV740 === true &&
@@ -91497,6 +91545,13 @@ function directionalWatchNeedsRawFirstRangePriorityV744(row) {
 }
 
 function directionalWatchPriorityTierV567(row) {
+  /*
+   * V1142: a quality-safe promotion-evidence cohort candidate that actually entered
+   * analyzeToken gets one temporary first-range bootstrap priority. This consumes no
+   * extra request; it only chooses which already-eligible V551 watch gets the slot.
+   */
+  if (directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row)) return 6;
+
   /*
    * V744: raw-only watches that have never completed a range get exactly one
    * temporary scheduler priority. Once successfulRanges > 0 this condition
@@ -91789,6 +91844,8 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
   reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
   reserve.selectionPriorityTierV567 =
     candidate ? directionalWatchPriorityTierV567(candidate) : null;
+  reserve.promotionEvidenceFirstRangePriorityV1142 =
+    candidate ? directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(candidate) : false;
   reserve.rawFirstRangePriorityV744 =
     candidate ? directionalWatchNeedsRawFirstRangePriorityV744(candidate) : false;
   reserve.priorCompletionFirstRangePriorityV577 =
@@ -123145,6 +123202,8 @@ for (
           blocksBehind:Number.isFinite(head) && Number.isFinite(lastCollectedBlock) ? Math.max(0,head-lastCollectedBlock) : null,
           eligibleForAdvance:Number.isFinite(head) && Number.isFinite(lastCollectedBlock) && lastCollectedBlock < head,
           selectionPriorityTierV567:directionalWatchPriorityTierV567(row),
+          promotionEvidenceFirstRangePriorityV1142:directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row),
+          promotionEvidenceBootstrapV1142:row?.promotionEvidenceBootstrapV1142 || null,
           firstRangePriorityV744:directionalWatchNeedsRawFirstRangePriorityV744(row),
           priorCompletionCatchupV578:directionalWatchNeedsPriorCompletionCatchupV578(row,latestNumber),
           expansionReadyV567:directionalWatchExpansionReadyV567(row),
@@ -123187,6 +123246,7 @@ for (
         hardMinimumProtectionV1141:directionalWatchReserveV553?.hardMinimumProtectionV1141 === true,
         hardMinimumGuaranteedRequestsV1141:safeNumber(directionalWatchReserveV553?.hardMinimumGuaranteedRequestsV1141),
         hardMinimumBlocksV1141:safeNumber(directionalWatchReserveV553?.hardMinimumBlocksV1141),
+        promotionEvidenceFirstRangePriorityV1142:directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
         ownerRequestsPresentedV1141:safeNumber(directionalWatchReserveV553?.ownerRequestsPresentedV1141),
         lastHardMinimumBlockedTypeV1141:directionalWatchReserveV553?.lastHardMinimumBlockedTypeV1141 || null,
         releaseReason:directionalWatchReserveResultV553?.releaseReason || directionalWatchReserveResultV553?.reason || null
@@ -207486,6 +207546,9 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
     }else if(safeNumber(row?.successfulRanges)>0){
       classification="FLOW_WATCH_HAS_PRIOR_SUCCESS_WAITING_TURN_V1140";
       nextAction="NORMAL_MULTI_POOL_ROTATION_V1140";
+    }else if(row?.promotionEvidenceFirstRangePriorityV1142===true){
+      classification="PROMOTION_EVIDENCE_FIRST_RANGE_BOOTSTRAP_WAITING_V1142";
+      nextAction="V1142_GIVES_THIS_WATCH_HIGHEST_EXISTING_COLLECTION_PRIORITY";
     }else if(safeNumber(row?.selectionPriorityTierV567)>=4){
       classification="ZERO_RANGE_HIGH_PRIORITY_WATCH_NOT_SELECTED_THIS_SCAN_V1140";
       nextAction="COMPARE_HIGHER_OR_EQUAL_PRIORITY_COMPETITORS_V1140";
