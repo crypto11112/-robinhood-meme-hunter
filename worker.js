@@ -1,4 +1,21 @@
 /**
+ * ChainVanta — V1107
+ * ESTABLISHED-TOKEN LIVE PRIORITY PROMOTION — SHADOW V1
+ * Builds directly from deployed V1106.
+ * - Adds a bounded priority selector for the best established-token setups.
+ * - Selects at most 3 cohort tokens for the future fast/live exact-pool lane.
+ * - Reuses stored cohort + V1092 accumulation + V1104 breakout evidence only.
+ * - Explicitly blocks unsafe, distributive, negative-price and anti-chase
+ *   extended setups from bullish live promotion.
+ * - Gives strongest priority to confirmed/watch/pressure-building breakout
+ *   states, then verified accumulation, then evidence quality/momentum.
+ * - Adds /live-priority-status for calibration before any faster polling is
+ *   enabled.
+ * - ZERO new provider/RPC requests in V1107; production Telegram, scoring,
+ *   qualification and five-minute scanner cadence remain unchanged.
+ */
+
+/**
  * ChainVanta — V1106
  * COHORT RETENTION TELEMETRY INTEGRITY FIX
  * Builds directly from deployed V1105.
@@ -9498,7 +9515,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1106"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1107"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -188775,6 +188792,212 @@ async function breakoutStatusV1094(env) {
 
 
 /* ============================================================
+   V1107 — ESTABLISHED-TOKEN LIVE PRIORITY PROMOTION — SHADOW V1
+   ============================================================ */
+const LIVE_PRIORITY_MAX_TOKENS_V1107 = 3;
+
+async function livePriorityStatusV1107(env) {
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_PRIORITY_STATUS_V1107",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0,
+    maximumPriorityTokens:LIVE_PRIORITY_MAX_TOKENS_V1107,
+    fastPollingEnabled:false,
+    productionAlertsEnabled:false
+  };
+
+  const stateRead = await readState(env);
+  const cohort = ensureIntelligenceCohortV1079(stateRead?.state || {});
+  const entries = Array.isArray(cohort?.entries) ? cohort.entries : [];
+  const rows = [];
+
+  for (const entry of entries.slice(0, 20)) {
+    const address = normalize(entry?.address);
+    if (!isAddress(address)) continue;
+
+    const history = await accumulationRowsForAddressV1078(env, address, 288);
+    if (!history?.ok) continue;
+
+    const breakout = breakoutFromRowsV1094(address, history.rows);
+    const accumulation = flowAwareAccumulationFromRowsV1092(address, history.rows);
+
+    const risk = finiteOrNullV1076(entry?.riskScore);
+    const confidence = finiteOrNullV1076(entry?.confidenceScore);
+    const opportunity = finiteOrNullV1076(entry?.opportunityScore);
+    const momentum = finiteOrNullV1076(breakout?.momentum?.latest);
+    const momentumDelta = finiteOrNullV1076(breakout?.momentum?.delta);
+    const priceChangePct = finiteOrNullV1076(breakout?.verifiedPrice?.changePct);
+    const accumulationState = accumulation?.accumulationState || null;
+    const breakoutState = breakout?.breakoutState || "BUILDING_BREAKOUT_HISTORY";
+
+    const safetyBlocked =
+      breakout?.safetyWarning === true ||
+      (risk !== null && risk >= 60);
+
+    const distributionBlocked =
+      accumulationState === "DISTRIBUTION";
+
+    const negativePriceBlocked =
+      breakout?.entryQualityV1103 === "NEGATIVE_PRICE_MOVE_NO_BUY" ||
+      (breakout?.marketEvidenceReady === true &&
+       priceChangePct !== null &&
+       priceChangePct < 0);
+
+    const antiChaseBlocked =
+      breakout?.antiChaseBlockedV1103 === true ||
+      breakoutState === "BREAKOUT_EXTENDED";
+
+    const bullishEligible =
+      !safetyBlocked &&
+      !distributionBlocked &&
+      !negativePriceBlocked &&
+      !antiChaseBlocked;
+
+    let priorityScore = 0;
+    const reasons = [];
+    const blockers = [];
+
+    if (safetyBlocked) blockers.push("SAFETY_OR_RISK_BLOCK");
+    if (distributionBlocked) blockers.push("LONGITUDINAL_DISTRIBUTION");
+    if (negativePriceBlocked) blockers.push("NEGATIVE_VERIFIED_PRICE_MOVE");
+    if (antiChaseBlocked) blockers.push("ANTI_CHASE_EXTENDED");
+
+    if (bullishEligible) {
+      if (breakoutState === "BREAKOUT_CONFIRMED") {
+        priorityScore += 60;
+        reasons.push("BREAKOUT_CONFIRMED");
+      } else if (breakoutState === "BREAKOUT_WATCH") {
+        priorityScore += 48;
+        reasons.push("BREAKOUT_WATCH");
+      } else if (breakoutState === "PRESSURE_BUILDING") {
+        priorityScore += 36;
+        reasons.push("BREAKOUT_PRESSURE_BUILDING");
+      } else if (breakoutState === "REVERSAL_ATTEMPT") {
+        priorityScore += 18;
+        reasons.push("REVERSAL_ATTEMPT");
+      }
+
+      if (accumulationState === "STRONG_ACCUMULATION") {
+        priorityScore += 28;
+        reasons.push("STRONG_ACCUMULATION");
+      } else if (accumulationState === "ACCUMULATING") {
+        priorityScore += 22;
+        reasons.push("ACCUMULATING");
+      } else if (accumulationState === "MIXED") {
+        priorityScore += 8;
+      }
+
+      if (breakout?.flowEvidenceReady === true) {
+        priorityScore += 12;
+        reasons.push("MATERIAL_FLOW_READY");
+      }
+      if (breakout?.marketEvidenceReady === true) {
+        priorityScore += 12;
+        reasons.push("VERIFIED_PRICE_SEQUENCE_READY");
+      }
+
+      if (momentum !== null) {
+        if (momentum >= 30) priorityScore += 12;
+        else if (momentum >= 15) priorityScore += 7;
+        else if (momentum >= 5) priorityScore += 3;
+      }
+      if (momentumDelta !== null) {
+        if (momentumDelta >= 15) priorityScore += 10;
+        else if (momentumDelta >= 5) priorityScore += 5;
+      }
+
+      if (opportunity !== null) priorityScore += Math.min(12, opportunity / 8);
+      if (confidence !== null) priorityScore += Math.min(10, confidence / 10);
+      if (risk !== null) priorityScore -= Math.max(0, risk - 30) / 5;
+    }
+
+    priorityScore = Number(Math.max(0, priorityScore).toFixed(2));
+
+    const promote =
+      bullishEligible &&
+      (
+        breakoutState === "BREAKOUT_CONFIRMED" ||
+        breakoutState === "BREAKOUT_WATCH" ||
+        breakoutState === "PRESSURE_BUILDING" ||
+        accumulationState === "STRONG_ACCUMULATION" ||
+        accumulationState === "ACCUMULATING" ||
+        priorityScore >= 35
+      );
+
+    rows.push({
+      address,
+      symbol:
+        breakout?.symbol ||
+        entry?.symbol ||
+        null,
+      promote,
+      priorityScore,
+      breakoutState,
+      breakoutScore:safeNumber(breakout?.breakoutScore),
+      entryQuality:breakout?.entryQualityV1103 || null,
+      accumulationState,
+      flowEvidenceReady:breakout?.flowEvidenceReady === true,
+      marketEvidenceReady:breakout?.marketEvidenceReady === true,
+      momentum:{
+        latest:momentum,
+        delta:momentumDelta
+      },
+      cohortEvidence:{
+        opportunityScore:opportunity,
+        confidenceScore:confidence,
+        riskScore:risk,
+        observations:safeNumber(entry?.observations)
+      },
+      reasons:[...new Set(reasons)],
+      blockers:[...new Set(blockers)]
+    });
+  }
+
+  rows.sort((a,b) =>
+    Number(b?.promote === true) - Number(a?.promote === true) ||
+    safeNumber(b?.priorityScore) - safeNumber(a?.priorityScore)
+  );
+
+  const promoted = rows
+    .filter(row => row?.promote === true)
+    .slice(0, LIVE_PRIORITY_MAX_TOKENS_V1107)
+    .map((row, index) => ({
+      rank:index + 1,
+      ...row
+    }));
+
+  return {
+    ...base,
+    success:true,
+    status:"LIVE_PRIORITY_STATUS_OK_V1107",
+    cohortEntries:entries.length,
+    evaluated:rows.length,
+    eligibleForPromotion:rows.filter(row => row?.promote === true).length,
+    promotedCount:promoted.length,
+    promoted,
+    allCandidates:rows,
+    methodology:{
+      maximumPriorityTokens:LIVE_PRIORITY_MAX_TOKENS_V1107,
+      safetyOrRisk60PlusBlocks:true,
+      longitudinalDistributionBlocks:true,
+      negativeVerifiedPriceMoveBlocks:true,
+      antiChaseExtendedBlocks:true,
+      fiveMinuteCohortStillPrimary:true,
+      fastPollingEnabled:false,
+      externalRequestsAdded:0
+    },
+    nextStage:
+      "After live calibration, promoted tokens can be wired into a lightweight faster exact-pool polling lane without accelerating the full five-minute scanner.",
+    timestamp:now()
+  };
+}
+
+
+/* ============================================================
    V1102 — WEAKENING / EXIT INTELLIGENCE — SHADOW V1
    ============================================================ */
 function weakeningFromRowsV1102(address, rows) {
@@ -191763,6 +191986,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   ) {
     return jsonResponse(
       await onChainPriceHistoryStatusV1095(env)
+    );
+  }
+
+  if (
+    path ===
+      "/live-priority-status"
+  ) {
+    return jsonResponse(
+      await livePriorityStatusV1107(env)
     );
   }
 
