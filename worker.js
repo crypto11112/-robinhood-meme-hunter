@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1123"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1124"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192342,6 +192342,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-promotion-diversity-diagnostic"
+  ) {
+    return jsonResponse(
+      await livePromotionDiversityDiagnosticV1124(env)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -197055,6 +197064,112 @@ async function liveCalibrationDiversityStatusV1123(env){
     suggestedReadinessGuide:{minimumDifferentTokens:5,preferredDifferentTokens:10,minimumEligibleOutcomes:100,note:"Guide only; V1123 never auto-tunes production thresholds."},
     tokens,states,
     note:"V1123 measures whether live-decision evidence generalises beyond one token. It is telemetry only: no promotion, scoring, provider cadence, decision threshold, or Telegram behavior changes.",timestamp:now()
+  };
+}
+
+
+// V1124: read-only promotion-diversity diagnostic.
+// Reuses existing durable cohort/history and live-lane snapshots only. It adds no
+// provider/RPC requests and does not mutate promotion rules, thresholds or Telegram.
+async function livePromotionDiversityDiagnosticV1124(env){
+  const [priority, diversity, lane] = await Promise.all([
+    livePriorityStatusV1108(env),
+    liveCalibrationDiversityStatusV1123(env),
+    livePriorityLaneStatusV1109(env)
+  ]);
+
+  const candidates = Array.isArray(priority?.allCandidates) ? priority.allCandidates : [];
+  const activeTokens = Array.isArray(lane?.tokens) ? lane.tokens : [];
+  const dominantAddress = normalize(diversity?.tokens?.[0]?.address || "");
+  const blockerCounts = {};
+  const dispositionCounts = {};
+
+  const candidateDiagnostics = candidates.map((row, index) => {
+    const blockers = Array.isArray(row?.blockers) ? row.blockers.filter(Boolean) : [];
+    for (const blocker of blockers) blockerCounts[blocker]=(blockerCounts[blocker]||0)+1;
+
+    let disposition = "INSUFFICIENT_BULLISH_LIVE_EVIDENCE_V1124";
+    if (row?.promote === true) disposition = "PROMOTION_ELIGIBLE_V1124";
+    else if (blockers.length) disposition = "BLOCKED_BY_LIVE_SAFETY_OR_QUALITY_V1124";
+    else if (row?.breakoutState === "BUILDING_BREAKOUT_HISTORY") disposition = "BUILDING_HISTORY_V1124";
+    dispositionCounts[disposition]=(dispositionCounts[disposition]||0)+1;
+
+    const address=normalize(row?.address||"");
+    const active=activeTokens.some(t=>normalize(t?.address||"")===address);
+    return {
+      rank:index+1,
+      address:row?.address||null,
+      symbol:row?.symbol||null,
+      isCurrentCalibrationDominantToken:dominantAddress && address===dominantAddress,
+      promote:row?.promote===true,
+      activeInFastLane:active,
+      priorityScore:safeNumber(row?.priorityScore),
+      breakoutState:row?.breakoutState||null,
+      breakoutScore:safeNumber(row?.breakoutScore),
+      accumulationState:row?.accumulationState||null,
+      entryQuality:row?.entryQuality||null,
+      flowEvidenceReady:row?.flowEvidenceReady===true,
+      marketEvidenceReady:row?.marketEvidenceReady===true,
+      exactPoolIdentityAvailable:!!row?.exactPoolLiveIdentityV1112,
+      opportunityScore:finiteOrNullV1076(row?.cohortEvidence?.opportunityScore),
+      confidenceScore:finiteOrNullV1076(row?.cohortEvidence?.confidenceScore),
+      riskScore:finiteOrNullV1076(row?.cohortEvidence?.riskScore),
+      storedObservations:safeNumber(row?.cohortEvidence?.storedObservations),
+      historyReadMatched:row?.cohortEvidence?.historyReadMatched===true,
+      reasons:Array.isArray(row?.reasons)?row.reasons:[],
+      blockers,
+      disposition
+    };
+  });
+
+  const nonDominant = candidateDiagnostics.filter(r=>!r.isCurrentCalibrationDominantToken);
+  const nonDominantEligible = nonDominant.filter(r=>r.promote===true);
+  const nonDominantActive = nonDominant.filter(r=>r.activeInFastLane===true);
+
+  let bottleneck="NO_CANDIDATES_TO_DIAGNOSE_V1124";
+  if (candidateDiagnostics.length) {
+    if ((diversity?.uniqueTokens||0) > 1) bottleneck="DIVERSITY_ALREADY_EXPANDING_V1124";
+    else if (!nonDominant.length) bottleneck="COHORT_OR_EVALUATION_BREADTH_BOTTLENECK_V1124";
+    else if (!nonDominantEligible.length) bottleneck="PROMOTION_FILTERING_BOTTLENECK_V1124";
+    else if (!nonDominantActive.length) bottleneck="FAST_LANE_ADMISSION_OR_ROTATION_BOTTLENECK_V1124";
+    else bottleneck="WAITING_FOR_NON_DOMINANT_DECISION_RECORD_V1124";
+  }
+
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_PROMOTION_DIVERSITY_DIAGNOSTIC_V1124",
+    success:priority?.success===true,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    calibration:{
+      uniqueTokens:safeNumber(diversity?.uniqueTokens),
+      performanceEligibleOutcomes:safeNumber(diversity?.performanceEligibleOutcomes),
+      dominantRecordSharePct:safeNumber(diversity?.dominantRecordSharePct),
+      dominantToken:diversity?.tokens?.[0] ? {address:diversity.tokens[0].address,symbol:diversity.tokens[0].symbol,records:diversity.tokens[0].records} : null,
+      readiness:diversity?.calibrationReadiness||null
+    },
+    promotionFunnel:{
+      cohortEntries:safeNumber(priority?.cohortEntries),
+      evaluated:safeNumber(priority?.evaluated),
+      eligibleForPromotion:safeNumber(priority?.eligibleForPromotion),
+      promotedCount:safeNumber(priority?.promotedCount),
+      fastLaneActiveEntries:safeNumber(lane?.activeEntries),
+      nonDominantCandidates:nonDominant.length,
+      nonDominantEligibleForPromotion:nonDominantEligible.length,
+      nonDominantActiveInFastLane:nonDominantActive.length
+    },
+    diagnosedBottleneck:bottleneck,
+    blockerCounts,
+    dispositionCounts,
+    candidateDiagnostics,
+    note:"V1124 explains why calibration remains concentrated in one token by joining the existing cohort/promotion evaluation with the current live-lane snapshot. It is diagnostic only and adds no provider/RPC traffic or production mutations.",
+    timestamp:now()
   };
 }
 
