@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1128"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1129"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -192497,6 +192497,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-cohort-fairness-exclusion-status"
+  ) {
+    return jsonResponse(
+      await liveCohortFairnessExclusionStatusV1129(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -197873,6 +197882,163 @@ async function liveCohortFairnessStatusV1128(env, url){
     interpretation:fairness
       ? "The normal V1079/V1100 selector currently has no eligible token, so V1128 would use the same bounded cohort slot to refresh one retained sparse-evidence candidate. This is evidence collection only, not promotion."
       : "Normal cohort selection currently has precedence, or no conservative V1128 fairness candidate qualifies.",
+    timestamp:now()
+  };
+}
+
+
+// V1129: fairness-exclusion telemetry. Read-only mirror of the V1128 fallback
+// eligibility checks so a retained token can show exactly which conservative
+// condition excluded it. No provider/RPC traffic and no state/D1 mutation.
+async function liveCohortFairnessExclusionStatusV1129(env, url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const cohort=ensureIntelligenceCohortV1079(state);
+  const entries=Array.isArray(cohort?.entries)?cohort.entries:[];
+  const addresses=entries.map(e=>normalize(e?.address)).filter(isAddress);
+  const history=await cohortHistorySummariesV1081(env,addresses);
+  const historyByAddress=new Map(
+    (history?.ok&&Array.isArray(history?.rows)?history.rows:[])
+      .map(r=>[normalize(r?.address),r])
+      .filter(([a])=>isAddress(a))
+  );
+  const nowMs=Date.now();
+
+  let normalSimulation=null;
+  try{
+    const clonedState=typeof structuredClone==="function"
+      ? structuredClone(state)
+      : JSON.parse(JSON.stringify(state));
+    normalSimulation=await selectIntelligenceFollowUpV1079(env,clonedState,true);
+  }catch(error){
+    normalSimulation={status:"FAIRNESS_EXCLUSION_SIMULATION_FAILED_V1129",error:errorString(error).slice(0,700)};
+  }
+
+  const checks=entries.map(entry=>{
+    const address=normalize(entry?.address);
+    const token=cohortTokenSafeV1079(entry?.token);
+    const row=historyByAddress.get(address)||null;
+    const addressValid=isAddress(address);
+    const tokenAvailable=!!token;
+    const historyAvailable=!!row;
+    const lastAt=row?safeNumber(row?.last_at||row?.captured_at):0;
+    const historyAgeMs=lastAt>0?Math.max(0,nowMs-lastAt):0;
+    const lastSelectedAt=safeNumber(entry?.lastSelectedAt);
+    const selectedAgeMs=lastSelectedAt>0?Math.max(0,nowMs-lastSelectedAt):Number.POSITIVE_INFINITY;
+    const quality=row?intelligenceCohortQualityDecisionV1082(row):null;
+    const qualityKeep=quality?.keep===true;
+    const opportunity=row
+      ? (finiteOrNullV1076(row?.opportunity_score) ?? finiteOrNullV1076(entry?.opportunityScore) ?? 0)
+      : (finiteOrNullV1076(entry?.opportunityScore) ?? 0);
+    const confidence=row
+      ? (finiteOrNullV1076(row?.confidence_score) ?? finiteOrNullV1076(entry?.confidenceScore) ?? 0)
+      : (finiteOrNullV1076(entry?.confidenceScore) ?? 0);
+    const riskVerified=row?Number(row?.risk_verified)===1:false;
+    const risk=riskVerified?finiteOrNullV1076(row?.risk_score):null;
+    const observations=row?safeNumber(row?.observation_count):0;
+    const onChainPriceVerified=row?safeNumber(row?.onchain_price_verified_count):0;
+    const onChainPriceChanged=row?safeNumber(row?.onchain_price_changed_count):0;
+
+    const pass={
+      validAddress:addressValid,
+      tokenPayloadAvailable:tokenAvailable,
+      durableHistoryAvailable:historyAvailable,
+      historyStaleEnough:historyAvailable && historyAgeMs>=INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128,
+      reselectAgeOldEnough:selectedAgeMs>=INTELLIGENCE_COHORT_FAIRNESS_RESELECT_MS_V1128,
+      qualityKeep:qualityKeep,
+      opportunity:opportunity>=INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128,
+      confidence:confidence>=INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128,
+      risk:!(riskVerified && risk!==null && risk>INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128),
+      sparseEvidence:!(observations>INTELLIGENCE_COHORT_FAIRNESS_MAX_OBSERVATIONS_V1128 && onChainPriceVerified>0)
+    };
+    const failed=Object.entries(pass).filter(([,v])=>v!==true).map(([k])=>k);
+    const finalFairnessEligible=failed.length===0;
+    return {
+      address,
+      symbol:entry?.symbol||row?.symbol||token?.symbol||null,
+      requested:isAddress(requested)&&address===requested,
+      finalFairnessEligible,
+      failedConditions:failed,
+      pass,
+      values:{
+        historyAgeMs:historyAvailable?historyAgeMs:null,
+        historyAgeMinutes:historyAvailable?Number((historyAgeMs/60000).toFixed(2)):null,
+        selectedAgeMs:Number.isFinite(selectedAgeMs)?selectedAgeMs:null,
+        selectedAgeMinutes:Number.isFinite(selectedAgeMs)?Number((selectedAgeMs/60000).toFixed(2)):null,
+        opportunity,
+        confidence,
+        riskVerified,
+        risk,
+        observations,
+        onChainPriceVerified,
+        onChainPriceChanged,
+        lastHistoryAt:lastAt||null,
+        lastSelectedAt:lastSelectedAt||null
+      },
+      qualityDecision:quality,
+      sourceFields:{
+        rowOpportunity:row?finiteOrNullV1076(row?.opportunity_score):null,
+        entryOpportunity:finiteOrNullV1076(entry?.opportunityScore),
+        rowConfidence:row?finiteOrNullV1076(row?.confidence_score):null,
+        entryConfidence:finiteOrNullV1076(entry?.confidenceScore),
+        rowRiskVerified:row?row?.risk_verified:null,
+        rowRiskScore:row?finiteOrNullV1076(row?.risk_score):null
+      }
+    };
+  });
+
+  const eligible=checks.filter(r=>r.finalFairnessEligible);
+  const target=isAddress(requested)
+    ? checks.find(r=>r.address===requested)||null
+    : checks.slice().sort((a,b)=>
+        (a.finalFairnessEligible===b.finalFairnessEligible?0:(a.finalFairnessEligible?-1:1)) ||
+        safeNumber(a?.failedConditions?.length)-safeNumber(b?.failedConditions?.length) ||
+        safeNumber(a?.values?.observations)-safeNumber(b?.values?.observations) ||
+        safeNumber(b?.values?.historyAgeMs)-safeNumber(a?.values?.historyAgeMs)
+      )[0]||null;
+
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_COHORT_FAIRNESS_EXCLUSION_STATUS_V1129",
+    success:stateRead?.ok!==false && history?.ok===true,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    stateWrites:0,
+    d1Writes:0,
+    requestedToken:isAddress(requested)?requested:null,
+    policy:{
+      minimumHistoryAgeMinutes:INTELLIGENCE_COHORT_FAIRNESS_MIN_STALE_MS_V1128/60000,
+      minimumReselectAgeMinutes:INTELLIGENCE_COHORT_FAIRNESS_RESELECT_MS_V1128/60000,
+      maximumSparseObservations:INTELLIGENCE_COHORT_FAIRNESS_MAX_OBSERVATIONS_V1128,
+      minimumOpportunity:INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128,
+      minimumConfidence:INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128,
+      maximumVerifiedRisk:INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128
+    },
+    normalSelector:{
+      status:normalSimulation?.status||null,
+      selectedAddress:normalize(normalSimulation?.selectedAddress)||null,
+      selectedSymbol:normalSimulation?.selectedSymbol||null,
+      purpose:normalSimulation?.selectionPurposeV1100||null,
+      fairnessCandidatesReported:safeNumber(normalSimulation?.fairnessCandidatesV1128)
+    },
+    cohortEntries:entries.length,
+    eligibleFairnessCandidates:eligible.length,
+    target,
+    candidates:checks,
+    interpretation:{
+      finalFairnessEligible:"True only when every V1128 conservative fallback condition passes.",
+      qualityKeep:"Mirrors intelligenceCohortQualityDecisionV1082; inspect qualityDecision when this is false.",
+      sparseEvidence:"Passes when the token has <=16 observations, or when it still has zero verified on-chain price rows.",
+      noAutoFix:"V1129 exposes exclusion reasons only; it does not alter the V1128 scheduler."
+    },
+    note:"V1129 mirrors each V1128 fairness eligibility condition so hidden exclusions are visible without changing scanner, provider, scoring, promotion, or Telegram behavior.",
     timestamp:now()
   };
 }
