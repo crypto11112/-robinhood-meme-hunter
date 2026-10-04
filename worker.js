@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1135"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1136"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -57870,6 +57870,68 @@ function onChainPoolIdentityRecoveryV742(
   };
 }
 
+
+// V1136: bounded runtime exact-pool identity handoff telemetry.
+// Records only evidence already present in the normal scan path. It performs no
+// provider/RPC requests, changes no candidate fields, and does not alter routing.
+function identitySnapshotV1136(identity){
+  const poolId=normalize(identity?.poolId||identity?.pairAddress||"");
+  return {
+    verified:identity?.verified===true,
+    status:identity?.status||null,
+    source:identity?.source||null,
+    poolId:/^0x[a-f0-9]{64}$/.test(String(poolId||""))?poolId:null,
+    quoteTokenAddress:normalize(identity?.quoteTokenAddress||"")||null,
+    registryIdentityRecoveryV742:identity?.registryIdentityRecoveryV742===true,
+    rawActivityOnlyV740:identity?.rawActivityOnlyV740===true
+  };
+}
+
+function registryIdentitySnapshotV1136(state,address){
+  const token=normalize(address);
+  const registry=state?.poolRegistry&&typeof state.poolRegistry==="object"?state.poolRegistry:{};
+  const rows=[];
+  for(const [rawPoolId,raw] of Object.entries(registry)){
+    const poolId=normalize(raw?.poolId||rawPoolId);
+    const c0=normalize(raw?.currency0||raw?.tokenA||"");
+    const c1=normalize(raw?.currency1||raw?.tokenB||"");
+    if(!/^0x[a-f0-9]{64}$/.test(String(poolId||""))||!isAddress(c0)||!isAddress(c1)||c0===c1) continue;
+    if(c0!==token&&c1!==token) continue;
+    const quote=c0===token?c1:c0;
+    rows.push({
+      poolId,currency0:c0,currency1:c1,quoteTokenAddress:quote,
+      knownQuote:quote===ZERO||knownQuote(quote),
+      lastSwapBlock:safeNumber(raw?.lastSwapBlockV746||raw?.lastSwapBlock)||null,
+      lastActivityBlock:safeNumber(raw?.lastActivityBlock)||null,
+      blockNumber:safeNumber(raw?.blockNumber)||null
+    });
+  }
+  const supported=rows.filter(r=>r.knownQuote===true);
+  return {
+    matchingPools:rows.length,
+    knownQuotePools:supported.length,
+    rows:rows.slice(0,8)
+  };
+}
+
+function recordIdentityHandoffRuntimeV1136(state,address,symbol,stage,payload={}){
+  if(!state||typeof state!=="object") return;
+  const token=normalize(address);
+  if(!isAddress(token)) return;
+  const root=state.identityHandoffRuntimeTraceV1136;
+  if(!root||typeof root!=="object"||!Array.isArray(root.rows)) return;
+  let row=root.rows.find(r=>normalize(r?.address||"")===token);
+  if(!row){
+    if(root.rows.length>=24) return;
+    row={address:token,symbol:symbol||null,stages:{}};
+    root.rows.push(row);
+  }
+  if(symbol&&!row.symbol) row.symbol=symbol;
+  row.stages[stage]={at:Date.now(),...payload};
+  row.lastStage=stage;
+  row.updatedAt=Date.now();
+}
+
 function activityForToken(
   watched,
   logs
@@ -99428,6 +99490,21 @@ async function analyzeToken(
       market
     );
 
+  const registrySnapshotBeforeIdentityV1136 =
+    registryIdentitySnapshotV1136(state,address);
+
+  if (registrySnapshotBeforeIdentityV1136.matchingPools > 0) {
+    recordIdentityHandoffRuntimeV1136(
+      state,address,validation?.symbol || watched?.metadata?.symbol || watched?.symbol || null,
+      "BEFORE_V153_V742",
+      {
+        watchedPoolCount:Array.isArray(watched?.pools)?watched.pools.length:0,
+        registry:registrySnapshotBeforeIdentityV1136,
+        latestHead:safeNumber(options?.latestNumberV749)||null
+      }
+    );
+  }
+
   const onChainPoolIdentity =
     onChainPoolIdentityRecoveryV742(
       state,
@@ -99435,6 +99512,14 @@ async function analyzeToken(
       market,
       options?.latestNumberV749 ?? null
     );
+
+  if (registrySnapshotBeforeIdentityV1136.matchingPools > 0) {
+    recordIdentityHandoffRuntimeV1136(
+      state,address,validation?.symbol || watched?.metadata?.symbol || watched?.symbol || null,
+      "AFTER_V153_V742",
+      {identity:identitySnapshotV1136(onChainPoolIdentity)}
+    );
+  }
 
   const onChainMarketEvidence =
     onChainV4MarketEvidence(
@@ -111059,6 +111144,21 @@ for (
   const candidates =
     [];
 
+  // V1136: one bounded runtime trace per normal scan. This piggybacks on the
+  // existing state save and adds no provider/RPC work or routing behavior.
+  state.identityHandoffRuntimeTraceV1136 = {
+    schema:"IDENTITY_HANDOFF_RUNTIME_TRACE_V1136",
+    scanStartedAt:Date.now(),
+    latestNumber:safeNumber(latestNumber)||null,
+    maxRows:24,
+    rows:[],
+    externalRequestsAdded:0,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    watchCapacityChanged:false,
+    telegramMutation:false
+  };
+
   const validationResults =
     [];
 
@@ -114735,6 +114835,17 @@ for (
         Date.now()
       );
 
+    recordIdentityHandoffRuntimeV1136(
+      state,address,candidate?.symbol || null,
+      "CANDIDATE_CONSTRUCTED",
+      {
+        identity:identitySnapshotV1136(candidate?.onChainPoolIdentityV153),
+        validERC20:candidate?.validERC20===true,
+        opportunity:safeNumber(candidate?.opportunity?.score),
+        confidence:safeNumber(candidate?.confidence?.score)
+      }
+    );
+
     const intelligenceCohortSeedV1080 =
       seedIntelligenceCohortFromAnalysedCandidateV1080(
         state,
@@ -114758,6 +114869,16 @@ for (
         reason:intelligenceCohortSeedV1080.reason
       };
     }
+
+    recordIdentityHandoffRuntimeV1136(
+      state,address,candidate?.symbol || null,
+      "AFTER_COHORT_HANDOFF",
+      {
+        identity:identitySnapshotV1136(candidate?.onChainPoolIdentityV153),
+        cohortSeeded:candidate?.intelligenceCohortV1080?.seeded===true,
+        cohortRefreshed:candidate?.intelligenceCohortV1080?.refreshed===true
+      }
+    );
 
     candidates.push(
       candidate
@@ -120050,6 +120171,24 @@ for (
         normalize(candidate?.onChainPoolIdentityV153?.poolId)
     )
   );
+
+  try {
+    const traceRowsV1136=Array.isArray(state?.identityHandoffRuntimeTraceV1136?.rows)
+      ? state.identityHandoffRuntimeTraceV1136.rows : [];
+    for(const traceRow of traceRowsV1136){
+      const token=normalize(traceRow?.address||"");
+      const input=directionalWatchRegistrationCandidatesV555.find(candidate=>normalize(candidate?.address||"")===token)||null;
+      recordIdentityHandoffRuntimeV1136(
+        state,token,traceRow?.symbol||input?.symbol||null,
+        "WATCH_REGISTRATION_INPUT",
+        {
+          present:!!input,
+          identity:identitySnapshotV1136(input?.onChainPoolIdentityV153),
+          registrationCandidateCount:directionalWatchRegistrationCandidatesV555.length
+        }
+      );
+    }
+  } catch (_) {}
 
   const directionalWatchRegistrationV551 =
     registerDirectionalWatchCandidatesV551(
@@ -192561,6 +192700,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-identity-handoff-runtime-status"
+  ) {
+    return jsonResponse(
+      await liveIdentityHandoffRuntimeStatusV1136(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -206606,6 +206754,100 @@ async function liveRegistryCandidateIdentityHandoffStatusV1135(env, url){
       classification:"Separates identity never populated from identity populated then lost, so the following version can change only the proven failing handoff."
     },
     note:"V1135 is diagnostic only. It adds zero provider/RPC requests, performs zero state writes, changes no thresholds, promotion logic, watch capacity, budgets, or Telegram behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1136: read-only view over bounded telemetry captured inside the normal scan.
+// The runtime trace itself is written only as part of the already-existing normal
+// state persistence; this endpoint performs no writes and no external requests.
+async function liveIdentityHandoffRuntimeStatusV1136(env,url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const [stateRead,priority]=await Promise.all([
+    readState(env),
+    livePriorityStatusV1108(env)
+  ]);
+  const state=stateRead?.state||{};
+  const trace=state?.identityHandoffRuntimeTraceV1136&&typeof state.identityHandoffRuntimeTraceV1136==="object"
+    ? state.identityHandoffRuntimeTraceV1136 : null;
+  const priorityRows=Array.isArray(priority?.allCandidates)?priority.allCandidates:[];
+  let rows=Array.isArray(trace?.rows)?trace.rows:[];
+  if(isAddress(requested)) rows=rows.filter(r=>normalize(r?.address||"")===requested);
+
+  const out=[];
+  for(const row of rows){
+    const address=normalize(row?.address||"");
+    if(!isAddress(address)) continue;
+    const p=priorityRows.find(r=>normalize(r?.address||"")===address)||null;
+    const priorityIdentity=p?.exactPoolLiveIdentityV1112||null;
+    const stages=row?.stages&&typeof row.stages==="object"?row.stages:{};
+    const afterRecovery=stages?.AFTER_V153_V742?.identity||null;
+    const constructed=stages?.CANDIDATE_CONSTRUCTED?.identity||null;
+    const afterCohort=stages?.AFTER_COHORT_HANDOFF?.identity||null;
+    const watchInput=stages?.WATCH_REGISTRATION_INPUT||null;
+
+    let classification="TRACE_INCOMPLETE_V1136";
+    let failurePoint="WAIT_FOR_FULL_NORMAL_SCAN_V1136";
+    if(afterRecovery?.verified!==true){
+      classification="IDENTITY_NOT_CREATED_IN_ANALYZE_TOKEN_V1136";
+      failurePoint="V153_V742_RECOVERY";
+    }else if(constructed?.verified!==true){
+      classification="IDENTITY_LOST_DURING_CANDIDATE_CONSTRUCTION_V1136";
+      failurePoint="CANDIDATE_CONSTRUCTION";
+    }else if(afterCohort?.verified!==true){
+      classification="IDENTITY_LOST_DURING_COHORT_HANDOFF_V1136";
+      failurePoint="COHORT_HANDOFF";
+    }else if(watchInput&&watchInput.present!==true){
+      classification="IDENTITY_PRESENT_BUT_NOT_INCLUDED_IN_WATCH_REGISTRATION_INPUT_V1136";
+      failurePoint="DIRECTIONAL_REGISTRATION_CANDIDATE_CONSTRUCTION";
+    }else if(watchInput?.present===true && watchInput?.identity?.verified!==true){
+      classification="IDENTITY_STRIPPED_BEFORE_WATCH_REGISTRATION_V1136";
+      failurePoint="WATCH_REGISTRATION_INPUT_IDENTITY";
+    }else if(watchInput?.present===true && watchInput?.identity?.verified===true){
+      classification="IDENTITY_REACHES_WATCH_REGISTRATION_INPUT_V1136";
+      failurePoint=null;
+    }
+
+    out.push({
+      address,symbol:row?.symbol||p?.symbol||null,
+      classification,failurePoint,
+      runtimeStages:stages,
+      finalPriorityCandidate:{
+        present:!!p,
+        exactPoolIdentity:identitySnapshotV1136(priorityIdentity),
+        rank:p?.rank??null,
+        promote:p?.promote===true,
+        activeInFastLane:p?.activeInFastLane===true
+      },
+      finalPriorityDivergence:Boolean(
+        afterCohort?.verified===true && identitySnapshotV1136(priorityIdentity)?.verified!==true
+      )
+    });
+  }
+
+  const counts={};
+  for(const row of out) counts[row.classification]=(counts[row.classification]||0)+1;
+  return {
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_IDENTITY_HANDOFF_RUNTIME_STATUS_V1136",
+    success:out.length>0,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,
+    externalProviderRequestsAdded:0,diagnosticStateWritesAdded:0,
+    runtimeTelemetryPiggybacksExistingScanStateSave:true,
+    requestedToken:isAddress(requested)?requested:null,
+    status:out.length?"RUNTIME_IDENTITY_HANDOFF_CLASSIFIED_V1136":"NO_V1136_RUNTIME_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
+    trace:{scanStartedAt:trace?.scanStartedAt||null,latestNumber:trace?.latestNumber||null,rowsCaptured:rows.length,maxRows:trace?.maxRows||24},
+    summary:{statusCounts:counts,priorityDivergences:out.filter(r=>r.finalPriorityDivergence).length},
+    candidates:out,
+    interpretation:{
+      afterRecovery:"Shows the identity returned by the real V153/V742 path inside analyzeToken during the normal scan.",
+      candidateConstructed:"Confirms whether that same identity survives candidate construction.",
+      cohortHandoff:"Confirms whether the candidate still owns the identity after the durable-cohort seed/analysis handoff.",
+      watchRegistrationInput:"Confirms whether that exact candidate reaches directionalWatchRegistrationCandidatesV555 with its identity intact.",
+      finalPriority:"Read-only comparison against the current persisted priority projection; it is not used to alter routing."
+    },
+    note:"V1136 adds bounded runtime telemetry only. It does not add provider/RPC requests, change thresholds, promotion rules, watch capacity, scoring, or Telegram behavior.",
     timestamp:now()
   };
 }
