@@ -9727,7 +9727,16 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1139"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1140"; // display-only; legacy VERSION remains untouched for scanner compatibility
+
+/*
+ * V1140 — EXACT-POOL FLOW COLLECTION SELECTION DIAGNOSTIC
+ * - Adds bounded, zero-request telemetry showing why a verified directional-watch pool
+ *   did or did not receive an existing V551 collection range during the normal scan.
+ * - Captures eligibility, V567 priority tier, selected chunks, budget/reserve state,
+ *   collection status, successfulRanges and exactUsdTrades without changing routing.
+ * - No request ceilings, watch capacity, scoring, promotion, risk or Telegram behavior changes.
+ */
 
 /*
  * V1139 — GUARDED PROMOTION-EVIDENCE COHORT ADMISSION
@@ -122975,6 +122984,115 @@ for (
       scheduled
     );
 
+  /* V1140: bounded diagnostic snapshot of the existing V551 exact-pool flow collector.
+   * This is assembled after collection work has already run and piggybacks on the
+   * existing normal state write below. It performs no provider/RPC calls and does
+   * not alter selection, budgets, watch capacity, scoring or promotion. */
+  try {
+    const watchRootV1140 = directionalWatchRootV551(state);
+    const watchRowsV1140 = Object.values(watchRootV1140?.entries || {})
+      .filter(row => row && typeof row === "object")
+      .map(row => {
+        const poolId = normalize(row?.poolId);
+        const lastCollectedBlock = Number(row?.lastCollectedBlock);
+        const head = Number(latestNumber);
+        const chunkRows = (Array.isArray(directionalCatchupChunksV554)
+          ? directionalCatchupChunksV554 : [])
+          .filter(chunk => normalize(chunk?.selectedPoolId) === poolId)
+          .map(chunk => ({
+            attempted:chunk?.attempted === true,
+            requestConsumed:chunk?.requestConsumed === true,
+            fromBlock:Number.isFinite(Number(chunk?.fromBlock)) ? Number(chunk.fromBlock) : null,
+            toBlock:Number.isFinite(Number(chunk?.toBlock)) ? Number(chunk.toBlock) : null,
+            returnedLogs:safeNumber(chunk?.returnedLogs),
+            exactUsdTrades:safeNumber(chunk?.exactUsdTrades),
+            coverageAdvanced:chunk?.coverageAdvanced === true,
+            rangeSaturated:chunk?.rangeSaturated === true,
+            blocksRemainingToHead:Number.isFinite(Number(chunk?.blocksRemainingToHead)) ? Number(chunk.blocksRemainingToHead) : null,
+            status:chunk?.status || null,
+            error:chunk?.error || null
+          }));
+        return {
+          tokenAddress:normalize(row?.tokenAddress),
+          symbol:row?.symbol || null,
+          poolId,
+          quoteTokenAddress:normalize(row?.quoteTokenAddress) || null,
+          registrationSourceV552:row?.registrationSourceV552 || null,
+          registeredAt:safeNumber(row?.registeredAt) || null,
+          lastQualifiedAt:safeNumber(row?.lastQualifiedAt) || null,
+          lastCollectedBlock:Number.isFinite(lastCollectedBlock) ? lastCollectedBlock : null,
+          lastCollectedAt:safeNumber(row?.lastCollectedAt) || null,
+          latestNumber:Number.isFinite(head) ? head : null,
+          blocksBehind:Number.isFinite(head) && Number.isFinite(lastCollectedBlock) ? Math.max(0,head-lastCollectedBlock) : null,
+          eligibleForAdvance:Number.isFinite(head) && Number.isFinite(lastCollectedBlock) && lastCollectedBlock < head,
+          selectionPriorityTierV567:directionalWatchPriorityTierV567(row),
+          firstRangePriorityV744:directionalWatchNeedsRawFirstRangePriorityV744(row),
+          priorCompletionCatchupV578:directionalWatchNeedsPriorCompletionCatchupV578(row,latestNumber),
+          expansionReadyV567:directionalWatchExpansionReadyV567(row),
+          activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
+          recentExactPoolSeedV556:row?.recentExactPoolSeedV556 === true,
+          zeroActivityDeprioritisedV555:row?.zeroActivityDeprioritisedV555 === true,
+          successfulRanges:safeNumber(row?.successfulRanges),
+          exactUsdTrades:safeNumber(row?.exactUsdTrades),
+          lastStatus:row?.lastStatus || null,
+          selectedThisScan:chunkRows.length > 0,
+          chunks:chunkRows
+        };
+      })
+      .sort((a,b) => {
+        const selectedDelta = Number(b?.selectedThisScan === true) - Number(a?.selectedThisScan === true);
+        if (selectedDelta !== 0) return selectedDelta;
+        const tierDelta = safeNumber(b?.selectionPriorityTierV567) - safeNumber(a?.selectionPriorityTierV567);
+        if (tierDelta !== 0) return tierDelta;
+        return safeNumber(b?.lastQualifiedAt) - safeNumber(a?.lastQualifiedAt);
+      })
+      .slice(0,DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
+
+    state.exactPoolFlowCollectionTraceV1140 = {
+      schema:"EXACT_POOL_FLOW_COLLECTION_TRACE_V1140",
+      scanStartedAt:safeNumber(state?.identityHandoffRuntimeTraceV1136?.scanStartedAt) || null,
+      capturedAt:Date.now(),
+      latestNumber:safeNumber(latestNumber) || null,
+      watchCount:Object.keys(watchRootV1140?.entries || {}).length,
+      maxWatchEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+      maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
+      chunksAttempted:Array.isArray(directionalCatchupChunksV554) ? directionalCatchupChunksV554.length : 0,
+      requestsConsumed:Array.isArray(directionalCatchupChunksV554)
+        ? directionalCatchupChunksV554.filter(row => row?.requestConsumed === true).length : 0,
+      stopReason:directionalCatchupStopReasonV554 || null,
+      reserve:{
+        enabled:directionalWatchReserveV553?.enabled === true,
+        reservedRequests:safeNumber(directionalWatchReserveV553?.reservedRequests),
+        minimumGuaranteedRequests:safeNumber(directionalWatchReserveV553?.minimumGuaranteedRequestsV559),
+        behindPoolCount:safeNumber(directionalWatchReserveV553?.behindPoolCountV559),
+        releaseReason:directionalWatchReserveResultV553?.releaseReason || directionalWatchReserveResultV553?.reason || null
+      },
+      rows:watchRowsV1140,
+      externalRequestsAdded:0,
+      extraCollectionSlotsAdded:0,
+      requestCeilingsChanged:false,
+      watchCapacityChanged:false,
+      scoringChanged:false,
+      promotionRulesChanged:false,
+      telegramMutation:false
+    };
+  } catch (errorV1140) {
+    state.exactPoolFlowCollectionTraceV1140 = {
+      schema:"EXACT_POOL_FLOW_COLLECTION_TRACE_V1140",
+      capturedAt:Date.now(),
+      latestNumber:safeNumber(latestNumber) || null,
+      error:errorString(errorV1140),
+      rows:[],
+      externalRequestsAdded:0,
+      extraCollectionSlotsAdded:0,
+      requestCeilingsChanged:false,
+      watchCapacityChanged:false,
+      scoringChanged:false,
+      promotionRulesChanged:false,
+      telegramMutation:false
+    };
+  }
+
   /* V1076: forward-only compact D1 market-history snapshots.
    * Uses only evidence already present on analysed candidates.
    * Adds zero provider/RPC requests and does not mutate candidate evidence. */
@@ -192998,6 +193116,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-exact-pool-flow-collection-status"
+  ) {
+    return jsonResponse(
+      await liveExactPoolFlowCollectionStatusV1140(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -207192,6 +207319,86 @@ async function liveIdentityHandoffRuntimeStatusV1136(env,url){
       finalPriority:"Read-only comparison against the current persisted priority projection; it is not used to alter routing."
     },
     note:"V1136 adds bounded runtime telemetry only. It does not add provider/RPC requests, change thresholds, promotion rules, watch capacity, scoring, or Telegram behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1140: read-only classification of the existing V551 exact-pool flow collector.
+// Uses only the bounded snapshot persisted by the normal scan; no external requests or writes.
+async function liveExactPoolFlowCollectionStatusV1140(env,url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const trace=state?.exactPoolFlowCollectionTraceV1140&&typeof state.exactPoolFlowCollectionTraceV1140==="object"
+    ? state.exactPoolFlowCollectionTraceV1140 : null;
+  let rows=Array.isArray(trace?.rows)?trace.rows:[];
+  if(isAddress(requested)) rows=rows.filter(row=>normalize(row?.tokenAddress)===requested);
+
+  const classified=rows.map(row=>{
+    let classification="WATCH_REGISTERED_WAITING_FOR_COLLECTION_V1140";
+    let nextAction="ALLOW_EXISTING_V551_SCHEDULER_TO_ADVANCE_V1140";
+    if(row?.selectedThisScan===true){
+      const chunks=Array.isArray(row?.chunks)?row.chunks:[];
+      const advanced=chunks.some(chunk=>chunk?.coverageAdvanced===true);
+      const consumed=chunks.some(chunk=>chunk?.requestConsumed===true);
+      const exactUsd=safeNumber(row?.exactUsdTrades)>0 || chunks.some(chunk=>safeNumber(chunk?.exactUsdTrades)>0);
+      if(advanced && exactUsd){
+        classification="FLOW_COLLECTION_ADVANCED_WITH_EXACT_USD_V1140";
+        nextAction="NO_COLLECTION_ROUTING_FIX_REQUIRED_V1140";
+      }else if(advanced){
+        classification="FLOW_RANGE_ADVANCED_NO_EXACT_USD_TRADES_V1140";
+        nextAction="WAIT_FOR_MATERIAL_EXACT_POOL_ACTIVITY_V1140";
+      }else if(consumed){
+        classification="FLOW_COLLECTION_REQUEST_CONSUMED_NO_ADVANCE_V1140";
+        nextAction="INSPECT_CHUNK_STATUS_OR_DECODE_PATH_V1140";
+      }else{
+        classification="SELECTED_FOR_FLOW_COLLECTION_WITHOUT_REQUEST_V1140";
+        nextAction="INSPECT_EXISTING_ANALYSIS_BUDGET_RESERVE_V1140";
+      }
+    }else if(row?.eligibleForAdvance!==true){
+      classification="WATCH_NOT_BEHIND_HEAD_V1140";
+      nextAction="NO_RANGE_CURRENTLY_NEEDS_COLLECTION_V1140";
+    }else if(safeNumber(row?.successfulRanges)>0){
+      classification="FLOW_WATCH_HAS_PRIOR_SUCCESS_WAITING_TURN_V1140";
+      nextAction="NORMAL_MULTI_POOL_ROTATION_V1140";
+    }else if(safeNumber(row?.selectionPriorityTierV567)>=4){
+      classification="ZERO_RANGE_HIGH_PRIORITY_WATCH_NOT_SELECTED_THIS_SCAN_V1140";
+      nextAction="COMPARE_HIGHER_OR_EQUAL_PRIORITY_COMPETITORS_V1140";
+    }else{
+      classification="ZERO_RANGE_WATCH_WAITING_SCHEDULER_TURN_V1140";
+      nextAction="COMPARE_CURRENT_V567_PRIORITY_AND_CAPACITY_V1140";
+    }
+    return {...row,classification,nextAction};
+  });
+
+  const counts={};
+  for(const row of classified) counts[row.classification]=(counts[row.classification]||0)+1;
+  const selected=classified.filter(row=>row?.selectedThisScan===true);
+  const zeroRange=classified.filter(row=>safeNumber(row?.successfulRanges)===0);
+  return {
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_EXACT_POOL_FLOW_COLLECTION_STATUS_V1140",
+    success:Boolean(trace),readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,
+    externalProviderRequestsAdded:0,extraCollectionSlotsAdded:0,requestCeilingsChanged:false,watchCapacityChanged:false,
+    requestedToken:isAddress(requested)?requested:null,
+    status:trace?"EXACT_POOL_FLOW_COLLECTION_CLASSIFIED_V1140":"NO_V1140_FLOW_COLLECTION_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
+    trace:trace?{
+      scanStartedAt:trace?.scanStartedAt||null,capturedAt:trace?.capturedAt||null,latestNumber:trace?.latestNumber||null,
+      watchCount:safeNumber(trace?.watchCount),maxWatchEntries:safeNumber(trace?.maxWatchEntries),
+      maxChunksPerScan:safeNumber(trace?.maxChunksPerScan),chunksAttempted:safeNumber(trace?.chunksAttempted),
+      requestsConsumed:safeNumber(trace?.requestsConsumed),stopReason:trace?.stopReason||null,reserve:trace?.reserve||null
+    }:{scanStartedAt:null,capturedAt:null,latestNumber:null,watchCount:0,maxWatchEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,chunksAttempted:0,requestsConsumed:0,stopReason:null,reserve:null},
+    summary:{statusCounts:counts,rowsReturned:classified.length,selectedThisScan:selected.length,zeroSuccessfulRangeWatches:zeroRange.length},
+    candidates:classified,
+    interpretation:{
+      eligible:"eligibleForAdvance means the watch has a valid lastCollectedBlock below the current scan head; it does not guarantee selection because V551 rotates across watched pools.",
+      priority:"selectionPriorityTierV567 is the existing collector priority. V1140 does not modify it.",
+      selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
+      zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
+    },
+    note:"V1140 is diagnostic only. It adds no provider/RPC requests or collection slots and changes no watch capacity, budgets, scoring, promotion, risk, or Telegram behavior.",
     timestamp:now()
   };
 }
