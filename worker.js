@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1091
+ * COHORT EXACT-POOL WATCH RETENTION FIX
+ * Builds directly from deployed V1090.
+ * - Live evidence now proves cohort admission works and CATSTRO passed every
+ *   V1088 exact-pool handoff gate, yet no watch survived in state.
+ * - Root cause: the bounded 24-entry directional watch can immediately prune
+ *   a newly registered zero-history cohort watch behind older higher-tier rows.
+ * - Reserves ONE slot inside the existing 24-entry watch cap for the freshest
+ *   verified cohort exact-pool handoff. This does not increase the watch cap,
+ *   RPC budget, request ceiling, or collection frequency.
+ * - Existing four raw-watch reserve slots remain intact. Unused cohort reserve
+ *   capacity flows back to the normal watch population.
+ * - Adds prune telemetry so /cohort-flow-status can prove whether the cohort
+ *   watch survived capacity retention.
+ * - No scoring, qualification, Telegram, or historical-backfill changes.
+ */
+
+/**
  * ChainVanta — V1090
  * COHORT ADMISSION BLOCKER DIAGNOSTIC
  * Builds directly from deployed V1089.
@@ -9213,7 +9231,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1090"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1091"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -15937,6 +15955,7 @@ const NATIVE_V3_SWEEP_REQUEST_RESERVE_V331 = 2;
  */
 const DIRECTIONAL_WATCH_MAX_ENTRIES_V551 = 24;
 const DIRECTIONAL_WATCH_RAW_RESERVE_V743 = 4;
+const DIRECTIONAL_WATCH_COHORT_RESERVE_V1091 = 1;
 const DIRECTIONAL_WATCH_MAX_AGE_MS_V551 = 48 * 60 * 60 * 1000;
 const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_TOKEN_V573 = 2;
 const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_SCAN_V573 = 8;
@@ -89428,24 +89447,63 @@ function pruneDirectionalWatchV551(state) {
   const rawEligibleRowsV743 = eligibleRows
     .filter(row => row?.rawOnlyV740 === true)
     .sort(retentionCompareV743);
-  const standardEligibleRowsV743 = eligibleRows
-    .filter(row => row?.rawOnlyV740 !== true)
-    .sort(retentionCompareV743);
+
+  const cohortEligibleRowsV1091 = eligibleRows
+    .filter(
+      row =>
+        row?.rawOnlyV740 !== true &&
+        row?.cohortExactPoolHandoffV1087?.verified === true
+    )
+    .sort((a,b) =>
+      safeNumber(b?.lastQualifiedAt || b?.registeredAt) -
+      safeNumber(a?.lastQualifiedAt || a?.registeredAt)
+    );
+
   const reservedRawRowsV743 = rawEligibleRowsV743.slice(
     0,
-    Math.min(DIRECTIONAL_WATCH_RAW_RESERVE_V743, DIRECTIONAL_WATCH_MAX_ENTRIES_V551)
+    Math.min(
+      DIRECTIONAL_WATCH_RAW_RESERVE_V743,
+      DIRECTIONAL_WATCH_MAX_ENTRIES_V551
+    )
   );
-  const remainingCapacityV743 = Math.max(
+
+  const capacityAfterRawV1091 = Math.max(
     0,
     DIRECTIONAL_WATCH_MAX_ENTRIES_V551 - reservedRawRowsV743.length
   );
-  const remainingCandidatesV743 = [
-    ...standardEligibleRowsV743,
-    ...rawEligibleRowsV743.slice(reservedRawRowsV743.length)
-  ].sort(retentionCompareV743);
+
+  const reservedCohortRowsV1091 = cohortEligibleRowsV1091.slice(
+    0,
+    Math.min(
+      DIRECTIONAL_WATCH_COHORT_RESERVE_V1091,
+      capacityAfterRawV1091
+    )
+  );
+
+  const reservedKeysV1091 = new Set(
+    [...reservedRawRowsV743, ...reservedCohortRowsV1091]
+      .map(row => directionalWatchKeyV563(row?.tokenAddress,row?.poolId))
+      .filter(Boolean)
+  );
+
+  const remainingCapacityV1091 = Math.max(
+    0,
+    DIRECTIONAL_WATCH_MAX_ENTRIES_V551 -
+      reservedRawRowsV743.length -
+      reservedCohortRowsV1091.length
+  );
+
+  const remainingCandidatesV1091 = eligibleRows
+    .filter(row => {
+      const key = directionalWatchKeyV563(row?.tokenAddress,row?.poolId);
+      return key && !reservedKeysV1091.has(key);
+    })
+    .sort(retentionCompareV743);
+
   const rows = [
     ...reservedRawRowsV743,
-    ...remainingCandidatesV743.slice(0, remainingCapacityV743)
+    ...reservedCohortRowsV1091,
+    ...remainingCandidatesV1091.slice(0, remainingCapacityV1091)
   ];
 
   const keptKeys = new Set(
@@ -89464,7 +89522,8 @@ function pruneDirectionalWatchV551(state) {
       recordRawWatchRemovalV753(state, row, "PRUNED_CAPACITY_V743", {
         lifecycleBranch:"PRUNE_DIRECTIONAL_WATCH_V551",
         maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
-        rawReserveSlots:DIRECTIONAL_WATCH_RAW_RESERVE_V743
+        rawReserveSlots:DIRECTIONAL_WATCH_RAW_RESERVE_V743,
+        cohortReserveSlotsV1091:DIRECTIONAL_WATCH_COHORT_RESERVE_V1091
       });
     }
   }
@@ -89499,8 +89558,13 @@ function pruneDirectionalWatchV551(state) {
     at: now,
     maxEntries: DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
     rawReserveV743: DIRECTIONAL_WATCH_RAW_RESERVE_V743,
+    cohortReserveV1091:DIRECTIONAL_WATCH_COHORT_RESERVE_V1091,
     reservedRawKeptV743: rows.filter(row => row?.rawOnlyV740 === true).length,
+    reservedCohortKeptV1091:rows.filter(
+      row => row?.cohortExactPoolHandoffV1087?.verified === true
+    ).length,
     rawEligibleV743: rawEligibleRowsV743.length,
+    cohortEligibleV1091:cohortEligibleRowsV1091.length,
     beforeCount: beforeRows.length,
     eligibleCount: eligibleRows.length,
     keptCount: rows.length,
@@ -187062,7 +187126,7 @@ async function cohortFlowStatusV1085(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1089",
+    diagnostic:"COHORT_FLOW_COVERAGE_V1085_V1091",
     success:false,
     readOnly:true,
     externalRequestsUsed:0,
@@ -187174,17 +187238,27 @@ async function cohortFlowStatusV1085(env) {
     return {
       ...base,
       success:true,
-      status:"COHORT_FLOW_COVERAGE_OK_V1089",
+      status:"COHORT_FLOW_COVERAGE_OK_V1091",
       lastCohortExactPoolHandoffV1088:
         cohort?.lastCohortExactPoolHandoffV1088 ||
         state?.lastCohortExactPoolHandoffV1088 ||
         null,
       handoffDiagnosticPersistedAtV1089:
         cohort?.lastHandoffDiagnosticPersistedAtV1089 || null,
+      directionalWatchRetentionV1091:{
+        maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+        rawReserve:DIRECTIONAL_WATCH_RAW_RESERVE_V743,
+        cohortReserve:DIRECTIONAL_WATCH_COHORT_RESERVE_V1091,
+        watchedCount:Object.keys(
+          directionalWatchRootV551(state)?.entries || {}
+        ).length,
+        lastPrune:
+          directionalWatchRootV551(state)?.lastPruneV565 || null
+      },
       verifiedFlowTokens:tokens.filter(t => t.flowVerified).length,
       missingVerifiedFlowTokens:tokens.filter(t => !t.flowVerified).length,
       tokens,
-      note:"Read-only D1 + directional-watch state + V1089 durable cohort handoff diagnostic. No provider or RPC calls are made by this endpoint.",
+      note:"Read-only D1 + directional-watch state + V1091 bounded cohort-watch retention telemetry. No provider or RPC calls are made by this endpoint.",
       timestamp:now()
     };
   } catch (error) {
