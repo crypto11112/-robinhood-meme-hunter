@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1131"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1132"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -192521,6 +192521,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     );
   }
 
+
+  if (
+    path ===
+      "/live-promotion-evidence-provenance-status"
+  ) {
+    return jsonResponse(
+      await livePromotionEvidenceProvenanceStatusV1132(env, url)
+    );
+  }
+
   if (
     path ===
       "/live-decision-observer-start"
@@ -205812,6 +205822,214 @@ async function livePromotionEvidenceCompletionStatusV1131(env, url){
       promotionHandoff:"Compares the underlying model/state readiness with the flags received by the promotion diagnostic so hidden handoff mismatches are visible."
     },
     note:"V1131 is diagnostic only. It adds zero external provider/RPC requests, changes no thresholds, does not auto-promote tokens, and does not mutate Telegram or production behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1132: read-only evidence provenance / bootstrap diagnostic.
+// Explains whether market snapshots are truly repeating or change flags are
+// failing, and whether verified flow exists before promotion for candidates
+// that already have an exact pool. No provider/RPC calls and no behavior change.
+async function livePromotionEvidenceProvenanceStatusV1132(env, url){
+  const completion=await livePromotionEvidenceCompletionStatusV1131(env,url);
+  const requested=normalize(url?.searchParams?.get("token"));
+  const source=Array.isArray(completion?.candidates)?completion.candidates:[];
+  const selected=isAddress(requested)
+    ? source.filter(r=>normalize(r?.address)===requested)
+    : source.slice(0,4);
+
+  const base={
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_PROMOTION_EVIDENCE_PROVENANCE_STATUS_V1132",
+    success:true,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    requestedToken:isAddress(requested)?requested:null,
+    candidatesRequested:selected.length
+  };
+
+  if(!selected.length){
+    return {...base,success:false,status:"NO_CANDIDATES_TO_TRACE_V1132",candidates:[],timestamp:now()};
+  }
+
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const results=[];
+  const relChanged=(a,b)=>{
+    const x=finiteOrNullV1076(a), y=finiteOrNullV1076(b);
+    if(x===null||y===null||x<=0||y<=0) return false;
+    return Math.abs(y-x)/x>=0.000001;
+  };
+
+  for(const c of selected){
+    const address=normalize(c?.address);
+    if(!isAddress(address)) continue;
+    const hist=await accumulationRowsForAddressV1078(env,address,288);
+    const rows=(Array.isArray(hist?.rows)?hist.rows:[])
+      .filter(r=>normalize(r?.address)===address)
+      .sort((a,b)=>safeNumber(a?.captured_at)-safeNumber(b?.captured_at));
+    const recent=rows.slice(-12);
+    const exactPool=priorityLiveExactPoolIdentityV1112(state,address);
+    const exactPoolAvailable=!!(exactPool?.verified===true||exactPool?.poolId||exactPool?.pool_id);
+
+    const providerRows=rows.filter(r=>
+      Number(r?.market_verified)===1 &&
+      finiteOrNullV1076(r?.price_usd)!==null &&
+      finiteOrNullV1076(r?.price_usd)>0
+    );
+    let derivedProviderChanges=0;
+    for(let i=1;i<providerRows.length;i++){
+      if(relChanged(providerRows[i-1]?.price_usd,providerRows[i]?.price_usd)) derivedProviderChanges++;
+    }
+    const providerDistinct=[...new Set(providerRows.map(r=>{
+      const n=finiteOrNullV1076(r?.price_usd);
+      return n===null?null:Number(n.toPrecision(12));
+    }).filter(v=>v!==null))];
+    const flaggedProviderChanges=providerRows.filter(r=>Number(r?.market_snapshot_changed)===1).length;
+
+    const onchainRows=rows.filter(r=>
+      Number(r?.onchain_price_verified)===1 &&
+      finiteOrNullV1076(r?.onchain_price_usd)!==null &&
+      finiteOrNullV1076(r?.onchain_price_usd)>0
+    );
+    let derivedOnchainChanges=0;
+    for(let i=1;i<onchainRows.length;i++){
+      if(relChanged(onchainRows[i-1]?.onchain_price_usd,onchainRows[i]?.onchain_price_usd)) derivedOnchainChanges++;
+    }
+    const flaggedOnchainChanges=onchainRows.filter(r=>Number(r?.onchain_price_snapshot_changed)===1).length;
+
+    let marketAssessment="MARKET_PROVENANCE_INSUFFICIENT_V1132";
+    if(providerRows.length>=2 && providerDistinct.length===1)
+      marketAssessment="VERIFIED_PROVIDER_PRICE_REPEATED_IDENTICALLY_V1132";
+    else if(derivedProviderChanges>0 && flaggedProviderChanges===0)
+      marketAssessment="PROVIDER_CHANGE_FLAG_MISMATCH_SUSPECTED_V1132";
+    else if(flaggedProviderChanges>0 || flaggedOnchainChanges>0)
+      marketAssessment="CHANGED_PRICE_EVIDENCE_PRESENT_V1132";
+    else if(providerRows.length>=2)
+      marketAssessment="NO_MATERIAL_PROVIDER_PRICE_CHANGE_OBSERVED_V1132";
+
+    const verifiedFlow=rows.filter(r=>Number(r?.flow_verified)===1);
+    const usableFlow=verifiedFlow.filter(r=>{
+      const t=finiteOrNullV1076(r?.flow_1h_trades);
+      const b=finiteOrNullV1076(r?.flow_1h_buy_usd);
+      const sl=finiteOrNullV1076(r?.flow_1h_sell_usd);
+      return t!==null&&t>0&&b!==null&&sl!==null;
+    });
+    const flowStatuses=[...new Set(rows.map(r=>r?.flow_status||null).filter(Boolean))];
+    const flowSources=[...new Set(rows.map(r=>r?.flow_source||null).filter(Boolean))];
+    const medianTrades=medianV1092(usableFlow.map(r=>finiteOrNullV1076(r?.flow_1h_trades)));
+    const medianGross=medianV1092(usableFlow.map(r=>{
+      const b=finiteOrNullV1076(r?.flow_1h_buy_usd);
+      const sl=finiteOrNullV1076(r?.flow_1h_sell_usd);
+      return b===null||sl===null?null:b+sl;
+    }));
+
+    let flowAssessment="FLOW_PROVENANCE_INSUFFICIENT_V1132";
+    if(verifiedFlow.length===0 && exactPoolAvailable)
+      flowAssessment="EXACT_POOL_PRESENT_BUT_NO_PERSISTED_VERIFIED_FLOW_V1132";
+    else if(verifiedFlow.length===0)
+      flowAssessment="NO_PERSISTED_VERIFIED_FLOW_V1132";
+    else if((medianTrades??0)<FLOW_ACCUM_MIN_MEDIAN_TRADES_V1093 || (medianGross??0)<FLOW_ACCUM_MIN_MEDIAN_GROSS_USD_V1093)
+      flowAssessment="VERIFIED_FLOW_PRESENT_BUT_BELOW_MATERIALITY_V1132";
+    else
+      flowAssessment="VERIFIED_MATERIAL_FLOW_PRESENT_V1132";
+
+    const possibleBootstrapGap=
+      exactPoolAvailable && verifiedFlow.length===0 && c?.flowEvidence?.ready!==true;
+
+    results.push({
+      address,
+      symbol:c?.symbol||null,
+      rank:c?.rank??null,
+      storedObservations:c?.storedObservations??rows.length,
+      exactPoolIdentity:{
+        available:exactPoolAvailable,
+        verified:exactPool?.verified===true,
+        poolId:exactPool?.poolId||exactPool?.pool_id||null,
+        source:exactPool?.source||exactPool?.status||null
+      },
+      marketProvenance:{
+        assessment:marketAssessment,
+        providerVerifiedRows:providerRows.length,
+        providerDistinctPriceCount:providerDistinct.length,
+        flaggedProviderChanges,
+        derivedProviderChanges,
+        onchainVerifiedRows:onchainRows.length,
+        flaggedOnchainChanges,
+        derivedOnchainChanges,
+        recentRows:recent.map(r=>({
+          capturedAt:safeNumber(r?.captured_at)||null,
+          marketVerified:Number(r?.market_verified)===1,
+          marketSource:r?.market_source||null,
+          marketEvidenceMode:r?.market_evidence_mode||null,
+          priceUsd:finiteOrNullV1076(r?.price_usd),
+          marketSnapshotChanged:r?.market_snapshot_changed===null||r?.market_snapshot_changed===undefined?null:Number(r.market_snapshot_changed)===1,
+          onchainPriceVerified:Number(r?.onchain_price_verified)===1,
+          onchainPriceUsd:finiteOrNullV1076(r?.onchain_price_usd),
+          onchainObservedAt:safeNumber(r?.onchain_price_observed_at)||null,
+          onchainSnapshotChanged:r?.onchain_price_snapshot_changed===null||r?.onchain_price_snapshot_changed===undefined?null:Number(r.onchain_price_snapshot_changed)===1
+        }))
+      },
+      flowBootstrap:{
+        assessment:flowAssessment,
+        exactPoolCurrentlyAvailable:exactPoolAvailable,
+        verifiedFlowRows:verifiedFlow.length,
+        usable1hFlowRows:usableFlow.length,
+        medianTrades,
+        medianGrossUsd:medianGross,
+        observedFlowSources:flowSources,
+        observedFlowStatuses:flowStatuses,
+        possiblePrePromotionBootstrapGap:possibleBootstrapGap,
+        circularDependencyProven:false,
+        runtimeTraceNeeded:possibleBootstrapGap,
+        recentRows:recent.map(r=>({
+          capturedAt:safeNumber(r?.captured_at)||null,
+          flowVerified:Number(r?.flow_verified)===1,
+          flowSource:r?.flow_source||null,
+          flowStatus:r?.flow_status||null,
+          flowRecordCount:safeNumber(r?.flow_record_count),
+          flowPoolCount:safeNumber(r?.flow_pool_count),
+          trades1h:finiteOrNullV1076(r?.flow_1h_trades),
+          buyUsd1h:finiteOrNullV1076(r?.flow_1h_buy_usd),
+          sellUsd1h:finiteOrNullV1076(r?.flow_1h_sell_usd),
+          netUsd1h:finiteOrNullV1076(r?.flow_1h_net_usd)
+        }))
+      },
+      conclusion:{
+        market:marketAssessment,
+        flow:flowAssessment,
+        nextAction:possibleBootstrapGap
+          ? "TRACE_PRE_PROMOTION_FLOW_COLLECTOR_REACHABILITY_V1132"
+          : marketAssessment==="PROVIDER_CHANGE_FLAG_MISMATCH_SUSPECTED_V1132"
+            ? "TRACE_MARKET_CHANGE_FLAG_COMPARISON_V1132"
+            : flowAssessment==="VERIFIED_FLOW_PRESENT_BUT_BELOW_MATERIALITY_V1132"
+              ? "NO_THRESHOLD_CHANGE_WAIT_FOR_GENUINE_ACTIVITY_V1132"
+              : "REVIEW_PROVENANCE_ROWS_V1132"
+      }
+    });
+  }
+
+  const bootstrapSuspects=results.filter(r=>r?.flowBootstrap?.possiblePrePromotionBootstrapGap===true).length;
+  const flagMismatchSuspects=results.filter(r=>r?.marketProvenance?.assessment==="PROVIDER_CHANGE_FLAG_MISMATCH_SUSPECTED_V1132").length;
+  return {
+    ...base,
+    success:results.length>0,
+    status:bootstrapSuspects>0?"PRE_PROMOTION_FLOW_BOOTSTRAP_TRACE_NEEDED_V1132":flagMismatchSuspects>0?"MARKET_CHANGE_FLAG_TRACE_NEEDED_V1132":"PROVENANCE_CLASSIFIED_V1132",
+    summary:{bootstrapSuspects,marketChangeFlagMismatchSuspects:flagMismatchSuspects},
+    candidates:results,
+    interpretation:{
+      market:"Compares persisted verified prices directly as well as the stored snapshot-changed flags, so true repeated prices can be separated from a change-flag mismatch.",
+      flow:"Shows whether verified flow was already persisted before promotion and exposes the persisted flow source/status for each recent observation.",
+      bootstrap:"possiblePrePromotionBootstrapGap is diagnostic suspicion only; V1132 does not claim a circular dependency until runtime reachability is proven."
+    },
+    note:"V1132 is read-only. It adds zero external provider/RPC requests, changes no thresholds, does not alter promotion, and does not mutate Telegram or production behavior.",
     timestamp:now()
   };
 }
