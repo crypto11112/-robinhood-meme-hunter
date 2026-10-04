@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1116
+ * COMBINED LIVE ENTRY / HOLD / CAUTION / EXIT DECISION — SHADOW V1
+ * Builds directly from deployed V1115.
+ * - Combines the proven max-3 priority-live evidence into one conservative shadow decision.
+ * - Uses exact-pool RPC BUY/SELL USD flow as the primary fast trading signal.
+ * - Adds verified holder gain/loss, seeded/touched large-wallet direction, existing
+ *   accumulation/breakout/entry-quality context and available price/liquidity health.
+ * - Materiality guards prevent tiny flow or one weak observation becoming ENTRY_READY.
+ * - Hard safety, longitudinal distribution, negative-price and anti-chase blockers can
+ *   never produce a bullish decision. Strong corroborated selling can become EXIT_RISK.
+ * - States are BUILDING_EVIDENCE, ENTRY_FORMING, ENTRY_READY, HOLD, CAUTION, EXIT_RISK.
+ * - Every decision exposes evidence coverage, bullish/bearish pillars and human-readable reasons.
+ * - Controlled-test tokens can exercise the exact same decision math but can never become
+ *   a production action or Telegram call.
+ * - No production Telegram/scoring/qualification/payment changes and no new external requests.
+ */
+
+/**
  * ChainVanta — V1115
  * HOLDER ANCHOR INTEGRITY + PERIODIC BLOCKSCOUT RECONCILIATION — SHADOW V1
  * Builds directly from deployed V1114.
@@ -9663,7 +9681,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1115"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1116"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -195530,6 +195548,120 @@ const PRIORITY_LIVE_BLOCKSCOUT_DEFAULT_DAILY_CREDITS_V1115 = 10000;
 const PRIORITY_LIVE_BLOCKSCOUT_CREDITS_PER_REQUEST_V1115 = 20;
 const PRIORITY_LIVE_BLOCKSCOUT_MAX_SEED_WALLETS_V1115 = 10;
 
+
+// V1116 combined decision layer. This is deliberately downstream of all existing
+// evidence collectors and adds no provider/RPC requests of its own.
+const PRIORITY_LIVE_DECISION_MIN_ENTRY_TRADES_V1116 = 5;
+const PRIORITY_LIVE_DECISION_MIN_ENTRY_GROSS_USD_V1116 = 250;
+const PRIORITY_LIVE_DECISION_MIN_EXIT_TRADES_V1116 = 3;
+const PRIORITY_LIVE_DECISION_MIN_EXIT_GROSS_USD_V1116 = 250;
+
+function priorityLiveDecisionV1116(row, nowMs=Date.now()){
+  const blockers=[...(Array.isArray(row?.blockersAtPromotionV1116)?row.blockersAtPromotionV1116:[]),...(Array.isArray(row?.blockersAtTestV1113)?row.blockersAtTestV1113:[])];
+  const blockerSet=new Set(blockers.map(x=>String(x||"").toUpperCase()));
+  const flow=row?.rpcFlowV1112||{};
+  const f5=flow?.m5||flow?.m15||flow?.h1||{};
+  const trades=Math.max(0,safeNumber(f5?.exactUsdTrades||f5?.observedTrades));
+  const buyUsd=Number.isFinite(Number(f5?.buyUsd))?Number(f5.buyUsd):null;
+  const sellUsd=Number.isFinite(Number(f5?.sellUsd))?Number(f5.sellUsd):null;
+  const netUsd=Number.isFinite(Number(f5?.netUsd))?Number(f5.netUsd):null;
+  const grossUsd=(buyUsd!==null&&sellUsd!==null)?Math.max(0,buyUsd)+Math.max(0,sellUsd):null;
+  const buyPressure=Number.isFinite(Number(f5?.buyPressurePct))?Number(f5.buyPressurePct):null;
+  const exactFlowReady=trades>0&&grossUsd!==null;
+  const materialEntryFlow=exactFlowReady&&trades>=PRIORITY_LIVE_DECISION_MIN_ENTRY_TRADES_V1116&&grossUsd>=PRIORITY_LIVE_DECISION_MIN_ENTRY_GROSS_USD_V1116;
+  const materialExitFlow=exactFlowReady&&trades>=PRIORITY_LIVE_DECISION_MIN_EXIT_TRADES_V1116&&grossUsd>=PRIORITY_LIVE_DECISION_MIN_EXIT_GROSS_USD_V1116;
+  const strongBuy=materialEntryFlow&&netUsd>=250&&buyPressure!==null&&buyPressure>=65;
+  const buyLeaning=exactFlowReady&&trades>=3&&grossUsd>=150&&netUsd>0&&buyPressure!==null&&buyPressure>=55;
+  const strongSell=materialExitFlow&&netUsd<=-250&&buyPressure!==null&&buyPressure<=35;
+  const sellLeaning=exactFlowReady&&trades>=2&&grossUsd>=100&&netUsd<0&&buyPressure!==null&&buyPressure<45;
+
+  const holderAnchor=(row?.holderBaselineV1115?.verified===true&&safeNumber(row?.holderBaselineV1115?.holderCount)>0);
+  const hd=row?.holderDeltaRollingV1114?.m5||row?.holderDeltaRollingV1114?.m15||row?.holderDeltaRollingV1114?.h1||{};
+  const holderObs=Math.max(0,safeNumber(hd?.observations));
+  const holderNet=safeNumber(hd?.netHolderDelta);
+  const holderReady=holderAnchor&&holderObs>0;
+  const holderGrowing=holderReady&&holderNet>0;
+  const holderFalling=holderReady&&holderNet<0;
+
+  const whaleAccum=Math.max(0,safeNumber(hd?.largeWalletAccumulating));
+  const whaleDistrib=Math.max(0,safeNumber(hd?.largeWalletDistributing));
+  const whaleTouched=Math.max(0,safeNumber(hd?.touchedLargeWallets));
+  const whaleReady=Array.isArray(row?.topWalletSeedV1115)&&row.topWalletSeedV1115.length>0;
+  const whaleBull=whaleAccum>whaleDistrib&&whaleAccum>0;
+  const whaleBear=whaleDistrib>whaleAccum&&whaleDistrib>0;
+
+  const breakout=String(row?.breakoutStateAtPromotion||"").toUpperCase();
+  const accumulation=String(row?.accumulationStateAtPromotion||"").toUpperCase();
+  const entryQuality=String(row?.entryQualityAtPromotion||"").toUpperCase();
+  const liveState=String(row?.liveStateV1109||"").toUpperCase();
+  const supportiveBreakout=["BREAKOUT_CONFIRMED","BREAKOUT_WATCH","PRESSURE_BUILDING"].includes(breakout)||liveState==="ENTRY_WINDOW_CONFIRMED_SHADOW"||liveState==="ENTRY_FORMING_SHADOW";
+  const supportiveAccum=accumulation.includes("ACCUMULAT")&&!accumulation.includes("DISTRIBUT");
+  const distribution=accumulation.includes("DISTRIBUT")||blockerSet.has("LONGITUDINAL_DISTRIBUTION");
+  const negativePrice=entryQuality.includes("NEGATIVE_PRICE_MOVE")||blockerSet.has("NEGATIVE_VERIFIED_PRICE_MOVE")||liveState==="FAILED_BREAKOUT_CAUTION";
+  const antiChase=entryQuality.includes("EXTENDED")||blockerSet.has("ANTI_CHASE_EXTENDED")||blockerSet.has("BREAKOUT_EXTENDED_DO_NOT_CHASE");
+  const safetyBlock=blockerSet.has("SAFETY_OR_RISK_BLOCK")||[...blockerSet].some(x=>x.includes("RISK")&&x.includes("BLOCK"));
+  const hardBullBlock=safetyBlock||distribution||negativePrice||antiChase;
+
+  const marketLiveReady=row?.latestObservationV1109?.verified===true&&row?.liveSignalsV1109?.dataHealth?.circuitBreakerActive!==true;
+  const marketContextReady=marketLiveReady||row?.marketEvidenceReadyAtPromotion===true;
+  const structuralReady=supportiveBreakout||supportiveAccum||row?.flowEvidenceReadyAtPromotion===true;
+
+  const bullish=[]; const bearish=[]; const reasons=[];
+  if(strongBuy){bullish.push("MATERIAL_EXACT_RPC_BUY_FLOW");reasons.push(`Exact 5m flow is materially buy-led (${trades} trades, net $${Math.round(netUsd)}).`);}
+  else if(buyLeaning){bullish.push("EXACT_RPC_BUY_LEAN");reasons.push(`Exact RPC flow is buy-leaning (net $${Math.round(netUsd)}).`);}
+  if(holderGrowing){bullish.push("VERIFIED_HOLDER_GROWTH");reasons.push(`Verified holder movement is positive (+${holderNet}).`);}
+  if(whaleBull){bullish.push("SEEDED_OR_LARGE_WALLET_ACCUMULATION");reasons.push("Observed large/seeded wallets are net accumulating in the live window.");}
+  if(supportiveBreakout){bullish.push("BREAKOUT_STRUCTURE_SUPPORTIVE");}
+  if(supportiveAccum){bullish.push("LONGITUDINAL_ACCUMULATION_SUPPORTIVE");}
+
+  if(strongSell){bearish.push("MATERIAL_EXACT_RPC_SELL_FLOW");reasons.push(`Exact 5m flow is materially sell-led (${trades} trades, net $${Math.round(netUsd)}).`);}
+  else if(sellLeaning){bearish.push("EXACT_RPC_SELL_LEAN");reasons.push(`Exact RPC flow is sell-leaning (net $${Math.round(netUsd)}).`);}
+  if(holderFalling){bearish.push("VERIFIED_HOLDER_DECLINE");reasons.push(`Verified holder movement is negative (${holderNet}).`);}
+  if(whaleBear){bearish.push("SEEDED_OR_LARGE_WALLET_DISTRIBUTION");reasons.push("Observed large/seeded wallets are net distributing in the live window.");}
+  if(distribution){bearish.push("LONGITUDINAL_DISTRIBUTION");reasons.push("Existing longitudinal intelligence is distribution, so bullish entry is blocked.");}
+  if(negativePrice){bearish.push("NEGATIVE_OR_FAILED_PRICE_STRUCTURE");reasons.push("Verified price/entry structure is negative or failed.");}
+  if(antiChase){bearish.push("ANTI_CHASE_BLOCK");reasons.push("Price structure is extended; ChainVanta will not chase the move.");}
+  if(safetyBlock){bearish.push("SAFETY_OR_RISK_BLOCK");reasons.push("Safety/risk evidence blocks bullish action.");}
+
+  const evidence={
+    exactRpcFlow:exactFlowReady,
+    holderAnchorAndDelta:holderReady,
+    seededWhaleContext:whaleReady,
+    marketOrPriceContext:marketContextReady,
+    structuralContext:structuralReady
+  };
+  const evidenceCoveragePct=Math.round(Object.values(evidence).filter(Boolean).length/Object.keys(evidence).length*100);
+  let state="BUILDING_EVIDENCE";
+  let confidence="LOW";
+  const bearishIndependent=[strongSell,holderFalling,whaleBear,distribution,negativePrice,safetyBlock].filter(Boolean).length;
+  const bullishIndependent=[strongBuy||buyLeaning,holderGrowing,whaleBull,supportiveBreakout||supportiveAccum].filter(Boolean).length;
+
+  if(safetyBlock){
+    state=(strongSell||holderFalling||whaleBear||distribution)?"EXIT_RISK":"CAUTION";
+  }else if((strongSell&&bearishIndependent>=2)||(distribution&&strongSell)||(whaleBear&&holderFalling&&sellLeaning)){
+    state="EXIT_RISK";
+  }else if(hardBullBlock||sellLeaning||holderFalling||whaleBear){
+    state="CAUTION";
+  }else if(strongBuy&&bullishIndependent>=3&&structuralReady&&marketContextReady&&evidenceCoveragePct>=60){
+    state="ENTRY_READY";
+  }else if((strongBuy||buyLeaning)&&bullishIndependent>=2&&structuralReady&&evidenceCoveragePct>=40){
+    state="ENTRY_FORMING";
+  }else if(row?.controlledShadowTestV1110!==true&&row?.promotedAt&&bearishIndependent===0&&(exactFlowReady||holderReady)){
+    state="HOLD";
+  }
+  if(evidenceCoveragePct>=80&&(state==="ENTRY_READY"||state==="EXIT_RISK")) confidence="HIGH";
+  else if(evidenceCoveragePct>=60||state==="CAUTION"||state==="HOLD") confidence="MEDIUM";
+
+  if(!reasons.length) reasons.push("Not enough corroborated live evidence yet; continue collecting forward-only observations.");
+  if(row?.controlledShadowTestV1110===true) reasons.push("Controlled shadow test only: decision cannot trigger Telegram or a production action.");
+  return {
+    version:"V1116",shadowOnly:true,measurementOnly:true,productionActionAllowed:false,telegramMutation:false,
+    state,confidence,evidenceCoveragePct,evidence,bullishPillars:bullish,bearishPillars:bearish,
+    inputs:{trades,buyUsd,sellUsd,netUsd,grossUsd,buyPressurePct:buyPressure,holderNetDelta:holderReady?holderNet:null,holderObservations:holderObs,seededTopWallets:Array.isArray(row?.topWalletSeedV1115)?row.topWalletSeedV1115.length:0,largeWalletsTouched:whaleTouched,largeWalletAccumulating:whaleAccum,largeWalletDistributing:whaleDistrib,breakoutState:row?.breakoutStateAtPromotion||null,accumulationState:row?.accumulationStateAtPromotion||null,entryQuality:row?.entryQualityAtPromotion||null,liveMarketState:row?.liveStateV1109||null},
+    hardBullBlock,blockers:[...new Set(blockers)],reasons:reasons.slice(0,8),evaluatedAt:nowMs
+  };
+}
+
 function strictFiniteOrNullV1115(value){
   if(value === null || value === undefined || value === "") return null;
   const n=Number(value);
@@ -196366,7 +196498,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1115",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1116",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -196416,6 +196548,8 @@ async function livePriorityLaneStatusV1109(env) {
       holderCountEstimateV1114:row?.holderCountEstimateV1114||null,
       largeWalletDeltaV1114:row?.largeWalletDeltaV1114||null,
       holderDeltaPointsV1114:Array.isArray(row?.holderDeltaPointsV1114)?row.holderDeltaPointsV1114.slice(-5):[],
+      liveDecisionV1116:row?.liveDecisionV1116||priorityLiveDecisionV1116(row,Date.now()),
+      decisionStateV1116:(row?.liveDecisionV1116||priorityLiveDecisionV1116(row,Date.now()))?.state||"BUILDING_EVIDENCE",
       controlledShadowTestV1110:row?.controlledShadowTestV1110===true,
       controlledExactPoolRpcTestV1113:row?.controlledExactPoolRpcTestV1113===true,
       laneEntrySourceV1110:row?.laneEntrySourceV1110||"GENUINE_V1108_PROMOTION",
@@ -196442,9 +196576,11 @@ async function livePriorityLaneStatusV1109(env) {
       holderAnchorIntegrityV1115:"SQL_NULL_NEVER_COERCED_TO_VERIFIED_ZERO",
       blockscoutReconciliationV1115:"ONE_DUE_TOKEN_PER_POLL_30M_PER_TOKEN_COUNTER_ANCHOR_PLUS_TOP_WALLET_SEED",
       blockscoutLiveDailyCreditGuardV1115:"10000_DEFAULT_CREDITS_PER_UTC_DAY_INTERNAL_GUARD",
+      combinedLiveDecisionV1116:"EXACT_RPC_FLOW_PLUS_HOLDER_DELTA_PLUS_SEEDED_WHALES_PLUS_STRUCTURE_PLUS_MARKET_CONTEXT",
+      decisionStatesV1116:["BUILDING_EVIDENCE","ENTRY_FORMING","ENTRY_READY","HOLD","CAUTION","EXIT_RISK"],
       telegramMutation:false
     },
-    nextStage:"V1115 adds trustworthy absolute holder anchors and top-wallet seeding. After reconciliation telemetry is clean, combine exact RPC flow + holder growth + seeded whale movement + price/liquidity into one shadow entry/exit decision layer before Telegram activation.",
+    nextStage:"V1116 combines the proven live evidence into one shadow entry/hold/caution/exit decision. After live calibration shows decisions are timely and sensible, add a forward-only decision outcome audit before any Telegram activation.",
     timestamp:now()
   };
 }
@@ -197957,6 +198093,7 @@ export class V3LiveCollectorV363 {
         accumulationStateAtPromotion:row?.accumulationState||previous?.accumulationStateAtPromotion||null,
         flowEvidenceReadyAtPromotion:row?.flowEvidenceReady===true,
         marketEvidenceReadyAtPromotion:row?.marketEvidenceReady===true,
+        blockersAtPromotionV1116:Array.isArray(row?.blockers)?row.blockers:(Array.isArray(previous?.blockersAtPromotionV1116)?previous.blockersAtPromotionV1116:[]),
         exactPoolLiveIdentityV1112:row?.exactPoolLiveIdentityV1112||previous?.exactPoolLiveIdentityV1112||null,
         liveWethUsdGReferenceV1112:row?.liveWethUsdGReferenceV1112||previous?.liveWethUsdGReferenceV1112||null,
         holderBaselineV1114:row?.holderBaselineV1115||row?.holderBaselineV1114||previous?.holderBaselineV1114||null,
@@ -197984,6 +198121,7 @@ export class V3LiveCollectorV363 {
         liveStateV1109:previous?.liveStateV1109||"BUILDING_LIVE_HISTORY",
         pinnedProviderPairV1109:previous?.pinnedProviderPairV1109||null,
         pairMissesV1109:safeNumber(previous?.pairMissesV1109),
+        liveDecisionV1116:previous?.liveDecisionV1116||null,
         controlledShadowTestV1110:false,
         laneEntrySourceV1110:"GENUINE_V1108_PROMOTION",
         testStartedAtV1110:null,
@@ -198077,6 +198215,7 @@ export class V3LiveCollectorV363 {
       rpcTradesV1112:[],
       rpcFlowV1112:null,
       rpcStatusV1112:"WAITING_FOR_FORWARD_RPC_BASELINE_V1113",
+      liveDecisionV1116:null,
       controlledShadowTestV1110:true,
       controlledExactPoolRpcTestV1113:true,
       laneEntrySourceV1110:"CONTROLLED_EXACT_POOL_RPC_TEST_ONLY_V1113",
@@ -198522,6 +198661,15 @@ export class V3LiveCollectorV363 {
       else row.liveStateV1109="BUILDING_LIVE_HISTORY";
       row.latestObservationV1109={verified:true,observedAt,marketCap,priceUsd,liquidityUsd:point.liquidityUsd,source:"DEXSCREENER_PRIORITY_LIVE_V1109"};
       verifiedObservations++;
+      entries[address]=row;
+    }
+
+    // V1116: combine all already-collected evidence after RPC/holder/Blockscout/market
+    // updates. This is pure in-memory decision math; it adds zero external requests.
+    for(const row of liveRows){
+      const address=normalize(row?.address||"");
+      if(!isAddress(address)) continue;
+      row.liveDecisionV1116=priorityLiveDecisionV1116(row,Date.now());
       entries[address]=row;
     }
 
