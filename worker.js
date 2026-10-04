@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1094
+ * BREAKOUT INTELLIGENCE — SHADOW V1
+ * Builds directly from deployed V1093.
+ * - Adds a separate breakout layer on top of verified flow-aware accumulation.
+ * - Uses only materially sized/repeated V212 flow plus VERIFIED market-history
+ *   rows whose V1083 integrity classifier says the snapshot actually changed.
+ * - Stale/cache repeats are never treated as price movement.
+ * - Combines persistent flow, latest verified flow direction, verified changed
+ *   price evidence and stored Momentum into breakout pressure.
+ * - States: BUILDING_BREAKOUT_HISTORY, NO_BREAKOUT_PRESSURE,
+ *   PRESSURE_BUILDING, BREAKOUT_WATCH, BREAKOUT_CONFIRMED,
+ *   REVERSAL_ATTEMPT and CAUTION.
+ * - Adds /breakout-status and /breakout?token=0x...
+ * - Shadow/read-only only. No production score, Telegram qualification or
+ *   request-budget changes; zero new provider/RPC requests.
+ */
+
+/**
  * ChainVanta — V1093
  * FLOW-AWARE ACCUMULATION MATERIALITY GATE
  * Builds directly from deployed V1092.
@@ -9266,7 +9284,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1093"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1094"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -187285,7 +187303,7 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
   );
 
   return {
-    version:"V1092",
+    version:CHAINVANTA_DISPLAY_VERSION,
     shadowOnly:true,
     actionable:false,
     address:normalizedAddress,
@@ -187478,6 +187496,424 @@ async function flowAccumulationStatusV1092(env) {
     ).length,
     tokens:results,
     note:"Shadow only. Repeated and materially sized verified V212 flow is required before accumulation becomes evidence ready. No Telegram or production score changes.",
+    timestamp:now()
+  };
+}
+
+
+/* ============================================================
+   V1094 — BREAKOUT INTELLIGENCE — SHADOW V1
+   ============================================================ */
+const BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094 = 2;
+const BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094 = 5 * 60 * 1000;
+
+function breakoutFromRowsV1094(address, rows) {
+  const normalizedAddress = normalize(address);
+  const ordered = (Array.isArray(rows) ? rows : [])
+    .filter(row => normalize(row?.address) === normalizedAddress)
+    .sort((a,b) => safeNumber(a?.captured_at) - safeNumber(b?.captured_at));
+
+  const accumulation =
+    flowAwareAccumulationFromRowsV1092(normalizedAddress, ordered);
+
+  const changedMarketRows = ordered.filter(row =>
+    Number(row?.market_verified) === 1 &&
+    Number(row?.market_snapshot_changed) === 1 &&
+    finiteOrNullV1076(row?.price_usd) !== null &&
+    finiteOrNullV1076(row?.price_usd) > 0
+  );
+
+  const firstChanged = changedMarketRows[0] || null;
+  const latestChanged =
+    changedMarketRows[changedMarketRows.length - 1] || null;
+
+  const changedMarketSpanMs =
+    firstChanged && latestChanged
+      ? Math.max(
+          0,
+          safeNumber(latestChanged?.captured_at) -
+          safeNumber(firstChanged?.captured_at)
+        )
+      : 0;
+
+  const firstPrice = finiteOrNullV1076(firstChanged?.price_usd);
+  const latestPrice = finiteOrNullV1076(latestChanged?.price_usd);
+
+  const verifiedChangedPricePct =
+    firstPrice !== null &&
+    latestPrice !== null &&
+    firstPrice > 0
+      ? ((latestPrice - firstPrice) / firstPrice) * 100
+      : null;
+
+  const momentumRows = ordered
+    .map(row => ({
+      at:safeNumber(row?.captured_at),
+      score:finiteOrNullV1076(row?.momentum_score)
+    }))
+    .filter(row => row.score !== null);
+
+  const latestMomentum =
+    momentumRows.length
+      ? momentumRows[momentumRows.length - 1].score
+      : null;
+
+  const recentMomentum = momentumRows.slice(-6);
+  const priorMomentum =
+    recentMomentum.length >= 2
+      ? recentMomentum[0].score
+      : null;
+
+  const momentumDelta =
+    latestMomentum !== null && priorMomentum !== null
+      ? latestMomentum - priorMomentum
+      : null;
+
+  const latestFlow = accumulation?.flow?.latest1h || null;
+  const latestFlowPositive =
+    latestFlow &&
+    finiteOrNullV1076(latestFlow?.netUsd) !== null &&
+    finiteOrNullV1076(latestFlow?.netUsd) > 0;
+
+  const marketEvidenceReady =
+    changedMarketRows.length >= BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094 &&
+    changedMarketSpanMs >= BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094;
+
+  const flowEvidenceReady = accumulation?.evidenceReady === true;
+
+  const safetyWarning =
+    (accumulation?.warnings || []).includes("VERIFIED_HIGH_RISK") ||
+    (accumulation?.warnings || []).includes("EXTREME_CONCENTRATION") ||
+    (accumulation?.warnings || []).includes("LIQUIDITY_COLLAPSE");
+
+  const evidenceReady =
+    flowEvidenceReady &&
+    marketEvidenceReady &&
+    !safetyWarning;
+
+  let score = 0;
+  const reasons = [];
+  const warnings = [...(accumulation?.warnings || [])];
+
+  const accumState = accumulation?.accumulationState || null;
+  if (accumState === "STRONG_ACCUMULATION") {
+    score += 30;
+    reasons.push("STRONG_VERIFIED_ACCUMULATION");
+  } else if (accumState === "ACCUMULATING") {
+    score += 25;
+    reasons.push("VERIFIED_ACCUMULATION");
+  } else if (accumState === "MIXED") {
+    score += 8;
+  } else if (accumState === "DISTRIBUTION") {
+    score -= 25;
+    warnings.push("LONGITUDINAL_DISTRIBUTION");
+  } else if (accumState === "CAUTION") {
+    score -= 30;
+  }
+
+  if (latestFlow) {
+    const pressure = finiteOrNullV1076(latestFlow?.buyPressurePct);
+    const net = finiteOrNullV1076(latestFlow?.netUsd);
+    const trades = finiteOrNullV1076(latestFlow?.trades);
+
+    if (net !== null && net > 0 && pressure !== null && pressure >= 65) {
+      score += 20;
+      reasons.push("LATEST_VERIFIED_FLOW_STRONGLY_POSITIVE");
+    } else if (
+      net !== null &&
+      net > 0 &&
+      pressure !== null &&
+      pressure >= 55
+    ) {
+      score += 14;
+      reasons.push("LATEST_VERIFIED_FLOW_POSITIVE");
+    } else if (net !== null && net > 0) {
+      score += 7;
+    } else if (net !== null && net < 0) {
+      score -= 12;
+      warnings.push("LATEST_VERIFIED_FLOW_NEGATIVE");
+    }
+
+    if (trades !== null && trades >= 50) score += 5;
+    else if (trades !== null && trades >= 20) score += 3;
+  }
+
+  if (verifiedChangedPricePct !== null) {
+    if (verifiedChangedPricePct >= 15) {
+      score += 30;
+      reasons.push("VERIFIED_PRICE_EXPANSION_15PCT_PLUS");
+    } else if (verifiedChangedPricePct >= 7) {
+      score += 24;
+      reasons.push("VERIFIED_PRICE_EXPANSION_7PCT_PLUS");
+    } else if (verifiedChangedPricePct >= 3) {
+      score += 16;
+      reasons.push("VERIFIED_PRICE_EXPANSION_3PCT_PLUS");
+    } else if (verifiedChangedPricePct > 0) {
+      score += 6;
+    } else if (verifiedChangedPricePct <= -7) {
+      score -= 20;
+      warnings.push("VERIFIED_PRICE_BREAKDOWN");
+    } else if (verifiedChangedPricePct < 0) {
+      score -= 8;
+    }
+  }
+
+  if (latestMomentum !== null) {
+    if (latestMomentum >= 50) {
+      score += 20;
+      reasons.push("MOMENTUM_50_PLUS");
+    } else if (latestMomentum >= 30) {
+      score += 14;
+      reasons.push("MOMENTUM_30_PLUS");
+    } else if (latestMomentum >= 15) {
+      score += 8;
+    } else if (latestMomentum <= 5) {
+      score -= 5;
+    }
+  }
+
+  if (momentumDelta !== null) {
+    if (momentumDelta >= 15) {
+      score += 10;
+      reasons.push("MOMENTUM_ACCELERATING");
+    } else if (momentumDelta >= 5) {
+      score += 5;
+    } else if (momentumDelta <= -15) {
+      score -= 10;
+      warnings.push("MOMENTUM_WEAKENING");
+    }
+  }
+
+  if (!flowEvidenceReady) {
+    warnings.push("FLOW_ACCUMULATION_NOT_READY");
+  }
+  if (!marketEvidenceReady) {
+    warnings.push("VERIFIED_CHANGED_MARKET_HISTORY_INSUFFICIENT");
+  }
+  if (safetyWarning) {
+    warnings.push("SAFETY_BLOCKS_BREAKOUT_INTERPRETATION");
+  }
+
+  const breakoutScore = clampScoreV1078(score);
+
+  let breakoutState = "BUILDING_BREAKOUT_HISTORY";
+
+  if (safetyWarning) {
+    breakoutState = "CAUTION";
+  } else if (evidenceReady) {
+    const isHistoricalDistribution =
+      accumState === "DISTRIBUTION";
+
+    if (
+      isHistoricalDistribution &&
+      latestFlowPositive &&
+      verifiedChangedPricePct !== null &&
+      verifiedChangedPricePct > 0
+    ) {
+      breakoutState = "REVERSAL_ATTEMPT";
+    } else if (
+      breakoutScore >= 75 &&
+      verifiedChangedPricePct !== null &&
+      verifiedChangedPricePct >= 3 &&
+      latestFlowPositive
+    ) {
+      breakoutState = "BREAKOUT_CONFIRMED";
+    } else if (breakoutScore >= 60) {
+      breakoutState = "BREAKOUT_WATCH";
+    } else if (breakoutScore >= 40) {
+      breakoutState = "PRESSURE_BUILDING";
+    } else {
+      breakoutState = "NO_BREAKOUT_PRESSURE";
+    }
+  }
+
+  return {
+    version:CHAINVANTA_DISPLAY_VERSION,
+    shadowOnly:true,
+    actionable:false,
+    address:normalizedAddress,
+    symbol:ordered[ordered.length - 1]?.symbol || null,
+    evidenceReady,
+    flowEvidenceReady,
+    marketEvidenceReady,
+    safetyWarning,
+    breakoutScore,
+    breakoutState,
+    verifiedChangedMarketRows:changedMarketRows.length,
+    changedMarketSpanMinutes:Number(
+      (changedMarketSpanMs / 60000).toFixed(1)
+    ),
+    verifiedPrice:{
+      firstChangedAt:firstChanged?.captured_at || null,
+      latestChangedAt:latestChanged?.captured_at || null,
+      firstUsd:firstPrice,
+      latestUsd:latestPrice,
+      changePct:
+        verifiedChangedPricePct === null
+          ? null
+          : Number(verifiedChangedPricePct.toFixed(2))
+    },
+    momentum:{
+      latest:latestMomentum,
+      prior:priorMomentum,
+      delta:
+        momentumDelta === null
+          ? null
+          : Number(momentumDelta.toFixed(2))
+    },
+    latestVerifiedFlow:latestFlow,
+    accumulation:{
+      state:accumState,
+      evidenceReady:accumulation?.evidenceReady === true,
+      flowScore:finiteOrNullV1076(
+        accumulation?.flowAccumulationScore
+      ),
+      combinedShadowScore:finiteOrNullV1076(
+        accumulation?.combinedShadowScore
+      )
+    },
+    reasons:[...new Set(reasons)],
+    warnings:[...new Set(warnings)],
+    interpretation:
+      breakoutState === "BREAKOUT_CONFIRMED"
+        ? "Verified material flow, changed market evidence and momentum are aligning in a breakout configuration. Shadow only."
+        : breakoutState === "BREAKOUT_WATCH"
+          ? "Breakout pressure is elevated, but not all confirmation conditions are strong enough yet."
+          : breakoutState === "PRESSURE_BUILDING"
+            ? "Some verified breakout pressure is developing, but confirmation is incomplete."
+            : breakoutState === "REVERSAL_ATTEMPT"
+              ? "Latest verified flow and price are improving against a historically distributive backdrop; treat as a reversal attempt, not confirmed accumulation."
+              : breakoutState === "CAUTION"
+                ? "Safety or concentration evidence blocks a bullish breakout interpretation."
+                : breakoutState === "NO_BREAKOUT_PRESSURE"
+                  ? "Required evidence exists but does not currently show meaningful breakout pressure."
+                  : "More verified material flow and changed market history are required before breakout pressure can be assessed.",
+    methodology:{
+      staleOrUnchangedSnapshotsCountAsPriceMovement:false,
+      changedMarketRowsRequired:
+        BREAKOUT_MIN_CHANGED_MARKET_ROWS_V1094,
+      changedMarketSpanMinutesRequired:
+        BREAKOUT_MIN_CHANGED_MARKET_SPAN_MS_V1094 / 60000,
+      requiresMaterialFlowAccumulationEvidence:true,
+      productionImpact:false
+    },
+    productionImpact:{
+      opportunityChanged:false,
+      momentumChanged:false,
+      confidenceChanged:false,
+      riskChanged:false,
+      telegramQualificationChanged:false,
+      telegramCallsChanged:false
+    }
+  };
+}
+
+async function breakoutTokenDiagnosticV1094(env, url) {
+  const token = normalize(url.searchParams.get("token"));
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"BREAKOUT_TOKEN_V1094",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0,
+    token
+  };
+
+  if (!isAddress(token)) {
+    return {
+      ...base,
+      status:"INVALID_TOKEN_ADDRESS_V1094",
+      timestamp:now()
+    };
+  }
+
+  const history = await accumulationRowsForAddressV1078(
+    env,
+    token,
+    url.searchParams.get("limit") || 288
+  );
+
+  if (!history.ok) {
+    return {
+      ...base,
+      status:history.status,
+      error:history.error || null,
+      timestamp:now()
+    };
+  }
+
+  return {
+    ...base,
+    success:true,
+    status:"BREAKOUT_TOKEN_OK_V1094",
+    result:breakoutFromRowsV1094(token, history.rows),
+    timestamp:now()
+  };
+}
+
+async function breakoutStatusV1094(env) {
+  const base = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"BREAKOUT_STATUS_V1094",
+    success:false,
+    readOnly:true,
+    shadowOnly:true,
+    externalRequestsUsed:0
+  };
+
+  const stateRead = await readState(env);
+  const cohort = ensureIntelligenceCohortV1079(
+    stateRead?.state || {}
+  );
+
+  const addresses = [...new Set(
+    (cohort?.entries || [])
+      .map(entry => normalize(entry?.address))
+      .filter(isAddress)
+  )];
+
+  const results = [];
+
+  for (const address of addresses.slice(0,20)) {
+    const history = await accumulationRowsForAddressV1078(
+      env,
+      address,
+      288
+    );
+    if (!history.ok) continue;
+    results.push(breakoutFromRowsV1094(address, history.rows));
+  }
+
+  results.sort((a,b) =>
+    safeNumber(b?.breakoutScore) - safeNumber(a?.breakoutScore)
+  );
+
+  return {
+    ...base,
+    success:true,
+    status:"BREAKOUT_STATUS_OK_V1094",
+    evaluated:results.length,
+    evidenceReady:results.filter(r => r.evidenceReady).length,
+    confirmed:results.filter(
+      r => r.breakoutState === "BREAKOUT_CONFIRMED"
+    ).length,
+    watch:results.filter(
+      r => r.breakoutState === "BREAKOUT_WATCH"
+    ).length,
+    pressureBuilding:results.filter(
+      r => r.breakoutState === "PRESSURE_BUILDING"
+    ).length,
+    reversalAttempts:results.filter(
+      r => r.breakoutState === "REVERSAL_ATTEMPT"
+    ).length,
+    buildingHistory:results.filter(
+      r => r.breakoutState === "BUILDING_BREAKOUT_HISTORY"
+    ).length,
+    tokens:results,
+    note:"Shadow only. Breakout requires materially sized verified V212 flow plus genuinely changed verified market evidence; stale/cache repeats do not count.",
     timestamp:now()
   };
 }
@@ -189920,6 +190356,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         env,
         cohortStateV1079.state
       )
+    );
+  }
+
+  if (
+    path ===
+      "/breakout-status"
+  ) {
+    return jsonResponse(
+      await breakoutStatusV1094(env)
+    );
+  }
+
+  if (
+    path ===
+      "/breakout"
+  ) {
+    return jsonResponse(
+      await breakoutTokenDiagnosticV1094(env, url)
     );
   }
 
