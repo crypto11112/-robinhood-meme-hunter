@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1114
+ * LIVE TRANSFER / HOLDER + LARGE-WALLET DELTA — SHADOW V1
+ * Builds directly from deployed V1113.
+ * - Extends the proven max-3 exact-pool priority lane with forward-only ERC-20 Transfer logs.
+ * - Transfer-log collection is batched into the same primary RPC HTTP request as head + exact-pool swaps.
+ * - When transfers exist, one bounded follow-up JSON-RPC batch reads totalSupply/decimals and touched-wallet
+ *   balanceOf values at the exact covered head. The pre-range balance is reconstructed by reversing the
+ *   verified transfer delta, allowing exact interval new-holder / lost-holder classification.
+ * - Large-wallet telemetry is conservative: only wallets touched in the covered transfer range are
+ *   classified, using >=1% of verified supply. It does NOT pretend to be a complete top-wallet census.
+ * - Carries the latest persisted holder-count/top-concentration snapshot as an anchor when available;
+ *   forward holder deltas are exact for covered ranges, while anchored absolute holder count is labelled
+ *   as an estimate until independently reconciled.
+ * - Existing V1111 hard monthly governor remains authoritative. No Telegram/scoring/qualification change.
+ * - DexScreener remains slow corroboration only; Bitquery is not required for this layer.
+ */
+
+/**
  * ChainVanta — V1113
  * CONTROLLED EXACT-POOL RPC LIVE-LANE TEST + DEX COOLDOWN ISOLATION
  * Builds directly from deployed V1112.
@@ -9622,7 +9640,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1113"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1114"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -189114,6 +189132,14 @@ async function livePriorityStatusV1108(env) {
       marketEvidenceReady:breakout?.marketEvidenceReady === true,
       exactPoolLiveIdentityV1112,
       liveWethUsdGReferenceV1112:liveWethUsdGReferenceV1112?.verified===true?{verified:true,source:liveWethUsdGReferenceV1112?.source||null,priceUsdGPerWeth:Number(liveWethUsdGReferenceV1112?.priceUsdGPerWeth)||null,verifiedAt:safeNumber(liveWethUsdGReferenceV1112?.verifiedAt)||null}:null,
+      holderBaselineV1114:{
+        verified:Number.isFinite(Number(targetedCohortRowV1108?.holder_count))&&Number(targetedCohortRowV1108?.holder_count)>=0,
+        holderCount:Number.isFinite(Number(targetedCohortRowV1108?.holder_count))?Math.trunc(Number(targetedCohortRowV1108.holder_count)):null,
+        topHolderPct:finiteOrNullV1076(targetedCohortRowV1108?.top_holder_pct),
+        top10Pct:finiteOrNullV1076(targetedCohortRowV1108?.top10_pct),
+        observedAt:safeNumber(targetedCohortRowV1108?.last_at||targetedCohortRowV1108?.captured_at)||null,
+        source:"D1_LATEST_PERSISTED_HOLDER_SNAPSHOT_V1114"
+      },
       momentum:{
         latest:momentum,
         delta:momentumDelta
@@ -195475,6 +195501,46 @@ const PRIORITY_LIVE_429_MAX_COOLDOWN_MS_V1111 = 60 * 60 * 1000;
 const PRIORITY_LIVE_RPC_MAX_TRADES_V1112 = 240;
 const PRIORITY_LIVE_RPC_STALE_RESET_MS_V1112 = 10 * 60 * 1000;
 const PRIORITY_LIVE_PROVIDER_CORROBORATION_MS_V1112 = 5 * 60 * 1000;
+const PRIORITY_LIVE_TRANSFER_MAX_TOUCHED_WALLETS_V1114 = 48;
+const PRIORITY_LIVE_TRANSFER_MAX_POINTS_V1114 = 75;
+const PRIORITY_LIVE_LARGE_WALLET_PCT_V1114 = 1;
+
+function rpcBalanceOfDataV1114(address){
+  const a=normalize(address||"").replace(/^0x/,"");
+  return /^([a-f0-9]{40})$/.test(a) ? `0x70a08231${a.padStart(64,"0")}` : null;
+}
+function rpcHexBigIntV1114(value){
+  try { return BigInt(String(value||"0x0")); } catch(_) { return null; }
+}
+function rawToDecimalStringV1114(raw, decimals){
+  try {
+    const n=BigInt(raw); const d=Math.max(0,Math.min(36,Math.trunc(Number(decimals)||0)));
+    if(d===0) return n.toString();
+    const neg=n<0n; const x=neg?-n:n; const base=10n**BigInt(d);
+    const whole=x/base; let frac=(x%base).toString().padStart(d,"0").replace(/0+$/,"");
+    return `${neg?"-":""}${whole.toString()}${frac?"."+frac:""}`;
+  } catch(_) { return null; }
+}
+function pctSupplyV1114(balance,supply){
+  try { const b=BigInt(balance), s=BigInt(supply); if(s<=0n) return null; return Number(b*1000000n/s)/10000; } catch(_) { return null; }
+}
+function priorityLiveHolderRollingV1114(points, nowMs=Date.now()){
+  const valid=(Array.isArray(points)?points:[]).filter(p=>p?.verified===true&&safeNumber(p?.observedAt)>0);
+  const summarize=(ms)=>{
+    const rows=valid.filter(p=>safeNumber(p.observedAt)>=nowMs-ms&&safeNumber(p.observedAt)<=nowMs);
+    return {
+      observations:rows.length,
+      newHolders:rows.reduce((n,p)=>n+safeNumber(p?.newHolders),0),
+      lostHolders:rows.reduce((n,p)=>n+safeNumber(p?.lostHolders),0),
+      netHolderDelta:rows.reduce((n,p)=>n+safeNumber(p?.netHolderDelta),0),
+      touchedLargeWallets:[...new Set(rows.flatMap(p=>Array.isArray(p?.largeWalletAddresses)?p.largeWalletAddresses:[]))].length,
+      largeWalletAccumulating:rows.reduce((n,p)=>n+safeNumber(p?.largeWalletAccumulating),0),
+      largeWalletDistributing:rows.reduce((n,p)=>n+safeNumber(p?.largeWalletDistributing),0)
+    };
+  };
+  return {m1:summarize(60*1000),m5:summarize(5*60*1000),m15:summarize(15*60*1000),h1:summarize(60*60*1000)};
+}
+
 
 function priorityLiveExactPoolIdentityV1112(state, tokenAddress) {
   const token=normalize(tokenAddress||"");
@@ -196169,6 +196235,7 @@ async function controlledPriorityLiveRpcTestV1113(env, url) {
         blockers:Array.isArray(candidate?.blockers)?candidate.blockers:[],
         exactPoolLiveIdentityV1112:candidate?.exactPoolLiveIdentityV1112||null,
         liveWethUsdGReferenceV1112:candidate?.liveWethUsdGReferenceV1112||null,
+        holderBaselineV1114:candidate?.holderBaselineV1114||null,
         requestedAt:Date.now()
       })
     });
@@ -196242,7 +196309,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1113",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1114",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -196258,6 +196325,7 @@ async function livePriorityLaneStatusV1109(env) {
     externalRequestsLastPoll:safeNumber(snap?.requests),
     monthlyUsageGovernorV1111:snap?.budgetV1111||null,
     exactPoolRpcLiveV1112:snap?.rpcLiveV1112||null,
+    transferHolderLiveV1114:snap?.rpcLiveV1112?.transferLiveV1114||null,
     dexScreenerAttemptedLastPollV1112:snap?.dexScreenerAttemptedV1112===true,
     dexScreenerCooldownActiveLastPollV1112:snap?.dexScreenerCooldownActiveV1112===true,
     tokens:entries.sort((a,b)=>safeNumber(b?.priorityScore)-safeNumber(a?.priorityScore)).map(row=>({
@@ -196279,6 +196347,13 @@ async function livePriorityLaneStatusV1109(env) {
       rpcLastRangeV1112:row?.rpcLastRangeV1112||null,
       rpcTradeCountV1112:Array.isArray(row?.rpcTradesV1112)?row.rpcTradesV1112.length:0,
       rpcFlowV1112:row?.rpcFlowV1112||null,
+      holderBaselineV1114:row?.holderBaselineV1114||null,
+      holderDeltaStatusV1114:row?.holderDeltaStatusV1114||null,
+      holderDeltaRollingV1114:row?.holderDeltaRollingV1114||null,
+      holderNetDeltaSinceEntryV1114:safeNumber(row?.holderNetDeltaSinceEntryV1114),
+      holderCountEstimateV1114:row?.holderCountEstimateV1114||null,
+      largeWalletDeltaV1114:row?.largeWalletDeltaV1114||null,
+      holderDeltaPointsV1114:Array.isArray(row?.holderDeltaPointsV1114)?row.holderDeltaPointsV1114.slice(-5):[],
       controlledShadowTestV1110:row?.controlledShadowTestV1110===true,
       controlledExactPoolRpcTestV1113:row?.controlledExactPoolRpcTestV1113===true,
       laneEntrySourceV1110:row?.laneEntrySourceV1110||"GENUINE_V1108_PROMOTION",
@@ -196298,11 +196373,13 @@ async function livePriorityLaneStatusV1109(env) {
       dexScreenerRoleV1112:"SLOW_5_MINUTE_CORROBORATION_NOT_CORE_LIVE_FEED",
       dexScreenerCooldownIsolationV1113:"429_COOLDOWN_SUPPRESSES_DEX_ONLY_RPC_LANE_REMAINS_ELIGIBLE",
       controlledExactPoolRpcTestV1113:"EXPLICIT_ONLY_VERIFIED_POOLID_FORWARD_ONLY_NO_TELEGRAM",
-      holderDeltaAcceleration:false,
-      whaleDeltaAcceleration:false,
+      holderDeltaAcceleration:true,
+      holderDeltaModeV1114:"FORWARD_TRANSFER_LOGS_PLUS_EXACT_HEAD_BALANCE_RECONSTRUCTION",
+      whaleDeltaAcceleration:true,
+      whaleDeltaModeV1114:"TOUCHED_LARGE_WALLETS_GE_1PCT_SUPPLY_SHADOW_ONLY",
       telegramMutation:false
     },
-    nextStage:"V1113 independently proves exact-pool RPC flow even during DexScreener cooldown. After forward-only RPC baseline/range/trade decoding is proven clean, add transfer-derived holder and whale deltas behind the same governor.",
+    nextStage:"V1114 adds exact interval holder transitions and touched-large-wallet deltas. After live verification, add periodic Blockscout reconciliation/top-holder seeding, then combine flow+holders+whales into shadow entry/exit decisions before Telegram activation.",
     timestamp:now()
   };
 }
@@ -197817,6 +197894,14 @@ export class V3LiveCollectorV363 {
         marketEvidenceReadyAtPromotion:row?.marketEvidenceReady===true,
         exactPoolLiveIdentityV1112:row?.exactPoolLiveIdentityV1112||previous?.exactPoolLiveIdentityV1112||null,
         liveWethUsdGReferenceV1112:row?.liveWethUsdGReferenceV1112||previous?.liveWethUsdGReferenceV1112||null,
+        holderBaselineV1114:row?.holderBaselineV1114||previous?.holderBaselineV1114||null,
+        transferLastCoveredHeadV1114:safeNumber(previous?.transferLastCoveredHeadV1114)||null,
+        transferLastPollAtV1114:safeNumber(previous?.transferLastPollAtV1114)||null,
+        holderDeltaPointsV1114:Array.isArray(previous?.holderDeltaPointsV1114)?previous.holderDeltaPointsV1114:[],
+        holderDeltaRollingV1114:previous?.holderDeltaRollingV1114||null,
+        holderNetDeltaSinceEntryV1114:safeNumber(previous?.holderNetDeltaSinceEntryV1114),
+        holderDeltaStatusV1114:previous?.holderDeltaStatusV1114||"WAITING_FOR_FORWARD_TRANSFER_BASELINE_V1114",
+        largeWalletDeltaV1114:previous?.largeWalletDeltaV1114||null,
         rpcLastCoveredHeadV1112:safeNumber(previous?.rpcLastCoveredHeadV1112)||null,
         rpcLastPollAtV1112:safeNumber(previous?.rpcLastPollAtV1112)||null,
         rpcTradesV1112:Array.isArray(previous?.rpcTradesV1112)?previous.rpcTradesV1112:[],
@@ -197898,6 +197983,14 @@ export class V3LiveCollectorV363 {
       blockersAtTestV1113:Array.isArray(body?.blockers)?body.blockers:[],
       exactPoolLiveIdentityV1112:identity,
       liveWethUsdGReferenceV1112:body?.liveWethUsdGReferenceV1112||null,
+      holderBaselineV1114:body?.holderBaselineV1114||null,
+      transferLastCoveredHeadV1114:null,
+      transferLastPollAtV1114:null,
+      holderDeltaPointsV1114:[],
+      holderDeltaRollingV1114:null,
+      holderNetDeltaSinceEntryV1114:0,
+      holderDeltaStatusV1114:"WAITING_FOR_FORWARD_TRANSFER_BASELINE_V1114",
+      largeWalletDeltaV1114:null,
       promotedAt:null,
       lastPromotionRefreshAt:nowMs,
       latestObservationV1109:null,
@@ -197927,6 +198020,8 @@ export class V3LiveCollectorV363 {
       controlledShadowTest:true,controlledExactPoolRpcTestV1113:true,genuinePromotion:false,
       productionAlertsEnabled:false,telegramMutation:false,
       providerCooldownDoesNotBlockRpc:true,
+      transferHolderDeltaV1114:true,
+      largeWalletDeltaV1114:true,
       pollIntervalMs:HORIZON_LIVE_POLL_MS_V413,
       testRetentionMinutes:Math.round(PRIORITY_LIVE_TEST_RETENTION_MS_V1110/60000),
       expiresAt:nowMs+PRIORITY_LIVE_TEST_RETENTION_MS_V1110,
@@ -198038,9 +198133,11 @@ export class V3LiveCollectorV363 {
       const controller=new AbortController();
       const timer=setTimeout(()=>controller.abort(),7000);
       try{
+        const tokenAddresses=[...new Set(eligible.map(r=>normalize(r?.address||r?.exactPoolLiveIdentityV1112?.candidateAddress||"")).filter(isAddress))];
         const payload=[
           {jsonrpc:'2.0',id:1,method:'eth_blockNumber',params:[]},
-          {jsonrpc:'2.0',id:2,method:'eth_getLogs',params:[{address:normalize(POOL_MANAGER),fromBlock,toBlock:'latest',topics:[SWAP_TOPIC,poolIds]}]}
+          {jsonrpc:'2.0',id:2,method:'eth_getLogs',params:[{address:normalize(POOL_MANAGER),fromBlock,toBlock:'latest',topics:[SWAP_TOPIC,poolIds]}]},
+          {jsonrpc:'2.0',id:3,method:'eth_getLogs',params:[{address:tokenAddresses.length===1?tokenAddresses[0]:tokenAddresses,fromBlock,toBlock:'latest',topics:[ERC20_TRANSFER_TOPIC_V1065]}]}
         ];
         const res=await fetch(rpcUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
         clearTimeout(timer);
@@ -198048,11 +198145,13 @@ export class V3LiveCollectorV363 {
         const arr=Array.isArray(body)?body:[];
         const headRow=arr.find(x=>Number(x?.id)===1)||null;
         const logsRow=arr.find(x=>Number(x?.id)===2)||null;
+        const transferRow=arr.find(x=>Number(x?.id)===3)||null;
         const headHex=headRow?.result;
         const logs=Array.isArray(logsRow?.result)?logsRow.result:null;
+        const transferLogs=Array.isArray(transferRow?.result)?transferRow.result:null;
         let head=0; try{head=Number(BigInt(headHex||'0x0'));}catch(_){}
-        const ok=res.ok&&!headRow?.error&&!logsRow?.error&&head>0&&Array.isArray(logs);
-        attempts.push({provider,httpStatus:res.status,ok,error:headRow?.error?.message||logsRow?.error?.message||(!res.ok?`HTTP_${res.status}`:null)});
+        const ok=res.ok&&!headRow?.error&&!logsRow?.error&&!transferRow?.error&&head>0&&Array.isArray(logs)&&Array.isArray(transferLogs);
+        attempts.push({provider,httpStatus:res.status,ok,error:headRow?.error?.message||logsRow?.error?.message||transferRow?.error?.message||(!res.ok?`HTTP_${res.status}`:null)});
         if(!ok) continue;
 
         let verifiedTrades=0,decodedTrades=0,exactUsdTrades=0;
@@ -198092,7 +198191,63 @@ export class V3LiveCollectorV363 {
           row.rpcProviderV1112=provider;
           row.rpcLastRangeV1112={fromBlock,throughBlock:head,logs:poolLogs.length,observedAt:nowMs};
         }
-        return {attempted:true,status:stale?"RPC_FORWARD_BASELINE_OK_V1112":"RPC_EXACT_POOL_LIVE_FLOW_OK_V1112",externalRequestsUsed:requests,provider,attempts,eligiblePools:poolIds.length,fromBlock,throughBlock:head,returnedLogs:logs.length,verifiedTrades,decodedTrades,exactUsdTrades,baselineOnly:stale};
+        // V1114 — exact forward Transfer deltas. First poll establishes a baseline only.
+        let transferLiveV1114={attempted:true,status:stale?"TRANSFER_FORWARD_BASELINE_OK_V1114":"TRANSFER_RANGE_COVERED_NO_TRANSFERS_V1114",returnedLogs:transferLogs.length,verifiedTransferLogs:0,balanceRequestUsed:false,touchedWallets:0,holderTransitionsVerified:0};
+        if(stale){
+          for(const row of eligible){ row.transferLastCoveredHeadV1114=head; row.transferLastPollAtV1114=nowMs; row.holderDeltaStatusV1114="FORWARD_ONLY_TRANSFER_BASELINE_ESTABLISHED_V1114"; }
+        } else if(transferLogs.length){
+          const perToken=new Map();
+          for(const log of transferLogs){
+            const token=normalize(log?.address||""); if(!tokenAddresses.includes(token)) continue;
+            const topics=Array.isArray(log?.topics)?log.topics:[];
+            const from=topicAddressV947(topics[1]), to=topicAddressV947(topics[2]);
+            const amount=transferAmountV947(log?.data);
+            if(!from||!to||amount===null) continue;
+            if(!perToken.has(token)) perToken.set(token,{logs:[],delta:new Map(),minted:0n,burned:0n});
+            const bag=perToken.get(token); bag.logs.push(log);
+            if(from===ZERO) bag.minted+=amount; else if(!infrastructureHolderReason(from,token,null)) bag.delta.set(from,(bag.delta.get(from)||0n)-amount);
+            if(to===ZERO) bag.burned+=amount; else if(!infrastructureHolderReason(to,token,null)) bag.delta.set(to,(bag.delta.get(to)||0n)+amount);
+          }
+          const allTouched=[...new Set([...perToken.values()].flatMap(b=>[...b.delta.keys()]))];
+          transferLiveV1114.touchedWallets=allTouched.length;
+          if(allTouched.length>PRIORITY_LIVE_TRANSFER_MAX_TOUCHED_WALLETS_V1114){
+            transferLiveV1114.status="TRANSFER_TOUCHED_WALLET_CAP_EXCEEDED_UNVERIFIED_HOLDER_DELTA_V1114";
+            for(const row of eligible){ row.transferLastCoveredHeadV1114=head; row.transferLastPollAtV1114=nowMs; row.holderDeltaStatusV1114=transferLiveV1114.status; }
+          } else {
+            const balancePayload=[]; let bid=1000; const balanceMeta=new Map();
+            for(const row of eligible){
+              const token=normalize(row.address); const bag=perToken.get(token); if(!bag||!bag.logs.length) continue;
+              const supplyId=bid++; balancePayload.push({jsonrpc:'2.0',id:supplyId,method:'eth_call',params:[{to:token,data:'0x18160ddd'},`0x${head.toString(16)}`]}); balanceMeta.set(supplyId,{kind:'supply',token});
+              const decId=bid++; balancePayload.push({jsonrpc:'2.0',id:decId,method:'eth_call',params:[{to:token,data:'0x313ce567'},`0x${head.toString(16)}`]}); balanceMeta.set(decId,{kind:'decimals',token});
+              for(const wallet of bag.delta.keys()){ const data=rpcBalanceOfDataV1114(wallet); if(!data) continue; const idq=bid++; balancePayload.push({jsonrpc:'2.0',id:idq,method:'eth_call',params:[{to:token,data},`0x${head.toString(16)}`]}); balanceMeta.set(idq,{kind:'balance',token,wallet}); }
+            }
+            if(balancePayload.length){
+              requests++; transferLiveV1114.balanceRequestUsed=true;
+              try{
+                const br=await fetch(rpcUrl,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(balancePayload)});
+                const ba=await br.json().catch(()=>[]);
+                const vals=new Map(); if(Array.isArray(ba)) for(const x of ba) vals.set(Number(x?.id),x);
+                if(br.ok){
+                  const tokenInfo=new Map();
+                  for(const [idq,meta] of balanceMeta.entries()){ const x=vals.get(idq); if(!x||x?.error) continue; if(!tokenInfo.has(meta.token)) tokenInfo.set(meta.token,{balances:new Map(),supply:null,decimals:null}); const ti=tokenInfo.get(meta.token); const v=rpcHexBigIntV1114(x?.result); if(v===null) continue; if(meta.kind==='supply') ti.supply=v; else if(meta.kind==='decimals') ti.decimals=Number(v); else ti.balances.set(meta.wallet,v); }
+                  for(const row of eligible){
+                    const token=normalize(row.address), bag=perToken.get(token), ti=tokenInfo.get(token); if(!bag||!bag.logs.length||!ti||ti.supply===null) continue;
+                    const preSupply=ti.supply-bag.minted+bag.burned; let newHolders=0,lostHolders=0,verifiedWallets=0,integrityErrors=0; const large=[];
+                    for(const [wallet,delta] of bag.delta.entries()){ const cur=ti.balances.get(wallet); if(cur===undefined) {integrityErrors++; continue;} const pre=cur-delta; if(pre<0n){integrityErrors++; continue;} verifiedWallets++; if(pre===0n&&cur>0n)newHolders++; if(pre>0n&&cur===0n)lostHolders++; const prePct=pctSupplyV1114(pre,preSupply), curPct=pctSupplyV1114(cur,ti.supply); const isLarge=(prePct!==null&&prePct>=PRIORITY_LIVE_LARGE_WALLET_PCT_V1114)||(curPct!==null&&curPct>=PRIORITY_LIVE_LARGE_WALLET_PCT_V1114); if(isLarge){ large.push({address:wallet,preBalance:rawToDecimalStringV1114(pre,ti.decimals),currentBalance:rawToDecimalStringV1114(cur,ti.decimals),delta:rawToDecimalStringV1114(delta,ti.decimals),preSupplyPct:prePct,currentSupplyPct:curPct,direction:delta>0n?'ACCUMULATING':delta<0n?'DISTRIBUTING':'FLAT'}); } }
+                    const verified=integrityErrors===0&&verifiedWallets===bag.delta.size; const point={verified,observedAt:nowMs,fromBlock,throughBlock:head,transferLogs:bag.logs.length,touchedWallets:bag.delta.size,verifiedWallets,newHolders:verified?newHolders:0,lostHolders:verified?lostHolders:0,netHolderDelta:verified?newHolders-lostHolders:0,totalSupply:ti.supply.toString(),preSupply:preSupply.toString(),decimals:ti.decimals,largeWalletAddresses:large.map(x=>x.address),largeWalletAccumulating:large.filter(x=>x.direction==='ACCUMULATING').length,largeWalletDistributing:large.filter(x=>x.direction==='DISTRIBUTING').length,largeWallets:large.slice(0,12),integrityErrors,source:'RPC_TRANSFER_PLUS_HEAD_BALANCE_RECONSTRUCTION_V1114'};
+                    row.transferLastCoveredHeadV1114=head; row.transferLastPollAtV1114=nowMs; row.holderDeltaStatusV1114=verified?'EXACT_INTERVAL_HOLDER_DELTA_VERIFIED_V1114':'HOLDER_DELTA_BALANCE_INTEGRITY_FAILED_V1114';
+                    if(verified){ const pts=Array.isArray(row.holderDeltaPointsV1114)?row.holderDeltaPointsV1114:[]; pts.push(point); row.holderDeltaPointsV1114=pts.slice(-PRIORITY_LIVE_TRANSFER_MAX_POINTS_V1114); row.holderNetDeltaSinceEntryV1114=safeNumber(row.holderNetDeltaSinceEntryV1114)+point.netHolderDelta; row.holderDeltaRollingV1114=priorityLiveHolderRollingV1114(row.holderDeltaPointsV1114,nowMs); transferLiveV1114.verifiedTransferLogs+=bag.logs.length; transferLiveV1114.holderTransitionsVerified+=newHolders+lostHolders; }
+                    const anchor=row?.holderBaselineV1114; const anchored=anchor?.verified===true&&Number.isFinite(Number(anchor?.holderCount))?Math.max(0,Math.trunc(Number(anchor.holderCount))+safeNumber(row.holderNetDeltaSinceEntryV1114)):null;
+                    row.largeWalletDeltaV1114={verified,thresholdPctOfSupply:PRIORITY_LIVE_LARGE_WALLET_PCT_V1114,scope:'TOUCHED_WALLETS_ONLY_NOT_COMPLETE_TOP_HOLDER_CENSUS',largeWallets:large.slice(0,12),accumulating:large.filter(x=>x.direction==='ACCUMULATING').length,distributing:large.filter(x=>x.direction==='DISTRIBUTING').length,observedAt:nowMs};
+                    row.holderCountEstimateV1114=anchored===null?null:{estimatedHolderCount:anchored,anchorHolderCount:Math.trunc(Number(anchor.holderCount)),anchorObservedAt:anchor.observedAt||null,netDeltaSinceEntry:safeNumber(row.holderNetDeltaSinceEntryV1114),status:'ANCHORED_FORWARD_ESTIMATE_REQUIRES_PERIODIC_RECONCILIATION_V1114'};
+                  }
+                  transferLiveV1114.status="RPC_TRANSFER_HOLDER_DELTA_OK_V1114";
+                } else transferLiveV1114.status=`BALANCE_BATCH_HTTP_${br.status}_V1114`;
+              }catch(error){ transferLiveV1114.status="BALANCE_BATCH_FAILED_V1114"; transferLiveV1114.error=errorString(error); }
+            }
+          }
+        }
+        return {attempted:true,status:stale?"RPC_FORWARD_BASELINE_OK_V1112":"RPC_EXACT_POOL_LIVE_FLOW_OK_V1112",externalRequestsUsed:requests,provider,attempts,eligiblePools:poolIds.length,fromBlock,throughBlock:head,returnedLogs:logs.length,verifiedTrades,decodedTrades,exactUsdTrades,baselineOnly:stale,transferLiveV1114};
       }catch(error){clearTimeout(timer);attempts.push({provider,httpStatus:null,ok:false,error:errorString(error)});}
     }
     return {attempted:true,status:"RPC_EXACT_POOL_LIVE_BATCH_FAILED_V1112",externalRequestsUsed:requests,eligiblePools:poolIds.length,attempts,verifiedTrades:0};
@@ -198139,7 +198294,7 @@ export class V3LiveCollectorV363 {
     if(addresses.length && dexDueV1112){
       requests+=1;
       try{
-        response=await fetch(`${DEXSCREENER_BASE}/tokens/v1/robinhood/${addresses.join(",")}`,{headers:{"accept":"application/json","user-agent":"ChainVanta-V1109-PriorityLive/1.0"}});
+        response=await fetch(`${DEXSCREENER_BASE}/tokens/v1/robinhood/${addresses.join(",")}`,{headers:{"accept":"application/json","user-agent":"ChainVanta-V1114-PriorityLive/1.0"}});
         lastHttpStatus=response.status;
         if(response.ok) pairs=await response.json().catch(()=>[]);
         else lastError=`DEXSCREENER_HTTP_${response.status}`;
