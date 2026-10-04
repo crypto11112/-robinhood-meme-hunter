@@ -1,4 +1,18 @@
 /**
+ * ChainVanta — V1118
+ * TARGET-AWARE OUTCOME FREEZER + PENDING REASON TELEMETRY — SHADOW V1
+ * Builds directly from deployed V1117.
+ * - Fixes a V1117 handoff edge case where a still-fresh but pre-target provider snapshot
+ *   could mask a newer exact-RPC execution price and leave a due outcome PENDING.
+ * - Outcome capture is now target-aware: it evaluates every verified price candidate and
+ *   freezes from the freshest candidate observed at/after the horizon target.
+ * - Adds explicit due/pending telemetry per horizon: targetPassed, latest eligible/seen
+ *   observation, source, freezeEligible and a machine-readable pendingReason.
+ * - Preserves all V1117 records and the same 1m/5m/15m/30m/1h/2h/4h forward-only audit.
+ * - No new RPC/provider requests, no hindsight backfill, no Telegram or production changes.
+ */
+
+/**
  * ChainVanta — V1117
  * FORWARD-ONLY LIVE DECISION OUTCOME AUDIT — SHADOW V1
  * Builds directly from deployed V1116.
@@ -9698,7 +9712,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1117"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1118"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -195595,31 +195609,48 @@ function priorityLiveTokenScaleV1117(row){
   return null;
 }
 
-function priorityLivePriceSnapshotV1117(row, nowMs=Date.now()){
+function priorityLivePriceCandidatesV1118(row, nowMs=Date.now()){
+  const candidates=[];
   const market=row?.latestObservationV1109;
   const marketAt=safeNumber(market?.observedAt);
   const marketPrice=Number(market?.priceUsd), marketCap=Number(market?.marketCap);
   if(market?.verified===true && marketAt>0 && nowMs-marketAt<=10*60*1000 && Number.isFinite(marketPrice)&&marketPrice>0){
-    return {verified:true,observedAt:marketAt,priceUsd:marketPrice,marketCap:Number.isFinite(marketCap)&&marketCap>0?marketCap:null,source:"PINNED_PROVIDER_MARKET_V1109",priceBasis:"VERIFIED_PROVIDER_PRICE"};
+    candidates.push({verified:true,observedAt:marketAt,priceUsd:marketPrice,marketCap:Number.isFinite(marketCap)&&marketCap>0?marketCap:null,source:"PINNED_PROVIDER_MARKET_V1109",priceBasis:"VERIFIED_PROVIDER_PRICE"});
   }
   const scale=priorityLiveTokenScaleV1117(row);
-  if(!scale) return {verified:false,status:"NO_VERIFIED_PRICE_SCALE_V1117"};
-  const trades=(Array.isArray(row?.rpcTradesV1112)?row.rpcTradesV1112:[]).filter(t=>{
-    const at=safeNumber(t?.observedAt); return t?.exactUsdVerified===true&&at>0&&nowMs-at<=5*60*1000&&Number.isFinite(Number(t?.exactUsdAmount))&&Number(t.exactUsdAmount)>0&&t?.candidateAmountRaw!==undefined;
-  });
-  const priced=[];
-  for(const t of trades){
-    let qty=null; try{ qty=bigintDecimalToNumberV187(BigInt(String(t.candidateAmountRaw)),scale.decimals); }catch(_){}
-    const usd=Number(t.exactUsdAmount);
-    if(Number.isFinite(qty)&&qty>0&&Number.isFinite(usd)&&usd>0) priced.push({price:usd/qty,observedAt:safeNumber(t.observedAt)});
+  if(scale){
+    const trades=(Array.isArray(row?.rpcTradesV1112)?row.rpcTradesV1112:[]).filter(t=>{
+      const at=safeNumber(t?.observedAt); return t?.exactUsdVerified===true&&at>0&&nowMs-at<=5*60*1000&&Number.isFinite(Number(t?.exactUsdAmount))&&Number(t.exactUsdAmount)>0&&t?.candidateAmountRaw!==undefined;
+    });
+    const priced=[];
+    for(const t of trades){
+      let qty=null; try{ qty=bigintDecimalToNumberV187(BigInt(String(t.candidateAmountRaw)),scale.decimals); }catch(_){}
+      const usd=Number(t.exactUsdAmount);
+      if(Number.isFinite(qty)&&qty>0&&Number.isFinite(usd)&&usd>0) priced.push({price:usd/qty,observedAt:safeNumber(t.observedAt)});
+    }
+    if(priced.length){
+      const sorted=priced.map(x=>x.price).sort((a,b)=>a-b);
+      const mid=Math.floor(sorted.length/2);
+      const price=sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;
+      const supply=bigintDecimalToNumberV187(scale.totalSupplyRaw,scale.decimals);
+      const cap=Number.isFinite(supply)&&supply>0?price*supply:null;
+      candidates.push({verified:true,observedAt:Math.max(...priced.map(x=>x.observedAt)),priceUsd:price,marketCap:Number.isFinite(cap)&&cap>0?cap:null,source:"EXACT_RPC_MEDIAN_EXECUTION_PRICE_V1118",priceBasis:`${priced.length}_RECENT_EXACT_USD_TRADES`,sampleCount:priced.length,decimals:scale.decimals});
+    }
   }
-  if(!priced.length) return {verified:false,status:"NO_RECENT_EXACT_RPC_EXECUTION_PRICE_V1117"};
-  const sorted=priced.map(x=>x.price).sort((a,b)=>a-b);
-  const mid=Math.floor(sorted.length/2);
-  const price=sorted.length%2?sorted[mid]:(sorted[mid-1]+sorted[mid])/2;
-  const supply=bigintDecimalToNumberV187(scale.totalSupplyRaw,scale.decimals);
-  const cap=Number.isFinite(supply)&&supply>0?price*supply:null;
-  return {verified:true,observedAt:Math.max(...priced.map(x=>x.observedAt)),priceUsd:price,marketCap:Number.isFinite(cap)&&cap>0?cap:null,source:"EXACT_RPC_MEDIAN_EXECUTION_PRICE_V1117",priceBasis:`${priced.length}_RECENT_EXACT_USD_TRADES`,sampleCount:priced.length,decimals:scale.decimals};
+  return candidates.sort((a,b)=>safeNumber(b?.observedAt)-safeNumber(a?.observedAt));
+}
+
+function priorityLivePriceSnapshotV1117(row, nowMs=Date.now(), minObservedAt=0){
+  const candidates=priorityLivePriceCandidatesV1118(row,nowMs);
+  const minimum=Math.max(0,safeNumber(minObservedAt));
+  const eligible=candidates.filter(x=>x?.verified===true&&safeNumber(x?.observedAt)>=minimum&&Number(x?.priceUsd)>0);
+  if(eligible.length) return {...eligible[0],targetAwareV1118:true,minObservedAt:minimum};
+  const latest=candidates[0]||null;
+  let status="NO_VERIFIED_PRICE_CANDIDATE_V1118";
+  if(latest&&minimum>0&&safeNumber(latest?.observedAt)<minimum) status="TARGET_PASSED_NO_POST_TARGET_VERIFIED_PRICE_V1118";
+  else if(!latest&&priorityLiveTokenScaleV1117(row)) status="NO_RECENT_VERIFIED_PRICE_CANDIDATE_V1118";
+  else if(!latest) status="NO_VERIFIED_PRICE_SCALE_OR_PROVIDER_PRICE_V1118";
+  return {verified:false,status,targetAwareV1118:true,minObservedAt:minimum,latestSeenObservedAt:latest?.observedAt||null,latestSeenPriceUsd:latest?.priceUsd||null,latestSeenMarketCap:latest?.marketCap||null,latestSeenSource:latest?.source||null,availableCandidates:candidates.length};
 }
 
 function pctOutcomeV1117(before,after){
@@ -195631,7 +195662,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
   let records=Array.isArray(state.records)?state.records:[];
   records=records.filter(r=>safeNumber(r?.decisionAt)>0&&nowMs-safeNumber(r.decisionAt)<=PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117);
   const rowMap=new Map((Array.isArray(liveRows)?liveRows:[]).map(r=>[normalize(r?.address||""),r]));
-  let changed=false,newRecords=0,outcomesFrozen=0;
+  let changed=false,newRecords=0,outcomesFrozen=0,pendingDiagnosticsUpdated=0;
   for(const row of (Array.isArray(liveRows)?liveRows:[])){
     const address=normalize(row?.address||""); if(!isAddress(address)) continue;
     const decision=row?.liveDecisionV1116||priorityLiveDecisionV1116(row,nowMs);
@@ -195640,34 +195671,54 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
     if(decisionState!==prior){
       row.lastDecisionAuditStateV1117=decisionState;
       if(PRIORITY_LIVE_DECISION_AUDIT_STATES_V1117.has(decisionState)){
-        const snap=priorityLivePriceSnapshotV1117(row,nowMs);
-        const horizons={}; for(const key of Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)) horizons[key]={status:"PENDING",targetAt:nowMs+PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117[key]};
+        const snap=priorityLivePriceSnapshotV1117(row,nowMs,0);
+        const horizons={}; for(const key of Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)) horizons[key]={status:"PENDING",targetAt:nowMs+PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117[key],targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1118"};
         records.push({
           id:`${address}:${decisionState}:${nowMs}`,address,symbol:row?.symbol||null,state:decisionState,decisionAt:nowMs,
           confidence:decision?.confidence||null,evidenceCoveragePct:safeNumber(decision?.evidenceCoveragePct),
           controlledShadowTest:row?.controlledShadowTestV1110===true,genuinePromotion:row?.controlledShadowTestV1110!==true&&!!row?.promotedAt,
-          baseline:snap?.verified===true?snap:{verified:false,status:snap?.status||"DECISION_BASELINE_PRICE_UNAVAILABLE_V1117",observedAt:null,priceUsd:null,marketCap:null},
+          baseline:snap?.verified===true?snap:{verified:false,status:snap?.status||"DECISION_BASELINE_PRICE_UNAVAILABLE_V1118",observedAt:null,priceUsd:null,marketCap:null},
           decisionEvidence:{bullishPillars:Array.isArray(decision?.bullishPillars)?decision.bullishPillars:[],bearishPillars:Array.isArray(decision?.bearishPillars)?decision.bearishPillars:[],blockers:Array.isArray(decision?.blockers)?decision.blockers:[],reasons:Array.isArray(decision?.reasons)?decision.reasons:[]},
-          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1117"
+          horizons,forwardOnly:true,hindsightBackfillAllowed:false,version:"V1118"
         });
         newRecords++; changed=true;
       }
     }
   }
   for(const rec of records){
-    const row=rowMap.get(normalize(rec?.address||"")); if(!row) continue;
-    const baseline=rec?.baseline; if(baseline?.verified!==true||!(Number(baseline?.priceUsd)>0)) continue;
+    const row=rowMap.get(normalize(rec?.address||""));
+    const baseline=rec?.baseline;
     for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
-      const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN"||nowMs<safeNumber(h.targetAt||rec.decisionAt+ms)) continue;
-      const snap=priorityLivePriceSnapshotV1117(row,nowMs);
+      const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN") continue;
       const targetAt=safeNumber(h.targetAt||rec.decisionAt+ms);
-      if(snap?.verified!==true||safeNumber(snap?.observedAt)<targetAt) continue;
-      rec.horizons[key]={status:"FROZEN",targetAt,capturedAt:nowMs,observationAt:snap.observedAt,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),priceUsd:snap.priceUsd,marketCap:snap.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,snap.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,snap.marketCap),source:snap.source,priceBasis:snap.priceBasis||null};
-      outcomesFrozen++; changed=true;
+      const targetPassed=nowMs>=targetAt;
+      if(!targetPassed){
+        const next={...h,targetAt,targetPassed:false,freezeEligible:false,pendingReason:"TARGET_NOT_REACHED_V1118"};
+        if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
+        continue;
+      }
+      if(!row){
+        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"TOKEN_NOT_CURRENTLY_OBSERVABLE_IN_LIVE_LANE_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null};
+        if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
+        continue;
+      }
+      if(baseline?.verified!==true||!(Number(baseline?.priceUsd)>0)){
+        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"DECISION_BASELINE_UNVERIFIED_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null};
+        if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
+        continue;
+      }
+      const snap=priorityLivePriceSnapshotV1117(row,nowMs,targetAt);
+      if(snap?.verified===true&&safeNumber(snap?.observedAt)>=targetAt){
+        rec.horizons[key]={status:"FROZEN",targetAt,targetPassed:true,freezeEligible:true,pendingReason:null,capturedAt:nowMs,observationAt:snap.observedAt,latestEligibleObservationAt:snap.observedAt,latestEligiblePrice:snap.priceUsd,observationSource:snap.source,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),priceUsd:snap.priceUsd,marketCap:snap.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,snap.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,snap.marketCap),source:snap.source,priceBasis:snap.priceBasis||null,targetAwareV1118:true};
+        outcomesFrozen++; changed=true;
+      }else{
+        const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:snap?.status||"TARGET_PASSED_NO_POST_TARGET_VERIFIED_PRICE_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,latestSeenObservationAt:snap?.latestSeenObservedAt||null,latestSeenPrice:snap?.latestSeenPriceUsd||null,latestSeenSource:snap?.latestSeenSource||null,targetAwareV1118:true};
+        if(JSON.stringify(next)!==JSON.stringify(h)){ rec.horizons[key]=next; changed=true; pendingDiagnosticsUpdated++; }
+      }
     }
   }
   if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
-  return {audit:{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs},changed,newRecords,outcomesFrozen};
+  return {audit:{version:"V1118",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
 }
 
 // V1116 combined decision layer. This is deliberately downstream of all existing
@@ -196619,7 +196670,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1117",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1118",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -196700,9 +196751,10 @@ async function livePriorityLaneStatusV1109(env) {
       combinedLiveDecisionV1116:"EXACT_RPC_FLOW_PLUS_HOLDER_DELTA_PLUS_SEEDED_WHALES_PLUS_STRUCTURE_PLUS_MARKET_CONTEXT",
       decisionStatesV1116:["BUILDING_EVIDENCE","ENTRY_FORMING","ENTRY_READY","HOLD","CAUTION","EXIT_RISK"],
       decisionOutcomeAuditV1117:"FORWARD_ONLY_1M_5M_15M_30M_1H_2H_4H_NO_NEW_REQUESTS",
+      outcomeFreezerIntegrityV1118:"TARGET_AWARE_MULTI_SOURCE_PRICE_SELECTION_PLUS_PENDING_REASON_TELEMETRY",
       telegramMutation:false
     },
-    nextStage:"V1117 freezes forward-only outcomes for meaningful live-decision transitions. After enough audited decisions mature, calibrate thresholds from measured results before any Telegram activation.",
+    nextStage:"V1118 proves due outcomes freeze from the first verified post-target observation and explains every pending horizon. After this passes, let multiple audited decisions mature before threshold calibration or Telegram activation.",
     timestamp:now()
   };
 }
@@ -196721,9 +196773,15 @@ async function readLiveDecisionAuditV1117(env){
 async function liveDecisionAuditStatusV1117(env){
   const snap=await readLiveDecisionAuditV1117(env);
   const records=Array.isArray(snap?.records)?snap.records:[];
-  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0;
-  for(const r of records){ stateCounts[r?.state]=(stateCounts[r?.state]||0)+1; for(const h of Object.values(r?.horizons||{})){ if(h?.status==="FROZEN") frozenOutcomes++; else if(h?.status==="PENDING") pendingOutcomes++; } }
-  return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1117",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,forwardOnly:true,hindsightBackfillAllowed:false,records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),note:"Outcomes freeze only from verified observations seen at/after each target while the token remains observable in the live lane. Missing evidence is never hindsight-backfilled.",timestamp:now()};
+  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0,duePendingOutcomes=0; const pendingReasonCounts={};
+  for(const r of records){
+    stateCounts[r?.state]=(stateCounts[r?.state]||0)+1;
+    for(const h of Object.values(r?.horizons||{})){
+      if(h?.status==="FROZEN") frozenOutcomes++;
+      else if(h?.status==="PENDING"){ pendingOutcomes++; if(h?.targetPassed===true) duePendingOutcomes++; const reason=h?.pendingReason||"LEGACY_PENDING_NO_V1118_REASON"; pendingReasonCounts[reason]=(pendingReasonCounts[reason]||0)+1; }
+    }
+  }
+  return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1118",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,duePendingOutcomes,pendingReasonCounts,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),note:"V1118 evaluates all existing verified price candidates against each target. A due horizon freezes only from an observation at/after its target; otherwise pendingReason states exactly why it remains pending. No hindsight backfill or new provider requests.",timestamp:now()};
 }
 
 async function readLiveHorizonSnapshotsV413(env) {
@@ -198463,7 +198521,7 @@ export class V3LiveCollectorV363 {
 
   async priorityDecisionAuditSnapshotV1117(){
     const audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
-    return {version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:Array.isArray(audit?.records)?audit.records:[],lastUpdatedAt:audit?.lastUpdatedAt||null};
+    return {version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1118",forwardOnly:true,hindsightBackfillAllowed:false,records:Array.isArray(audit?.records)?audit.records:[],lastUpdatedAt:audit?.lastUpdatedAt||null};
   }
 
   async priorityLiveRpcBatchV1112(liveRows, nowMs=Date.now()) {
