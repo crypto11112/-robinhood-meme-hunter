@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1122"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1123"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192333,6 +192333,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-calibration-diversity-status"
+  ) {
+    return jsonResponse(
+      await liveCalibrationDiversityStatusV1123(env)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -196971,11 +196980,81 @@ async function liveDecisionAuditStatusV1117(env){
     }
   }
   return {
-    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1122",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1123",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
     forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,lightweightOutcomeObserverV1120:true,outcomeQualityGuardV1121:true,valuationBasisIntegrityV1121:true,precisionTimingGradesV1122:true,exactMaxLagMsV1122:PRIORITY_OUTCOME_EXACT_LAG_MS_V1122,nearExactMaxLagMsV1122:PRIORITY_OUTCOME_NEAR_EXACT_LAG_MS_V1122,readProjectionV1119:snap?.readProjectionV1119===true,
     projectionEvaluatedAt:snap?.projectionEvaluatedAt||null,legacyHorizonsProjected:safeNumber(snap?.legacyHorizonsProjected),duePendingProjected:safeNumber(snap?.duePendingProjected),freezeEligibleProjected:safeNumber(snap?.freezeEligibleProjected),
     outcomeObserverV1120:snap?.outcomeObserverV1120||null,records:records.length,stateCounts,frozenOutcomes,performanceEligibleOutcomes,staleFrozenOutcomes,incomparableMarketCapOutcomes,performanceQualityCounts,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,maxAcceptedLagMsV1121:PRIORITY_OUTCOME_MAX_LAG_MS_V1121,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
-    note:"V1122 tightens timing labels: EXACT <=3s, NEAR_EXACT >3s to 10s, ACCEPTABLE_LAG thereafter within the horizon allowance, STALE beyond it. V1121 performance and valuation-integrity rules remain unchanged; no hindsight backfill or extra requests.",timestamp:now()
+    note:"V1123 preserves V1122 timing labels and adds a separate read-only cross-token calibration-diversity endpoint. V1122 timing labels: EXACT <=3s, NEAR_EXACT >3s to 10s, ACCEPTABLE_LAG thereafter within the horizon allowance, STALE beyond it. V1121 performance and valuation-integrity rules remain unchanged; no hindsight backfill or extra requests.",timestamp:now()
+  };
+}
+
+
+// V1123: read-only cross-token calibration diversity telemetry.
+// Does not change promotion, decision thresholds, RPC/provider cadence, or Telegram.
+function medianV1123(values){
+  const rows=(Array.isArray(values)?values:[]).map(Number).filter(Number.isFinite).sort((a,b)=>a-b);
+  if(!rows.length) return null;
+  const mid=Math.floor(rows.length/2);
+  return rows.length%2?rows[mid]:(rows[mid-1]+rows[mid])/2;
+}
+
+function meanV1123(values){
+  const rows=(Array.isArray(values)?values:[]).map(Number).filter(Number.isFinite);
+  if(!rows.length) return null;
+  return rows.reduce((a,b)=>a+b,0)/rows.length;
+}
+
+async function liveCalibrationDiversityStatusV1123(env){
+  const snap=await readLiveDecisionAuditV1117(env);
+  const records=Array.isArray(snap?.records)?snap.records:[];
+  const byToken={}; const byState={}; const byStateHorizon={};
+  let genuineRecords=0, controlledRecords=0, eligibleOutcomes=0;
+  for(const r of records){
+    const address=normalize(r?.address||"")||String(r?.address||"UNKNOWN");
+    const symbol=String(r?.symbol||"UNKNOWN");
+    const state=String(r?.state||"UNKNOWN");
+    const genuine=r?.genuinePromotion===true;
+    if(genuine) genuineRecords++; else if(r?.controlledShadowTest===true) controlledRecords++;
+    if(!byToken[address]) byToken[address]={address,symbol,records:0,genuineRecords:0,states:{},eligibleOutcomes:0,horizons:{}};
+    const t=byToken[address]; t.records++; if(genuine)t.genuineRecords++; t.states[state]=(t.states[state]||0)+1;
+    if(!byState[state]) byState[state]={records:0,genuineRecords:0,eligibleOutcomes:0,horizons:{}};
+    byState[state].records++; if(genuine)byState[state].genuineRecords++;
+    for(const [horizon,h] of Object.entries(r?.horizons||{})){
+      if(h?.status!=="FROZEN"||h?.performanceEligibleV1122!==true) continue;
+      const ret=Number(h?.priceChangePct); if(!Number.isFinite(ret)) continue;
+      eligibleOutcomes++; t.eligibleOutcomes++; byState[state].eligibleOutcomes++;
+      if(!t.horizons[horizon]) t.horizons[horizon]=[]; t.horizons[horizon].push(ret);
+      if(!byState[state].horizons[horizon]) byState[state].horizons[horizon]=[]; byState[state].horizons[horizon].push(ret);
+      const key=`${state}:${horizon}`; if(!byStateHorizon[key]) byStateHorizon[key]=[]; byStateHorizon[key].push(ret);
+    }
+  }
+  const tokens=Object.values(byToken).map(t=>({
+    address:t.address,symbol:t.symbol,records:t.records,genuineRecords:t.genuineRecords,states:t.states,eligibleOutcomes:t.eligibleOutcomes,
+    horizonPerformance:Object.fromEntries(Object.entries(t.horizons).map(([h,v])=>[h,{n:v.length,medianPct:medianV1123(v),meanPct:meanV1123(v)}]))
+  })).sort((a,b)=>b.records-a.records);
+  const states=Object.fromEntries(Object.entries(byState).map(([state,v])=>[state,{
+    records:v.records,genuineRecords:v.genuineRecords,eligibleOutcomes:v.eligibleOutcomes,
+    horizonPerformance:Object.fromEntries(Object.entries(v.horizons).map(([h,vals])=>[h,{n:vals.length,medianPct:medianV1123(vals),meanPct:meanV1123(vals)}]))
+  }]));
+  const uniqueTokens=tokens.length;
+  const dominantRecordSharePct=records.length&&tokens.length?Number((100*tokens[0].records/records.length).toFixed(2)):0;
+  const tokensWithGenuineDecisions=tokens.filter(t=>t.genuineRecords>0).length;
+  const tokensWithEligibleOutcomes=tokens.filter(t=>t.eligibleOutcomes>0).length;
+  let readiness="NOT_READY_NO_DATA_V1123";
+  if(records.length){
+    if(uniqueTokens<2||dominantRecordSharePct>=90) readiness="NOT_READY_SINGLE_TOKEN_DOMINANCE_V1123";
+    else if(tokensWithEligibleOutcomes<3) readiness="EARLY_MULTI_TOKEN_SAMPLE_V1123";
+    else if(tokensWithEligibleOutcomes<5||eligibleOutcomes<100) readiness="BUILDING_CROSS_TOKEN_CALIBRATION_V1123";
+    else readiness="CROSS_TOKEN_CALIBRATION_SAMPLE_READY_V1123";
+  }
+  return {
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_CALIBRATION_DIVERSITY_STATUS_V1123",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,externalRequestsAdded:0,
+    records:records.length,genuineRecords,controlledRecords,performanceEligibleOutcomes:eligibleOutcomes,uniqueTokens,tokensWithGenuineDecisions,tokensWithEligibleOutcomes,dominantRecordSharePct,
+    calibrationReadiness:readiness,
+    suggestedReadinessGuide:{minimumDifferentTokens:5,preferredDifferentTokens:10,minimumEligibleOutcomes:100,note:"Guide only; V1123 never auto-tunes production thresholds."},
+    tokens,states,
+    note:"V1123 measures whether live-decision evidence generalises beyond one token. It is telemetry only: no promotion, scoring, provider cadence, decision threshold, or Telegram behavior changes.",timestamp:now()
   };
 }
 
