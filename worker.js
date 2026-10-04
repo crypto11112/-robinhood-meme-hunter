@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1124"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1125"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192351,6 +192351,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-promotion-near-miss-status"
+  ) {
+    return jsonResponse(
+      await livePromotionNearMissStatusV1125(env)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -197169,6 +197178,140 @@ async function livePromotionDiversityDiagnosticV1124(env){
     dispositionCounts,
     candidateDiagnostics,
     note:"V1124 explains why calibration remains concentrated in one token by joining the existing cohort/promotion evaluation with the current live-lane snapshot. It is diagnostic only and adds no provider/RPC traffic or production mutations.",
+    timestamp:now()
+  };
+}
+
+
+// V1125: read-only near-miss promotion watch.
+// This intentionally does not relax any promotion rule. It classifies the existing
+// V1124 candidate snapshot so we can tell whether non-dominant tokens are naturally
+// approaching promotion or repeatedly failing the same live-quality gate.
+async function livePromotionNearMissStatusV1125(env){
+  const diag=await livePromotionDiversityDiagnosticV1124(env);
+  const candidates=Array.isArray(diag?.candidateDiagnostics)?diag.candidateDiagnostics:[];
+
+  const rows=candidates
+    .filter(row=>row?.isCurrentCalibrationDominantToken!==true)
+    .map(row=>{
+      const hardBlockers=Array.isArray(row?.blockers)?[...new Set(row.blockers.filter(Boolean))]:[];
+      const readinessGaps=[];
+      if(row?.flowEvidenceReady!==true) readinessGaps.push("FLOW_EVIDENCE_NOT_READY");
+      if(row?.marketEvidenceReady!==true) readinessGaps.push("MARKET_EVIDENCE_NOT_READY");
+      if(row?.exactPoolIdentityAvailable!==true) readinessGaps.push("EXACT_POOL_IDENTITY_MISSING");
+
+      const buildingHistory =
+        row?.breakoutState === "BUILDING_BREAKOUT_HISTORY" ||
+        row?.accumulationState === "BUILDING_FLOW_HISTORY" ||
+        row?.disposition === "BUILDING_HISTORY_V1124";
+
+      let nearMissTier="NOT_NEAR_MISS_V1125";
+      let watchReason="MULTIPLE_OR_MATERIAL_GAPS_V1125";
+      if(row?.promote===true){
+        nearMissTier="PROMOTION_READY_V1125";
+        watchReason="ALREADY_ELIGIBLE_V1125";
+      }else if(hardBlockers.length===0 && buildingHistory && Number(row?.priorityScore||0)>0){
+        // Treat the history/evidence package as one maturation stage rather than
+        // pretending each downstream not-ready flag is an independent hard gate.
+        nearMissTier="TIER_1_MATURING_V1125";
+        watchReason="BUILDING_HISTORY_WITH_POSITIVE_PRIORITY_V1125";
+      }else if(hardBlockers.length===1){
+        nearMissTier="TIER_1_ONE_HARD_GATE_V1125";
+        watchReason=hardBlockers[0];
+      }else if(hardBlockers.length===2){
+        nearMissTier="TIER_2_TWO_HARD_GATES_V1125";
+        watchReason=hardBlockers.join("+");
+      }
+
+      const score =
+        (row?.promote===true?100:0) +
+        Math.max(0,Math.min(50,Number(row?.priorityScore||0))) +
+        (hardBlockers.length===0?25:Math.max(0,20-(hardBlockers.length*10))) +
+        (row?.exactPoolIdentityAvailable===true?8:0) +
+        (row?.flowEvidenceReady===true?6:0) +
+        (row?.marketEvidenceReady===true?6:0);
+
+      return {
+        rank:row?.rank??null,
+        address:row?.address||null,
+        symbol:row?.symbol||null,
+        promote:row?.promote===true,
+        activeInFastLane:row?.activeInFastLane===true,
+        nearMissTier,
+        watchReason,
+        nearMissScore:Number(score.toFixed(2)),
+        priorityScore:safeNumber(row?.priorityScore),
+        hardBlockerCount:hardBlockers.length,
+        hardBlockers,
+        readinessGaps,
+        buildingHistory,
+        breakoutState:row?.breakoutState||null,
+        accumulationState:row?.accumulationState||null,
+        entryQuality:row?.entryQuality||null,
+        flowEvidenceReady:row?.flowEvidenceReady===true,
+        marketEvidenceReady:row?.marketEvidenceReady===true,
+        exactPoolIdentityAvailable:row?.exactPoolIdentityAvailable===true,
+        opportunityScore:finiteOrNullV1076(row?.opportunityScore),
+        confidenceScore:finiteOrNullV1076(row?.confidenceScore),
+        riskScore:finiteOrNullV1076(row?.riskScore),
+        storedObservations:safeNumber(row?.storedObservations),
+        historyReadMatched:row?.historyReadMatched===true
+      };
+    })
+    .sort((a,b)=>{
+      const order={PROMOTION_READY_V1125:0,TIER_1_MATURING_V1125:1,TIER_1_ONE_HARD_GATE_V1125:2,TIER_2_TWO_HARD_GATES_V1125:3,NOT_NEAR_MISS_V1125:4};
+      const ao=order[a.nearMissTier]??9, bo=order[b.nearMissTier]??9;
+      if(ao!==bo) return ao-bo;
+      return Number(b.nearMissScore||0)-Number(a.nearMissScore||0);
+    });
+
+  const tierCounts={};
+  const hardBlockerCounts={};
+  for(const row of rows){
+    tierCounts[row.nearMissTier]=(tierCounts[row.nearMissTier]||0)+1;
+    for(const blocker of row.hardBlockers) hardBlockerCounts[blocker]=(hardBlockerCounts[blocker]||0)+1;
+  }
+  const watchCandidates=rows.filter(row=>
+    row.nearMissTier==="PROMOTION_READY_V1125" ||
+    row.nearMissTier==="TIER_1_MATURING_V1125" ||
+    row.nearMissTier==="TIER_1_ONE_HARD_GATE_V1125"
+  );
+
+  let status="NO_NON_DOMINANT_CANDIDATES_V1125";
+  if(rows.length){
+    if(rows.some(r=>r.promote===true)) status="NON_DOMINANT_PROMOTION_READY_V1125";
+    else if(watchCandidates.length) status="NEAR_MISS_CANDIDATES_PRESENT_V1125";
+    else status="NO_IMMEDIATE_NEAR_MISS_V1125";
+  }
+
+  return {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"LIVE_PROMOTION_NEAR_MISS_STATUS_V1125",
+    success:diag?.success===true,
+    readOnly:true,
+    shadowOnly:true,
+    productionAlertsEnabled:false,
+    thresholdsChanged:false,
+    promotionRulesChanged:false,
+    telegramMutation:false,
+    externalProviderRequestsAdded:0,
+    status,
+    calibration:diag?.calibration||null,
+    promotionFunnel:diag?.promotionFunnel||null,
+    candidatesEvaluated:rows.length,
+    watchCandidateCount:watchCandidates.length,
+    tierCounts,
+    hardBlockerCounts,
+    watchCandidates,
+    allNonDominantCandidates:rows,
+    interpretation:{
+      tier1Maturing:"Positive priority with no hard blocker; history/evidence is still maturing. No threshold is relaxed.",
+      tier1OneHardGate:"Exactly one current hard promotion blocker.",
+      tier2TwoHardGates:"Two current hard promotion blockers; useful context but not an immediate near miss.",
+      notNearMiss:"More substantial evidence/quality gaps remain."
+    },
+    note:"V1125 watches current non-dominant candidates approaching promotion using existing V1124 data only. It does not auto-promote, weaken safety rules, add provider traffic, or mutate production behavior.",
     timestamp:now()
   };
 }
