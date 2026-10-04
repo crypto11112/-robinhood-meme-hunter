@@ -1,4 +1,19 @@
 /**
+ * ChainVanta — V1099
+ * 2H + 4H FORWARD PERFORMANCE CHECKPOINTS
+ * Builds directly from deployed V1098.
+ * - Adds the missing 2h and 4h checkpoints as a separate forward-only tracker.
+ * - Does NOT alter/backfill the proven V620 historical 5m/15m/30m/1h/6h/12h/24h data.
+ * - Only NEW V1099-era successful Telegram calls initialise the 2h/4h tracker.
+ * - Reuses the existing V413 live market fetch; zero extra provider/RPC requests
+ *   and no faster polling cadence.
+ * - Freezes the first verified post-target market-cap/price observation at 2h/4h.
+ * - /horizon displays 2h and 4h between 1h and 6h.
+ * - No scoring, qualification, Telegram-call threshold, scanner cadence,
+ *   provider routing or request-budget changes.
+ */
+
+/**
  * ChainVanta — V1098
  * /HORIZON SAFE COMPACT DIAGNOSTIC
  * Builds directly from deployed V1097.
@@ -9348,7 +9363,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1098"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1099"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -138832,12 +138847,42 @@ function horizonDiagnosticsMessageV1098(record, nowMs = Date.now()) {
     ["m15","15m"],
     ["m30","30m"],
     ["h1","1h"],
+    ["h2","2h"],
+    ["h4","4h"],
     ["h6","6h"],
     ["h12","12h"],
     ["h24","24h"]
   ];
 
   for (const [key,label] of growthKeys) {
+    if(key === "h2" || key === "h4"){
+      const extension = record?.extendedPerformanceV1099 || null;
+      const extOutcome = extension?.outcomes?.[key]?.outcome || null;
+      const captured =
+        extOutcome?.verified === true &&
+        extOutcome?.frozen === true;
+
+      if(captured){
+        lines.push(
+          `📈 <b>${label}:</b> ${fmtMultiple(extOutcome?.multipleByMarketCap)} MC | ${fmtPct(extOutcome?.priceGrowthPct)} price`
+        );
+      }else if(extension?.version !== "V1099"){
+        lines.push(`📈 <b>${label}:</b> PRE-V1099 — NOT TRACKED`);
+      }else{
+        const targetAt =
+          key === "h2"
+            ? entryAt + (2*60*60*1000)
+            : entryAt + (4*60*60*1000);
+        lines.push(
+          `📈 <b>${label}:</b> ${
+            nowMs < targetAt
+              ? "PENDING"
+              : "WAITING FOR VERIFIED OBSERVATION"
+          }`
+        );
+      }
+      continue;
+    }
     const row = growth?.outcomes?.[key] || null;
     const price = row?.price || null;
     const captured =
@@ -138891,7 +138936,7 @@ function horizonDiagnosticsMessageV1098(record, nowMs = Date.now()) {
     `🏆 ATH: <b>${fmtMultiple(record?.athMultipleByMarketCap)}</b>`,
     `⬇️ Lowest MC: <b>${fmtMultiple(record?.lowestMultipleByMarketCapV407)}</b>`,
     "",
-    "<i>Read-only stored performance. No provider request is made by /horizon.</i>"
+    "<i>Read-only stored performance. 2h/4h are forward-only from V1099. No provider request is made by /horizon.</i>"
   );
 
   return lines.join("\n");
@@ -194507,7 +194552,8 @@ async function registerLiveHorizonV413(env, registration) {
         entryHolderSourceV620:registration?.entryHolderSourceV620||null,
         telegramMessageId: Number(entryProof.messageId),
         registeredAt: Date.now(),
-        oneMinutePerformanceV1096: true
+        oneMinutePerformanceV1096: true,
+        extendedPerformanceV1099: true
       })
     });
     const result = await response.json().catch(() => ({}));
@@ -194616,6 +194662,72 @@ async function mergeLiveHorizonSnapshotsV413(state, env) {
         outcomesMerged++;
         touched = true;
       }
+    }
+
+    const liveExtendedV1099 =
+      live?.extendedPerformanceV1099 &&
+      typeof live.extendedPerformanceV1099 === "object"
+        ? live.extendedPerformanceV1099
+        : null;
+    if(
+      liveExtendedV1099?.version === "V1099" &&
+      liveExtendedV1099?.forwardOnly === true &&
+      liveExtendedV1099?.hindsightBackfillAllowed === false
+    ){
+      let durableExtendedV1099 =
+        record?.extendedPerformanceV1099 &&
+        typeof record.extendedPerformanceV1099 === "object"
+          ? record.extendedPerformanceV1099
+          : null;
+
+      if(!durableExtendedV1099){
+        durableExtendedV1099 = {
+          version:"V1099",
+          forwardOnly:true,
+          hindsightBackfillAllowed:false,
+          entryTimestamp:Number(record.entryTimestamp),
+          outcomes:{
+            h2:{targetAt:Number(record.entryTimestamp)+(2*60*60*1000),outcome:null},
+            h4:{targetAt:Number(record.entryTimestamp)+(4*60*60*1000),outcome:null}
+          }
+        };
+        record.extendedPerformanceV1099 = durableExtendedV1099;
+        touched = true;
+      }
+
+      durableExtendedV1099.outcomes =
+        durableExtendedV1099?.outcomes &&
+        typeof durableExtendedV1099.outcomes === "object"
+          ? durableExtendedV1099.outcomes
+          : {};
+
+      for(const [key,delay] of Object.entries({
+        h2:2*60*60*1000,
+        h4:4*60*60*1000
+      })){
+        const liveSlot = liveExtendedV1099?.outcomes?.[key] || null;
+        const currentSlot =
+          durableExtendedV1099.outcomes[key] &&
+          typeof durableExtendedV1099.outcomes[key] === "object"
+            ? durableExtendedV1099.outcomes[key]
+            : {
+                targetAt:Number(record.entryTimestamp)+delay,
+                outcome:null
+              };
+
+        currentSlot.targetAt = Number(record.entryTimestamp)+delay;
+        if(
+          !currentSlot.outcome &&
+          liveSlot?.outcome?.verified === true &&
+          liveSlot?.outcome?.frozen === true
+        ){
+          currentSlot.outcome = {...liveSlot.outcome};
+          outcomesMerged++;
+          touched = true;
+        }
+        durableExtendedV1099.outcomes[key] = currentSlot;
+      }
+      record.extendedPerformanceV1099 = durableExtendedV1099;
     }
 
     const liveGrowthV620=
@@ -195860,6 +195972,19 @@ export class V3LiveCollectorV363 {
                 outcome:null
               }
             : null,
+        extendedPerformanceV1099:
+          body?.extendedPerformanceV1099 === true
+            ? {
+                version:"V1099",
+                forwardOnly:true,
+                hindsightBackfillAllowed:false,
+                entryTimestamp,
+                outcomes:{
+                  h2:{targetAt:entryTimestamp+(2*60*60*1000),outcome:null},
+                  h4:{targetAt:entryTimestamp+(4*60*60*1000),outcome:null}
+                }
+              }
+            : null,
         outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h12:null,h24:null},
         growthOutcomesV620:{
           version:"V620",
@@ -196091,6 +196216,65 @@ export class V3LiveCollectorV363 {
             };
           }
           row.oneMinuteOutcomeV1096 = oneMinuteV1096;
+        }
+
+        const extendedV1099 =
+          row?.extendedPerformanceV1099 &&
+          typeof row.extendedPerformanceV1099 === "object"
+            ? row.extendedPerformanceV1099
+            : null;
+        if(
+          extendedV1099?.version === "V1099" &&
+          extendedV1099?.forwardOnly === true &&
+          extendedV1099?.hindsightBackfillAllowed === false
+        ){
+          extendedV1099.outcomes =
+            extendedV1099?.outcomes &&
+            typeof extendedV1099.outcomes === "object"
+              ? extendedV1099.outcomes
+              : {};
+          for(const [key,delay] of Object.entries({
+            h2:2*60*60*1000,
+            h4:4*60*60*1000
+          })){
+            const targetAt = Number(row.entryTimestamp) + delay;
+            const slot =
+              extendedV1099.outcomes[key] &&
+              typeof extendedV1099.outcomes[key] === "object"
+                ? extendedV1099.outcomes[key]
+                : {targetAt,outcome:null};
+            slot.targetAt = targetAt;
+            if(!slot.outcome && observedAt >= targetAt){
+              const entryMcV1099 = Number(row.entryMarketCap);
+              const entryPriceV1099 = Number(row.entryPriceUsd);
+              slot.outcome = {
+                verified:true,
+                frozen:true,
+                targetAt,
+                observedAt,
+                observationLagMs:observedAt-targetAt,
+                marketCap,
+                multipleByMarketCap:
+                  Number.isFinite(entryMcV1099) && entryMcV1099 > 0
+                    ? marketCap / entryMcV1099
+                    : null,
+                entryPriceUsd:
+                  Number.isFinite(entryPriceV1099) && entryPriceV1099 > 0
+                    ? entryPriceV1099
+                    : null,
+                priceUsd:observedPriceV620,
+                priceGrowthPct:
+                  observedPriceV620 !== null &&
+                  Number.isFinite(entryPriceV1099) &&
+                  entryPriceV1099 > 0
+                    ? ((observedPriceV620-entryPriceV1099)/entryPriceV1099)*100
+                    : null,
+                source:"DEXSCREENER_LIVE_HORIZON_V1099_REUSED_V413"
+              };
+            }
+            extendedV1099.outcomes[key] = slot;
+          }
+          row.extendedPerformanceV1099 = extendedV1099;
         }
 
         row.growthOutcomesV620=
