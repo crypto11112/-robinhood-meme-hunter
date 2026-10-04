@@ -9727,9 +9727,16 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1143"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1144"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
+ * V1144 — FLOW-BOOTSTRAP ELIGIBILITY PREDICATE AUDIT
+ * Diagnostic-only visibility for the exact V551 predicates used by V1142/V1143.
+ * It records whether the requested token is still in the directional watch, whether
+ * its durable cohort entry is visible, the exact quality-score tests, admission/
+ * promotion commitment tests, first-range state, and the single predicate(s) that
+ * prevent bootstrap priority. No budgets, requests, slots, scoring, or routing change.
+ *
  * V1143 — DURABLE PROMOTION-EVIDENCE → FLOW-BOOTSTRAP ELIGIBILITY BRIDGE
  * - Fixes the V1142 eligibility handoff: a promotion-evidence candidate that was
  *   actually admitted/committed can retain first-range bootstrap eligibility across
@@ -91230,6 +91237,42 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         : durableCohortFlowBootstrapEligibleV1143
           ? "QUALITY_SAFE_DURABLE_COHORT_FIRST_RANGE_V1143"
           : null;
+    const promotionEvidenceEligibilityAuditV1144 = {
+      capturedAt:now,
+      tokenAddress:token,
+      candidateValidERC20:candidate?.validERC20 === true,
+      exactPoolVerified:candidate?.onChainPoolIdentityV153?.verified === true,
+      rawOnlyV740:rawOnlyV740 === true,
+      quoteEligible:quoteEligibility?.eligible === true,
+      cohortStatePresent:Boolean(cohortStateV1143),
+      cohortEntryFound:Boolean(cohortEntryV1143),
+      cohortEntriesCount:Array.isArray(cohortStateV1143?.entries) ? cohortStateV1143.entries.length : 0,
+      latestAdmissionAddress:normalize(latestCohortAdmissionV1142?.provisionalAddress) || null,
+      latestAdmissionMatchesToken:normalize(latestCohortAdmissionV1142?.provisionalAddress) === token,
+      latestAdmissionPromotionEvidence:latestCohortAdmissionV1142?.promotionEvidenceAdmissionV1139 === true,
+      latestAdmissionActuallyAdmitted:latestCohortAdmissionV1142?.actuallyAdmitted === true,
+      currentAdmissionEligibleV1143,
+      durablePromotionSelectedAtV1143:durablePromotionSelectedAtV1143 || null,
+      durablePromotionCommittedV1143,
+      opportunityScore:currentOpportunityV1143,
+      confidenceScore:currentConfidenceV1143,
+      riskScore:currentRiskV1143,
+      minimumOpportunity:INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128,
+      minimumConfidence:INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128,
+      maximumRisk:INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128,
+      opportunityPass:currentOpportunityV1143 !== null && currentOpportunityV1143 >= INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128,
+      confidencePass:currentConfidenceV1143 !== null && currentConfidenceV1143 >= INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128,
+      riskPass:currentRiskV1143 !== null && currentRiskV1143 <= INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128,
+      qualitySafeBridgeV1143,
+      lastSelectedAt:safeNumber(cohortEntryV1143?.lastSelectedAt) || null,
+      lastAnalysedAt:safeNumber(cohortEntryV1143?.lastAnalysedAt) || null,
+      hasPriorCohortSelectionOrAnalysis:Boolean(safeNumber(cohortEntryV1143?.lastSelectedAt) > 0 || safeNumber(cohortEntryV1143?.lastAnalysedAt) > 0),
+      durablePromotionBridgeEligibleV1143,
+      durableCohortFlowBootstrapEligibleV1143,
+      durableBridgeEligibleV1143,
+      promotionEvidenceBootstrapEligibleV1142,
+      bootstrapSource:promotionEvidenceBootstrapSourceV1143
+    };
     if (rawOnlyV740) {
       telemetryV741.rawHandoffAttempts =
         safeNumber(telemetryV741?.rawHandoffAttempts) + 1;
@@ -91343,6 +91386,7 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
           qualitySafeBridgeV1143
         };
       }
+      existing.promotionEvidenceEligibilityAuditV1144 = promotionEvidenceEligibilityAuditV1144;
       existing.rawWatchCurrentActivityAdmissionV755 =
         rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || existing.rawWatchCurrentActivityAdmissionV755 || null) : null;
       existing.rawWatchActivityAdmissionV756 =
@@ -91445,6 +91489,7 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
               qualitySafeBridgeV1143
             }
           : null,
+      promotionEvidenceEligibilityAuditV1144,
       rawWatchCurrentActivityAdmissionV755:
         rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || null) : null,
       rawWatchActivityAdmissionV756:
@@ -123301,6 +123346,7 @@ for (
           promotionEvidenceCurrentAdmissionV1143:row?.promotionEvidenceBootstrapV1142?.currentAdmissionV1143 === true,
           promotionEvidenceBootstrapQualitySafeV1143:row?.promotionEvidenceBootstrapV1142?.qualitySafeBridgeV1143 === true,
           promotionEvidenceBootstrapSourceV1143:row?.promotionEvidenceBootstrapV1142?.source || null,
+          promotionEvidenceEligibilityAuditV1144:row?.promotionEvidenceEligibilityAuditV1144 || null,
           firstRangePriorityV744:directionalWatchNeedsRawFirstRangePriorityV744(row),
           priorCompletionCatchupV578:directionalWatchNeedsPriorCompletionCatchupV578(row,latestNumber),
           expansionReadyV567:directionalWatchExpansionReadyV567(row),
@@ -193406,6 +193452,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-flow-bootstrap-eligibility-status"
+  ) {
+    return jsonResponse(
+      await liveFlowBootstrapEligibilityStatusV1144(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-exact-pool-flow-collection-status"
   ) {
     return jsonResponse(
@@ -207609,6 +207664,98 @@ async function liveIdentityHandoffRuntimeStatusV1136(env,url){
       finalPriority:"Read-only comparison against the current persisted priority projection; it is not used to alter routing."
     },
     note:"V1136 adds bounded runtime telemetry only. It does not add provider/RPC requests, change thresholds, promotion rules, watch capacity, scoring, or Telegram behavior.",
+    timestamp:now()
+  };
+}
+
+
+// V1144: condition-by-condition read-only audit of V1142/V1143 first-range bootstrap eligibility.
+// Reads only persisted ChainVanta state; no provider/RPC requests and no writes.
+async function liveFlowBootstrapEligibilityStatusV1144(env,url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const stateRead=await readState(env);
+  const state=stateRead?.state||{};
+  const watchRoot=directionalWatchRootV551(state);
+  const cohort=state?.intelligenceCohortV1079||null;
+  const cohortEntry=isAddress(requested)&&Array.isArray(cohort?.entries)
+    ? cohort.entries.find(row=>normalize(row?.address)===requested)||null : null;
+  const watchEntries=isAddress(requested)
+    ? Object.values(watchRoot?.entries||{}).filter(row=>normalize(row?.tokenAddress)===requested)
+    : [];
+  const latestAdmission=cohort?.lastAdmissionAttemptV1090||null;
+  const traceRows=Array.isArray(state?.exactPoolFlowCollectionTraceV1140?.rows)
+    ? state.exactPoolFlowCollectionTraceV1140.rows.filter(row=>normalize(row?.tokenAddress)===requested) : [];
+
+  const watches=watchEntries.map(row=>{
+    const persisted=row?.promotionEvidenceEligibilityAuditV1144||null;
+    const successfulRanges=safeNumber(row?.successfulRanges);
+    const finiteLastCollected=Number.isFinite(Number(row?.lastCollectedBlock));
+    const eligibleFlag=row?.promotionEvidenceBootstrapV1142?.eligible===true;
+    const nonRaw=row?.rawOnlyV740!==true;
+    const priorityEligible=directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row);
+    const failed=[];
+    if(!nonRaw) failed.push("RAW_ONLY_POOL_V1144");
+    if(!eligibleFlag) failed.push("BOOTSTRAP_ELIGIBLE_FLAG_FALSE_V1144");
+    if(successfulRanges!==0) failed.push("SUCCESSFUL_RANGE_ALREADY_EXISTS_V1144");
+    if(!finiteLastCollected) failed.push("LAST_COLLECTED_BLOCK_NOT_FINITE_V1144");
+    if(persisted){
+      if(persisted.cohortEntryFound!==true) failed.push("COHORT_ENTRY_NOT_VISIBLE_AT_REGISTRATION_V1144");
+      if(persisted.qualitySafeBridgeV1143!==true) failed.push("QUALITY_SAFE_BRIDGE_FALSE_V1144");
+      if(persisted.currentAdmissionEligibleV1143!==true && persisted.durableBridgeEligibleV1143!==true) failed.push("NO_ADMISSION_OR_DURABLE_BRIDGE_V1144");
+    }else{
+      failed.push("V1144_REGISTRATION_AUDIT_NOT_CAPTURED_YET_V1144");
+    }
+    return {
+      tokenAddress:normalize(row?.tokenAddress),symbol:row?.symbol||null,poolId:normalize(row?.poolId)||null,
+      registeredAt:safeNumber(row?.registeredAt)||null,lastQualifiedAt:safeNumber(row?.lastQualifiedAt)||null,
+      successfulRanges,exactUsdTrades:safeNumber(row?.exactUsdTrades),lastCollectedBlock:finiteLastCollected?Number(row.lastCollectedBlock):null,
+      rawOnlyV740:row?.rawOnlyV740===true,bootstrapObject:row?.promotionEvidenceBootstrapV1142||null,
+      registrationAuditV1144:persisted,priorityFunctionEligibleV1142:priorityEligible,
+      selectionPriorityTierV567:directionalWatchPriorityTierV567(row),failedPredicatesV1144:failed
+    };
+  });
+
+  const cohortAudit={
+    present:Boolean(cohortEntry),
+    entry:cohortEntry?{
+      address:normalize(cohortEntry?.address),symbol:cohortEntry?.symbol||null,
+      opportunityScore:finiteOrNullV1076(cohortEntry?.opportunityScore),
+      confidenceScore:finiteOrNullV1076(cohortEntry?.confidenceScore),
+      riskScore:finiteOrNullV1076(cohortEntry?.riskScore),
+      lastSelectedAt:safeNumber(cohortEntry?.lastSelectedAt)||null,lastAnalysedAt:safeNumber(cohortEntry?.lastAnalysedAt)||null,
+      lastPromotionEvidenceSelectedAtV1138:safeNumber(cohortEntry?.lastPromotionEvidenceSelectedAtV1138)||null,
+      lastPromotionEvidenceSelectionPurposeV1143:cohortEntry?.lastPromotionEvidenceSelectionPurposeV1143||null
+    }:null,
+    thresholds:{minimumOpportunity:INTELLIGENCE_COHORT_FAIRNESS_MIN_OPPORTUNITY_V1128,minimumConfidence:INTELLIGENCE_COHORT_FAIRNESS_MIN_CONFIDENCE_V1128,maximumRisk:INTELLIGENCE_COHORT_FAIRNESS_MAX_VERIFIED_RISK_V1128},
+    latestAdmission:latestAdmission?{
+      provisionalAddress:normalize(latestAdmission?.provisionalAddress)||null,
+      matchesRequested:normalize(latestAdmission?.provisionalAddress)===requested,
+      promotionEvidenceAdmissionV1139:latestAdmission?.promotionEvidenceAdmissionV1139===true,
+      actuallyAdmitted:latestAdmission?.actuallyAdmitted===true,
+      at:safeNumber(latestAdmission?.at)||null
+    }:null
+  };
+
+  let status="FLOW_BOOTSTRAP_ELIGIBILITY_AUDITED_V1144";
+  if(!isAddress(requested)) status="TOKEN_ARGUMENT_REQUIRED_V1144";
+  else if(watches.length===0) status="REQUESTED_TOKEN_NOT_IN_DIRECTIONAL_WATCH_V1144";
+  else if(watches.some(row=>row.priorityFunctionEligibleV1142===true)) status="FIRST_RANGE_BOOTSTRAP_ELIGIBLE_V1144";
+  else status="FIRST_RANGE_BOOTSTRAP_BLOCKED_PREDICATE_IDENTIFIED_V1144";
+
+  return {
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_FLOW_BOOTSTRAP_ELIGIBILITY_STATUS_V1144",
+    success:isAddress(requested),readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    externalProviderRequestsAdded:0,diagnosticStateWritesAdded:0,thresholdsChanged:false,promotionRulesChanged:false,
+    requestCeilingsChanged:false,watchCapacityChanged:false,telegramMutation:false,requestedToken:isAddress(requested)?requested:null,status,
+    directionalWatch:{present:watches.length>0,matches:watches.length,totalWatchEntries:Object.keys(watchRoot?.entries||{}).length,watches},
+    durableCohort:cohortAudit,latestFlowTrace:{matches:traceRows.length,rows:traceRows.slice(0,4)},
+    interpretation:{
+      watchMissing:"If the requested token is absent from the 24-entry directional watch, bootstrap priority cannot run regardless of durable cohort status.",
+      registrationAudit:"registrationAuditV1144 records the exact cohort/admission/quality values visible when V551 registration refreshed this watch.",
+      failedPredicates:"failedPredicatesV1144 names the condition(s) preventing directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142 from returning true.",
+      noAutoFix:"V1144 is diagnostic only and does not change collection priority or capacity."
+    },
+    note:"V1144 exposes exact first-range bootstrap predicates from persisted ChainVanta state only. It adds no provider/RPC requests, slots, budgets, scoring, promotion, risk, or Telegram changes.",
     timestamp:now()
   };
 }
