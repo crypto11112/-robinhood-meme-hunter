@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1155
+ * V1155: V551 protected-owner budget handoff + single-slot provider routing.
+ * - V1154 live evidence proved cursor persistence is healthy, but V551 could reach
+ *   its protected request with only one real analysis slot remaining while the
+ *   Validation Cloud -> Blockscout path still assumed two usable requests.
+ * - Gives the already-protected V551 owner first refusal on its reserved request
+ *   before older internal reserve ordering, while preserving the unchanged real
+ *   analysis, pre-Telegram global and hard global ceilings.
+ * - When an armed Validation Cloud fallback pair has fewer than two real slots left,
+ *   skips the Validation Cloud primary and spends the single protected slot directly
+ *   on the existing Blockscout exact-pool request instead of guaranteeing failure.
+ * - When two real slots remain, the existing Validation Cloud-first + Blockscout
+ *   contingency path is preserved.
+ * - Corrects requestConsumed telemetry so a budget-rejected Validation Cloud attempt
+ *   is not reported as a consumed request.
+ * - V1151-V1154 cursor/hydration protections are unchanged; no request ceiling,
+ *   scoring, promotion, watch capacity, risk, Telegram, or provider trust rule changes.
+ *
  * ChainVanta — V1154
  * V1154: direct collector cursor floor at fromBlock construction.
  * - V1153 proved the final boundary reapply was running, but SCHIFFY could still
@@ -9751,7 +9769,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1154"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1155"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -22756,6 +22774,116 @@ function directionalWatchMinimumReserveDecisionV1141(
   return false;
 }
 
+/* =========================================================
+   V1155 V551 PROTECTED-OWNER SLOT + REAL HEADROOM
+   =========================================================
+   V1141 protects V551 headroom from ordinary analysis work, but older
+   internal reserve lanes can still reject the V551 owner after that early
+   protection check. V1155 gives ONLY the currently executing V551 request
+   first refusal on its already-protected slot. Real analysis, pre-Telegram
+   global and hard global ceilings remain absolute.
+*/
+function directionalWatchRealHeadroomV1155(budget) {
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget?.notification?.limit) -
+            safeNumber(budget?.notification?.used)
+        )
+      : 0;
+  const preTelegramGlobalLimit = Math.max(
+    0,
+    safeNumber(budget?.totalLimit) - notificationReserveRemaining
+  );
+  const analysisRemaining = Math.max(
+    0,
+    safeNumber(effectiveAnalysisLimitV416(budget)) -
+      safeNumber(budget?.analysis?.used)
+  );
+  const preTelegramRemaining = Math.max(
+    0,
+    preTelegramGlobalLimit - safeNumber(budget?.totalUsed)
+  );
+  const hardGlobalRemaining = Math.max(
+    0,
+    safeNumber(budget?.totalLimit) - safeNumber(budget?.totalUsed)
+  );
+  return {
+    analysisRemaining,
+    preTelegramRemaining,
+    hardGlobalRemaining,
+    usableRequests:Math.max(
+      0,
+      Math.min(analysisRemaining, preTelegramRemaining, hardGlobalRemaining)
+    ),
+    analysisLimit:safeNumber(effectiveAnalysisLimitV416(budget)),
+    preTelegramGlobalLimit
+  };
+}
+
+function consumeDirectionalWatchOwnerSlotV1155(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return null;
+  const reserve = budget?.analysis?.directionalWatchReserveV553;
+  if (reserve?.active !== true) return null;
+
+  const validationCloudPrimary =
+    type === "RPC:eth_getLogs" &&
+    budget?.analysis?.v958DirectionalRpcActive === true;
+  const directBlockscoutSingleSlot =
+    type === "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS" &&
+    budget?.analysis?.v1155DirectionalDirectBlockscoutActive === true;
+
+  if (!validationCloudPrimary && !directBlockscoutSingleSlot) return null;
+
+  const needed = Math.max(1, safeNumber(amount));
+  if (needed !== 1) return false;
+
+  const headroom = directionalWatchRealHeadroomV1155(budget);
+  reserve.v1155OwnerSlotPresented =
+    safeNumber(reserve.v1155OwnerSlotPresented) + 1;
+  reserve.v1155OwnerSlotHeadroom = headroom;
+  reserve.v1155OwnerSlotType = String(type || "");
+
+  if (headroom.usableRequests < 1) {
+    reserve.v1155OwnerSlotBlocked = true;
+    reserve.v1155OwnerSlotBlockReason = "REAL_BUDGET_BOUNDARY_V1155";
+    budget.skipped.push({
+      phase,
+      type,
+      amount:needed,
+      reason:"V1155_DIRECTIONAL_OWNER_REAL_BUDGET_UNAVAILABLE",
+      reservedFor:reserve.targetAddress || null,
+      poolId:reserve.poolId || null
+    });
+    return false;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+  reserve.v1155OwnerSlotConsumed =
+    safeNumber(reserve.v1155OwnerSlotConsumed) + 1;
+  reserve.v1155OwnerSlotConsumedAt = Date.now();
+  reserve.v1155OwnerSlotBlockReason = null;
+
+  if (validationCloudPrimary) {
+    reserve.validationCloudPrimaryConsumedV1147 = true;
+    reserve.validationCloudPrimaryConsumedAtV1147 = Date.now();
+    reserve.v1155ValidationCloudPrimaryOwnerSlot = true;
+  }
+  if (directBlockscoutSingleSlot) {
+    reserve.blockscoutFallbackConsumedV1147 = true;
+    reserve.blockscoutFallbackConsumedAtV1147 = Date.now();
+    reserve.v1155DirectBlockscoutSingleSlotConsumed = true;
+  }
+  return true;
+}
+
 function consumeDirectionalWatchFallbackPairV1147(
   budget,
   phase,
@@ -22880,6 +23008,16 @@ function consumeBudget(
     );
   if (directionalMinimumReserveDecisionV1141 !== null) {
     return directionalMinimumReserveDecisionV1141;
+  }
+
+  /* V1155: the actively executing V551 owner may consume one already-protected
+   * slot before older internal reserve ordering. Real ceilings remain absolute. */
+  const directionalOwnerSlotConsumeV1155 =
+    consumeDirectionalWatchOwnerSlotV1155(
+      budget, phase, type, amount
+    );
+  if (directionalOwnerSlotConsumeV1155 !== null) {
+    return directionalOwnerSlotConsumeV1155;
   }
 
   /* V1147: the Blockscout fallback for the same V551 range may consume only
@@ -93156,6 +93294,12 @@ async function advanceDirectionalWatchV551({
       cursorFloorSnapshotCapturedAt:
         safeNumber(cursorFloorSnapshotV1153?.capturedAt) || null
     },
+    protectedOwnerBudgetV1155:{
+      enabled:true,
+      realCeilingsUnchanged:true,
+      singleSlotDirectBlockscout:true,
+      cursorLogicChanged:false
+    },
     creditEfficiencyV958:{
       validationCloudFirstForV551:true,
       validationCloudMaxBlocks:V958_VALIDATION_CLOUD_V551_MAX_BLOCKS,
@@ -93429,9 +93573,36 @@ async function advanceDirectionalWatchV551({
     let responseStatusV958 = null;
     let validationCloudAttemptedV958 = false;
     let validationCloudErrorV958 = null;
+    let validationCloudRequestConsumedV1155 = false;
     let blockscoutFallbackAttemptedV958 = false;
 
-    if (validationCloudV551EligibleV958) {
+    const reserveV1155BeforeProvider =
+      budget?.analysis?.directionalWatchReserveV553;
+    const realHeadroomV1155 = directionalWatchRealHeadroomV1155(budget);
+    const fallbackPairArmedV1155 =
+      reserveV1155BeforeProvider?.validationCloudFallbackPairArmedV1147 === true;
+    const directBlockscoutSingleSlotV1155 = Boolean(
+      validationCloudV551EligibleV958 &&
+      fallbackPairArmedV1155 &&
+      realHeadroomV1155.usableRequests >= 1 &&
+      realHeadroomV1155.usableRequests < 2
+    );
+    const validationCloudPrimaryAllowedV1155 = Boolean(
+      validationCloudV551EligibleV958 &&
+      !directBlockscoutSingleSlotV1155
+    );
+
+    if (reserveV1155BeforeProvider && typeof reserveV1155BeforeProvider === "object") {
+      reserveV1155BeforeProvider.v1155ProviderDecision = {
+        validationCloudEligible:validationCloudV551EligibleV958,
+        fallbackPairArmed:fallbackPairArmedV1155,
+        realHeadroom:realHeadroomV1155,
+        directBlockscoutSingleSlot:directBlockscoutSingleSlotV1155,
+        validationCloudPrimaryAllowed:validationCloudPrimaryAllowedV1155
+      };
+    }
+
+    if (validationCloudPrimaryAllowedV1155) {
       validationCloudAttemptedV958 = true;
       try {
         budget.analysis.v958DirectionalRpcActive = true;
@@ -93465,9 +93636,11 @@ async function advanceDirectionalWatchV551({
           budget.analysis.v958DirectionalRpcActive = false;
           const reserveV1147 =
             budget?.analysis?.directionalWatchReserveV553;
+          validationCloudRequestConsumedV1155 =
+            safeNumber(budget?.totalUsed) > totalUsedBeforeValidationCloudV1147;
           if (
             reserveV1147?.validationCloudFallbackPairArmedV1147 === true &&
-            safeNumber(budget?.totalUsed) > totalUsedBeforeValidationCloudV1147
+            validationCloudRequestConsumedV1155
           ) {
             reserveV1147.validationCloudPrimaryConsumedV1147 = true;
             reserveV1147.validationCloudPrimaryConsumedAtV1147 = Date.now();
@@ -93503,25 +93676,47 @@ async function advanceDirectionalWatchV551({
       const blockscoutBudgetTypeV958 =
         "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS";
 
-      if (!consumeBudget(budget, "analysis", blockscoutBudgetTypeV958)) {
+      let blockscoutBudgetConsumedV1155 = false;
+      if (directBlockscoutSingleSlotV1155) {
+        budget.analysis.v1155DirectionalDirectBlockscoutActive = true;
+      }
+      try {
+        blockscoutBudgetConsumedV1155 =
+          consumeBudget(budget, "analysis", blockscoutBudgetTypeV958);
+      } finally {
+        budget.analysis.v1155DirectionalDirectBlockscoutActive = false;
+      }
+
+      if (!blockscoutBudgetConsumedV1155) {
         return {
           ...base,
           attempted:validationCloudAttemptedV958,
-          requestConsumed:validationCloudAttemptedV958,
+          requestConsumed:validationCloudRequestConsumedV1155,
           fromBlock,
           toBlock,
-          provider:validationCloudAttemptedV958 ? "VALIDATION_CLOUD_V958" : null,
+          provider:validationCloudRequestConsumedV1155 ? "VALIDATION_CLOUD_V958" : null,
           validationCloudAttemptedV958,
           validationCloudErrorV958,
+          validationCloudRequestConsumedV1155,
+          directBlockscoutSingleSlotV1155,
           blockscoutFallbackAttemptedV958:false,
           status:validationCloudAttemptedV958
             ? "V958_VALIDATION_CLOUD_FAILED_BLOCKSCOUT_FALLBACK_BUDGET_PROTECTED"
-            : "ANALYSIS_BUDGET_PROTECTED_V551"
+            : directBlockscoutSingleSlotV1155
+              ? "V1155_DIRECT_BLOCKSCOUT_SINGLE_SLOT_BUDGET_UNAVAILABLE"
+              : "ANALYSIS_BUDGET_PROTECTED_V551"
         };
       }
 
       blockscoutFallbackAttemptedV958 = true;
       provider = blockscoutProviderV958;
+      if (directBlockscoutSingleSlotV1155) {
+        const reserveV1155Direct = budget?.analysis?.directionalWatchReserveV553;
+        if (reserveV1155Direct && typeof reserveV1155Direct === "object") {
+          reserveV1155Direct.v1155DirectBlockscoutSingleSlotAttempted = true;
+          reserveV1155Direct.v1155DirectBlockscoutSingleSlotAt = Date.now();
+        }
+      }
 
       if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
         recordBlockscoutProUsageV611(
@@ -123666,6 +123861,22 @@ for (
           directionalWatchReserveV553?.v1148BudgetBeforeFallback || null,
         v1148BudgetAfterFallback:
           directionalWatchReserveV553?.v1148BudgetAfterFallback || null,
+        v1155ProviderDecision:
+          directionalWatchReserveV553?.v1155ProviderDecision || null,
+        v1155OwnerSlotPresented:
+          safeNumber(directionalWatchReserveV553?.v1155OwnerSlotPresented),
+        v1155OwnerSlotConsumed:
+          safeNumber(directionalWatchReserveV553?.v1155OwnerSlotConsumed),
+        v1155OwnerSlotHeadroom:
+          directionalWatchReserveV553?.v1155OwnerSlotHeadroom || null,
+        v1155OwnerSlotBlockReason:
+          directionalWatchReserveV553?.v1155OwnerSlotBlockReason || null,
+        v1155ValidationCloudPrimaryOwnerSlot:
+          directionalWatchReserveV553?.v1155ValidationCloudPrimaryOwnerSlot === true,
+        v1155DirectBlockscoutSingleSlotConsumed:
+          directionalWatchReserveV553?.v1155DirectBlockscoutSingleSlotConsumed === true,
+        v1155DirectBlockscoutSingleSlotAttempted:
+          directionalWatchReserveV553?.v1155DirectBlockscoutSingleSlotAttempted === true,
         promotionEvidenceFirstRangePriorityV1142:
           directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
         bootstrapFairnessV1150:
@@ -209334,7 +209545,7 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
       zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
     },
-    note:"V1154 keeps V1151/V1152 persistence protections and reapplies the hydrated cursor floor again at the final V551 collector boundary before selection and fromBlock calculation. Adds zero KV/provider/RPC requests.",
+    note:"V1155 preserves V1151-V1154 cursor protection and fixes V551 protected-owner budget handoff. If only one real protected slot remains, V551 goes directly to Blockscout instead of spending it on a Validation Cloud primary that cannot retain fallback headroom. Request ceilings remain unchanged.",
     timestamp:now()
   };
 }
