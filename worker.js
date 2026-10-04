@@ -1,4 +1,18 @@
 /**
+ * ChainVanta — V1104
+ * BREAKOUT ENTRY-QUALITY INTEGRITY FIX
+ * Builds directly from deployed V1103.
+ * - Fixes V1103 display/semantic issue where an unready or negative price
+ *   sequence could be labelled PRE_BREAKOUT.
+ * - Entry quality is now classified only when the selected verified price
+ *   sequence itself is ready.
+ * - Negative verified price movement is explicitly
+ *   NEGATIVE_PRICE_MOVE_NO_BUY, never PRE_BREAKOUT.
+ * - No change to breakout evidence thresholds, anti-chase threshold,
+ *   provider/RPC usage, scanner cadence, production scoring or Telegram.
+ */
+
+/**
  * ChainVanta — V1103
  * BREAKOUT ANTI-CHASE / ENTRY-QUALITY SHADOW LAYER
  * Builds directly from deployed V1102.
@@ -9453,7 +9467,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1103"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1104"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -188199,8 +188213,18 @@ function breakoutFromRowsV1094(address, rows) {
   let buySideEligibleV1103 = false;
   let antiChaseBlockedV1103 = false;
 
-  if (verifiedChangedPricePct !== null) {
-    if (verifiedChangedPricePct < BREAKOUT_EARLY_MIN_PCT_V1103) {
+  const entryPriceSequenceReadyV1104 =
+    selectedPriceSequenceV1101?.ready === true;
+
+  if (
+    entryPriceSequenceReadyV1104 &&
+    verifiedChangedPricePct !== null
+  ) {
+    if (verifiedChangedPricePct < 0) {
+      entryQualityV1103 = "NEGATIVE_PRICE_MOVE_NO_BUY";
+    } else if (
+      verifiedChangedPricePct < BREAKOUT_EARLY_MIN_PCT_V1103
+    ) {
       entryQualityV1103 = "PRE_BREAKOUT";
     } else if (
       verifiedChangedPricePct < BREAKOUT_EARLY_MAX_PCT_V1103
@@ -188417,6 +188441,7 @@ function breakoutFromRowsV1094(address, rows) {
     breakoutScore,
     breakoutState,
     entryQualityV1103,
+    entryPriceSequenceReadyV1104,
     buySideEligibleV1103,
     antiChaseBlockedV1103,
     verifiedChangedMarketRows:changedMarketRows.length,
@@ -188602,7 +188627,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_TOKEN_V1103",
+    diagnostic:"BREAKOUT_TOKEN_V1104",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188636,7 +188661,7 @@ async function breakoutTokenDiagnosticV1094(env, url) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_TOKEN_OK_V1103",
+    status:"BREAKOUT_TOKEN_OK_V1104",
     result:breakoutFromRowsV1094(token, history.rows),
     timestamp:now()
   };
@@ -188646,7 +188671,7 @@ async function breakoutStatusV1094(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BREAKOUT_STATUS_V1103",
+    diagnostic:"BREAKOUT_STATUS_V1104",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -188683,7 +188708,7 @@ async function breakoutStatusV1094(env) {
   return {
     ...base,
     success:true,
-    status:"BREAKOUT_STATUS_OK_V1103",
+    status:"BREAKOUT_STATUS_OK_V1104",
     evaluated:results.length,
     evidenceReady:results.filter(r => r.evidenceReady).length,
     confirmed:results.filter(
@@ -188708,7 +188733,7 @@ async function breakoutStatusV1094(env) {
       r => r.breakoutState === "BUILDING_BREAKOUT_HISTORY"
     ).length,
     tokens:results,
-    note:"Shadow only. V1103 adds anti-chase entry quality on top of materially sized verified V212 flow and changed verified provider/V438 price evidence. BREAKOUT_EXTENDED is never buy-side eligible.",
+    note:"Shadow only. V1104 keeps V1103 anti-chase logic and fixes entry-quality integrity: unready sequences remain NOT_READY and negative verified price movement is NEGATIVE_PRICE_MOVE_NO_BUY.",
     timestamp:now()
   };
 }
