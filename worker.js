@@ -1,4 +1,22 @@
 /**
+ * ChainVanta — V1111
+ * HARD MONTHLY LIVE-LANE USAGE GOVERNOR + 429 BACKOFF
+ * Builds directly from deployed V1110.
+ * - Adds a persistent UTC-calendar-month safety governor for the priority live lane.
+ * - Counts only ChainVanta live-lane poll cycles/external requests; it does NOT claim
+ *   to be Cloudflare billing/account usage. Cloudflare dashboard remains authoritative.
+ * - Default hard ceiling: 50,000 priority-live external requests per UTC month,
+ *   overridable with CHAINVANTA_LIVE_MONTHLY_REQUEST_LIMIT.
+ * - 70% WATCH; 85% throttles live-lane provider polling to >=2m; 95% to >=5m;
+ *   100% hard-locks optional priority-live polling until the next UTC month.
+ * - Manual /live-budget-pause and /live-budget-resume controls are persistent.
+ * - A DexScreener HTTP 429 opens exponential 5m->60m live-lane cooldown instead of
+ *   retrying every minute. No cooldown bypass is introduced.
+ * - Five-minute scanner, genuine promotion rules, production Telegram calls, payment,
+ *   scoring/risk, V413 call-performance tracker and existing request ceilings unchanged.
+ */
+
+/**
  * ChainVanta — V1110
  * CONTROLLED LIVE-LANE SHADOW TEST
  * Builds directly from deployed V1109.
@@ -9570,7 +9588,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1110"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1111"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192151,6 +192169,33 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-budget-status"
+  ) {
+    return jsonResponse(
+      await priorityLiveBudgetStatusV1111(env)
+    );
+  }
+
+  if (
+    path ===
+      "/live-budget-pause"
+  ) {
+    return jsonResponse(
+      await priorityLiveBudgetControlV1111(env, "pause", url)
+    );
+  }
+
+  if (
+    path ===
+      "/live-budget-resume"
+  ) {
+    return jsonResponse(
+      await priorityLiveBudgetControlV1111(env, "resume", url)
+    );
+  }
+
+  if (
+    path ===
       "/weakening-status"
   ) {
     return jsonResponse(
@@ -195368,6 +195413,14 @@ const PRIORITY_LIVE_LAST_STATUS_KEY_V1109 = "v1109:priorityLiveLastStatus";
 const PRIORITY_LIVE_MAX_ACTIVE_V1109 = 3;
 const PRIORITY_LIVE_RETENTION_MS_V1109 = 30 * 60 * 1000;
 const PRIORITY_LIVE_TEST_RETENTION_MS_V1110 = 10 * 60 * 1000;
+// V1111: persistent internal safety governor for OPTIONAL priority-live work.
+// This is intentionally an internal request/cycle meter, not a Cloudflare bill meter.
+const PRIORITY_LIVE_BUDGET_KEY_V1111 = "v1111:priorityLiveMonthlyBudget";
+const PRIORITY_LIVE_DEFAULT_MONTHLY_REQUEST_LIMIT_V1111 = 50000;
+const PRIORITY_LIVE_MIN_MONTHLY_REQUEST_LIMIT_V1111 = 1000;
+const PRIORITY_LIVE_MAX_MONTHLY_REQUEST_LIMIT_V1111 = 1000000;
+const PRIORITY_LIVE_429_BASE_COOLDOWN_MS_V1111 = 5 * 60 * 1000;
+const PRIORITY_LIVE_429_MAX_COOLDOWN_MS_V1111 = 60 * 60 * 1000;
 const PRIORITY_LIVE_MAX_POINTS_V1109 = 75;
 const HORIZON_LIVE_MAX_ACTIVE_V413 = 60;
 const HORIZON_LIVE_MAX_BATCH_V413 = 30;
@@ -195948,6 +196001,43 @@ async function controlledPriorityLiveLaneTestV1110(env, url) {
   }
 }
 
+async function priorityLiveBudgetStatusV1111(env) {
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,available:false,status:"V1111_DO_BINDING_UNAVAILABLE"};
+  }
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/priority-live-budget-v1111");
+    const body = await response.json().catch(()=>({}));
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,readOnly:true,cloudflareBillingAuthoritative:true,...body};
+  } catch(error) {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,available:false,status:"V1111_BUDGET_STATUS_FETCH_FAILED",error:errorString(error)};
+  }
+}
+
+async function priorityLiveBudgetControlV1111(env, action, url) {
+  const expected = action === "pause" ? "pause" : "resume";
+  const confirm = String(url?.searchParams?.get("confirm") || "").toLowerCase();
+  if (confirm !== expected) {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,changed:false,status:`CONFIRM_${expected.toUpperCase()}_REQUIRED_V1111`,instruction:`Use /live-budget-${expected}?confirm=${expected}`};
+  }
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,changed:false,status:"V1111_DO_BINDING_UNAVAILABLE"};
+  }
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/priority-live-budget-control-v1111", {
+      method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:expected,requestedAt:Date.now()})
+    });
+    const body = await response.json().catch(()=>({}));
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,...body};
+  } catch(error) {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,changed:false,status:"V1111_BUDGET_CONTROL_FETCH_FAILED",error:errorString(error)};
+  }
+}
+
 async function readPriorityLiveLaneV1109(env) {
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
   if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
@@ -195969,7 +196059,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1110",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1111",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -195983,6 +196073,7 @@ async function livePriorityLaneStatusV1109(env) {
     lastHttpStatus:snap?.lastHttpStatus ?? null,
     lastError:snap?.lastError || null,
     externalRequestsLastPoll:safeNumber(snap?.requests),
+    monthlyUsageGovernorV1111:snap?.budgetV1111||null,
     tokens:entries.sort((a,b)=>safeNumber(b?.priorityScore)-safeNumber(a?.priorityScore)).map(row=>({
       address:row?.address || null,
       symbol:row?.symbol || null,
@@ -196006,12 +196097,14 @@ async function livePriorityLaneStatusV1109(env) {
       liveMarketSource:"DEXSCREENER_FRESH_BATCH_PINNED_PAIR",
       polling:"DURABLE_OBJECT_MINUTE_ALARM",
       controlledTestV1110:"EXPLICIT_ONLY_10_MINUTES_NO_PROMOTION_NO_TELEGRAM",
+      monthlyUsageGovernorV1111:"PERSISTENT_INTERNAL_REQUEST_CAP_70_85_95_100",
+      dexScreener429BackoffV1111:"EXPONENTIAL_5M_TO_60M",
       exactPoolRpcAcceleration:false,
       holderDeltaAcceleration:false,
       whaleDeltaAcceleration:false,
       telegramMutation:false
     },
-    nextStage:"After the V1110 controlled test proves repeated minute polling, add the hard monthly usage governor before exact-pool RPC plus holder/whale acceleration.",
+    nextStage:"V1111 now protects optional live polling with a hard monthly governor. After budget telemetry/backoff are proven, add exact-pool RPC plus holder/whale acceleration behind this same governor.",
     timestamp:now()
   };
 }
@@ -197383,6 +197476,124 @@ export class V3LiveCollectorV363 {
   }
 
 
+  priorityLiveMonthKeyV1111(nowMs=Date.now()) {
+    const d=new Date(nowMs);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}`;
+  }
+
+  priorityLiveMonthlyRequestLimitV1111() {
+    const configured=Number(this.env?.CHAINVANTA_LIVE_MONTHLY_REQUEST_LIMIT);
+    const n=Number.isFinite(configured)?Math.floor(configured):PRIORITY_LIVE_DEFAULT_MONTHLY_REQUEST_LIMIT_V1111;
+    return Math.max(PRIORITY_LIVE_MIN_MONTHLY_REQUEST_LIMIT_V1111,Math.min(PRIORITY_LIVE_MAX_MONTHLY_REQUEST_LIMIT_V1111,n));
+  }
+
+  async priorityLiveBudgetStateV1111(nowMs=Date.now(), persistReset=true) {
+    const monthKey=this.priorityLiveMonthKeyV1111(nowMs);
+    const limit=this.priorityLiveMonthlyRequestLimitV1111();
+    let row=await this.state.storage.get(PRIORITY_LIVE_BUDGET_KEY_V1111)||{};
+    const carryManualPause=row?.manualPaused===true;
+    if(row?.monthKey!==monthKey){
+      row={
+        version:"V1111",monthKey,startedAt:nowMs,externalRequests:0,pollCycles:0,
+        verifiedObservations:0,http429s:0,provider429Streak:0,providerCooldownUntil:null,
+        manualPaused:carryManualPause,manualPausedAt:carryManualPause?(row?.manualPausedAt||nowMs):null,
+        hardLocked:false,hardLockedAt:null,hardLockReason:null,lastPollAt:null,lastRequestAt:null,
+        lastUpdatedAt:nowMs,previousMonth:row?.monthKey||null
+      };
+      if(persistReset) await this.doPutV404(PRIORITY_LIVE_BUDGET_KEY_V1111,row);
+    }
+    const used=Math.max(0,safeNumber(row.externalRequests));
+    const usedPct=limit>0?(used/limit)*100:0;
+    if(used>=limit && row.hardLocked!==true){
+      row.hardLocked=true; row.hardLockedAt=nowMs; row.hardLockReason="MONTHLY_PRIORITY_LIVE_REQUEST_LIMIT_REACHED_V1111"; row.lastUpdatedAt=nowMs;
+      if(persistReset) await this.doPutV404(PRIORITY_LIVE_BUDGET_KEY_V1111,row);
+    }
+    const pct=limit>0?(Math.max(0,safeNumber(row.externalRequests))/limit)*100:0;
+    const tier=row.hardLocked===true?"LOCKED":pct>=95?"CRITICAL":pct>=85?"THROTTLED":pct>=70?"WATCH":"SAFE";
+    const throttleMs=tier==="CRITICAL"?5*60*1000:tier==="THROTTLED"?2*60*1000:HORIZON_LIVE_POLL_MS_V413;
+    const cooldownUntil=Number.isFinite(Number(row.providerCooldownUntil))?Number(row.providerCooldownUntil):null;
+    const providerCooldownActive=cooldownUntil!==null&&cooldownUntil>nowMs;
+    return {
+      row,limit,used:Math.max(0,safeNumber(row.externalRequests)),usedPct:pct,tier,throttleMs,
+      remaining:Math.max(0,limit-Math.max(0,safeNumber(row.externalRequests))),
+      manualPaused:row.manualPaused===true,hardLocked:row.hardLocked===true,
+      providerCooldownUntil:cooldownUntil,providerCooldownActive,
+      allowed:row.manualPaused!==true&&row.hardLocked!==true&&!providerCooldownActive
+    };
+  }
+
+  async priorityLiveBudgetSnapshotV1111() {
+    const nowMs=Date.now();
+    const b=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    return {
+      version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_MONTHLY_GOVERNOR_READY_V1111",
+      accountingScope:"CHAINVANTA_PRIORITY_LIVE_INTERNAL_ONLY_NOT_CLOUDFLARE_BILLING",
+      cloudflareDashboardAuthoritative:true,monthKey:b.row.monthKey,monthlyExternalRequestLimit:b.limit,
+      externalRequestsUsed:b.used,externalRequestsRemaining:b.remaining,usedPct:b.usedPct,tier:b.tier,
+      pollCycles:safeNumber(b.row.pollCycles),verifiedObservations:safeNumber(b.row.verifiedObservations),
+      http429s:safeNumber(b.row.http429s),provider429Streak:safeNumber(b.row.provider429Streak),
+      providerCooldownUntil:b.providerCooldownUntil,providerCooldownUntilIso:b.providerCooldownUntil?new Date(b.providerCooldownUntil).toISOString():null,
+      providerCooldownActive:b.providerCooldownActive,manualPaused:b.manualPaused,manualPausedAt:b.row.manualPausedAt||null,
+      hardLocked:b.hardLocked,hardLockedAt:b.row.hardLockedAt||null,hardLockReason:b.row.hardLockReason||null,
+      currentMinimumPollIntervalMs:b.throttleMs,nextMonthReset:"AUTOMATIC_ON_FIRST_V1111_ACCESS_OR_REGISTRATION_IN_NEW_UTC_MONTH",
+      thresholds:{watchPct:70,throttlePct:85,criticalPct:95,hardStopPct:100},
+      overrideEnv:"CHAINVANTA_LIVE_MONTHLY_REQUEST_LIMIT",defaultMonthlyExternalRequestLimit:PRIORITY_LIVE_DEFAULT_MONTHLY_REQUEST_LIMIT_V1111,
+      lastPollAt:b.row.lastPollAt||null,lastRequestAt:b.row.lastRequestAt||null,lastUpdatedAt:b.row.lastUpdatedAt||null
+    };
+  }
+
+  async priorityLiveBudgetControlV1111(request) {
+    let body={}; try{body=await request.json();}catch(_){}
+    const action=String(body?.action||"").toLowerCase();
+    const nowMs=Date.now();
+    const b=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    const row={...b.row};
+    if(action==="pause"){
+      row.manualPaused=true; row.manualPausedAt=nowMs; row.lastUpdatedAt=nowMs;
+      await this.doPutV404(PRIORITY_LIVE_BUDGET_KEY_V1111,row);
+      await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,false);
+      return {changed:true,status:"PRIORITY_LIVE_MANUALLY_PAUSED_V1111",budget:await this.priorityLiveBudgetSnapshotV1111()};
+    }
+    if(action==="resume"){
+      row.manualPaused=false; row.manualPausedAt=null; row.lastUpdatedAt=nowMs;
+      await this.doPutV404(PRIORITY_LIVE_BUDGET_KEY_V1111,row);
+      const after=await this.priorityLiveBudgetStateV1111(nowMs,false);
+      const entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
+      const canRun=after.hardLocked!==true&&after.providerCooldownActive!==true&&Object.keys(entries&&typeof entries==="object"?entries:{}).length>0;
+      await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,canRun);
+      if(canRun) await this.doSetAlarmV404(Date.now()+1000);
+      return {changed:true,status:after.hardLocked?"MANUAL_PAUSE_CLEARED_MONTHLY_HARD_LOCK_REMAINS_V1111":"PRIORITY_LIVE_MANUAL_PAUSE_CLEARED_V1111",budget:await this.priorityLiveBudgetSnapshotV1111()};
+    }
+    return {changed:false,status:"INVALID_BUDGET_CONTROL_ACTION_V1111"};
+  }
+
+  async priorityLiveRecordPollV1111({externalRequests=0,verifiedObservations=0,httpStatus=null}={}) {
+    const nowMs=Date.now();
+    const b=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    const row={...b.row};
+    row.pollCycles=safeNumber(row.pollCycles)+1;
+    row.externalRequests=safeNumber(row.externalRequests)+Math.max(0,safeNumber(externalRequests));
+    row.verifiedObservations=safeNumber(row.verifiedObservations)+Math.max(0,safeNumber(verifiedObservations));
+    row.lastPollAt=nowMs;
+    if(Math.max(0,safeNumber(externalRequests))>0) row.lastRequestAt=nowMs;
+    if(Number(httpStatus)===429){
+      row.http429s=safeNumber(row.http429s)+1;
+      row.provider429Streak=Math.min(8,safeNumber(row.provider429Streak)+1);
+      const cooldown=Math.min(PRIORITY_LIVE_429_MAX_COOLDOWN_MS_V1111,PRIORITY_LIVE_429_BASE_COOLDOWN_MS_V1111*Math.pow(2,Math.max(0,row.provider429Streak-1)));
+      row.providerCooldownUntil=nowMs+cooldown;
+    }else if(Math.max(0,safeNumber(externalRequests))>0 && Number.isFinite(Number(httpStatus)) && Number(httpStatus)>=200 && Number(httpStatus)<300){
+      row.provider429Streak=0; row.providerCooldownUntil=null;
+    }
+    const limit=this.priorityLiveMonthlyRequestLimitV1111();
+    if(safeNumber(row.externalRequests)>=limit){
+      row.hardLocked=true; row.hardLockedAt=nowMs; row.hardLockReason="MONTHLY_PRIORITY_LIVE_REQUEST_LIMIT_REACHED_V1111";
+    }
+    row.lastUpdatedAt=nowMs;
+    await this.doPutV404(PRIORITY_LIVE_BUDGET_KEY_V1111,row);
+    if(row.hardLocked===true) await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,false);
+    return await this.priorityLiveBudgetStateV1111(nowMs,false);
+  }
+
   async priorityLiveRegisterV1109(request) {
     let body={};
     try { body=await request.json(); } catch (_) {}
@@ -197390,6 +197601,7 @@ export class V3LiveCollectorV363 {
       .filter(row=>row?.promote !== false && isAddress(normalize(row?.address||"")))
       .slice(0,PRIORITY_LIVE_MAX_ACTIVE_V1109);
     const nowMs=Date.now();
+    const budgetV1111=await this.priorityLiveBudgetStateV1111(nowMs,true);
     let entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     entries=entries&&typeof entries==="object"?entries:{};
 
@@ -197436,9 +197648,10 @@ export class V3LiveCollectorV363 {
       .slice(0,PRIORITY_LIVE_MAX_ACTIVE_V1109);
     entries=Object.fromEntries(retained.map(row=>[normalize(row.address),row]));
     await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
-    await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,Object.keys(entries).length>0);
-    if(Object.keys(entries).length>0) await this.doSetAlarmV404(Date.now()+1000);
-    return Response.json({version:CHAINVANTA_DISPLAY_VERSION,registered:true,status:Object.keys(entries).length?"PRIORITY_LIVE_ROSTER_UPDATED_V1109":"NO_PROMOTED_TOKENS_V1109",incoming:incoming.length,activeEntries:Object.keys(entries).length,retentionMinutes:Math.round(PRIORITY_LIVE_RETENTION_MS_V1109/60000)});
+    const budgetAllowsRunV1111=budgetV1111.manualPaused!==true&&budgetV1111.hardLocked!==true&&budgetV1111.providerCooldownActive!==true;
+    await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,Object.keys(entries).length>0&&budgetAllowsRunV1111);
+    if(Object.keys(entries).length>0&&budgetAllowsRunV1111) await this.doSetAlarmV404(Date.now()+1000);
+    return Response.json({version:CHAINVANTA_DISPLAY_VERSION,registered:true,status:Object.keys(entries).length?(budgetAllowsRunV1111?"PRIORITY_LIVE_ROSTER_UPDATED_V1111":"PRIORITY_LIVE_ROSTER_RETAINED_BUDGET_PAUSED_V1111"):"NO_PROMOTED_TOKENS_V1109",incoming:incoming.length,activeEntries:Object.keys(entries).length,retentionMinutes:Math.round(PRIORITY_LIVE_RETENTION_MS_V1109/60000),budgetV1111:{tier:budgetV1111.tier,used:budgetV1111.used,limit:budgetV1111.limit,manualPaused:budgetV1111.manualPaused,hardLocked:budgetV1111.hardLocked}});
   }
 
   async priorityLiveTestV1110(request) {
@@ -197448,6 +197661,10 @@ export class V3LiveCollectorV363 {
     if(!isAddress(address)) return Response.json({started:false,status:"INVALID_CONTROLLED_TEST_TOKEN_V1110"},{status:400});
 
     const nowMs=Date.now();
+    const budgetV1111=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    if(budgetV1111.manualPaused===true||budgetV1111.hardLocked===true){
+      return Response.json({started:false,status:budgetV1111.hardLocked?"MONTHLY_LIVE_BUDGET_HARD_LOCK_V1111":"PRIORITY_LIVE_MANUALLY_PAUSED_V1111",budget:{tier:budgetV1111.tier,used:budgetV1111.used,limit:budgetV1111.limit}});
+    }
     let entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     entries=entries&&typeof entries==="object"?entries:{};
     const genuine=Object.values(entries).filter(row=>row&&row?.controlledShadowTestV1110!==true);
@@ -197495,10 +197712,11 @@ export class V3LiveCollectorV363 {
   async priorityLiveSnapshotV1109() {
     const entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     const last=await this.state.storage.get(PRIORITY_LIVE_LAST_STATUS_KEY_V1109)||{};
+    const budgetV1111=await this.priorityLiveBudgetSnapshotV1111();
     return {
       version:CHAINVANTA_DISPLAY_VERSION,
       available:true,
-      tracker:"PROMOTED_OR_CONTROLLED_TEST_MINUTE_LANE_V1110",
+      tracker:"PROMOTED_OR_CONTROLLED_TEST_MINUTE_LANE_GOVERNED_V1111",
       pollIntervalMs:HORIZON_LIVE_POLL_MS_V413,
       entries,
       activeEntries:Object.keys(entries).length,
@@ -197507,12 +197725,29 @@ export class V3LiveCollectorV363 {
       lastHttpStatus:last?.httpStatus??null,
       lastError:last?.error||null,
       requests:safeNumber(last?.requests),
-      verifiedObservations:safeNumber(last?.verifiedObservations)
+      verifiedObservations:safeNumber(last?.verifiedObservations),
+      budgetV1111
     };
   }
 
   async pollPriorityLiveV1109() {
     const nowMs=Date.now();
+    const budgetV1111=await this.priorityLiveBudgetStateV1111(nowMs,true);
+    if(budgetV1111.manualPaused===true||budgetV1111.hardLocked===true){
+      await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,false);
+      const status=budgetV1111.hardLocked?"MONTHLY_LIVE_BUDGET_HARD_LOCK_V1111":"PRIORITY_LIVE_MANUALLY_PAUSED_V1111";
+      await this.doPutV404(PRIORITY_LIVE_LAST_STATUS_KEY_V1109,{lastPollAt:nowMs,status,requests:0,verifiedObservations:0,httpStatus:null,error:null});
+      return {active:false,status,requests:0,budgetTier:budgetV1111.tier};
+    }
+    const previousLast=await this.state.storage.get(PRIORITY_LIVE_LAST_STATUS_KEY_V1109)||{};
+    const lastRequestAt=Number(previousLast?.lastExternalRequestAtV1111||budgetV1111.row?.lastRequestAt||0);
+    const nextThrottleAt=Number.isFinite(lastRequestAt)&&lastRequestAt>0?lastRequestAt+budgetV1111.throttleMs:0;
+    const nextAllowedAt=Math.max(nextThrottleAt||0,budgetV1111.providerCooldownUntil||0);
+    if(nextAllowedAt>nowMs){
+      const status=budgetV1111.providerCooldownActive?"PRIORITY_LIVE_PROVIDER_COOLDOWN_ACTIVE_V1111":"PRIORITY_LIVE_BUDGET_THROTTLED_V1111";
+      await this.doPutV404(PRIORITY_LIVE_LAST_STATUS_KEY_V1109,{...previousLast,lastPollAt:nowMs,status,requests:0,verifiedObservations:0,httpStatus:previousLast?.httpStatus??null,error:null,nextAllowedAtV1111:nextAllowedAt,lastExternalRequestAtV1111:lastRequestAt||null});
+      return {active:true,status,requests:0,nextAllowedAtV1111:nextAllowedAt,budgetTier:budgetV1111.tier};
+    }
     let entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     entries=entries&&typeof entries==="object"?entries:{};
 
@@ -197601,8 +197836,10 @@ export class V3LiveCollectorV363 {
     }
 
     await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
-    await this.doPutV404(PRIORITY_LIVE_LAST_STATUS_KEY_V1109,{lastPollAt:Date.now(),status:verifiedObservations>0?"PRIORITY_LIVE_POLL_OK_V1109":(lastError||"NO_VERIFIED_PRIORITY_MARKETS_V1109"),requests,verifiedObservations,httpStatus:lastHttpStatus,error:lastError});
-    return {active:true,status:verifiedObservations>0?"PRIORITY_LIVE_POLL_OK_V1109":(lastError||"NO_VERIFIED_PRIORITY_MARKETS_V1109"),requests,verifiedObservations,lastHttpStatus,lastError};
+    const budgetAfterV1111=await this.priorityLiveRecordPollV1111({externalRequests:requests,verifiedObservations,httpStatus:lastHttpStatus});
+    const statusV1111=verifiedObservations>0?"PRIORITY_LIVE_POLL_OK_V1111":(lastError||"NO_VERIFIED_PRIORITY_MARKETS_V1111");
+    await this.doPutV404(PRIORITY_LIVE_LAST_STATUS_KEY_V1109,{lastPollAt:Date.now(),lastExternalRequestAtV1111:requests>0?Date.now():(previousLast?.lastExternalRequestAtV1111||null),status:statusV1111,requests,verifiedObservations,httpStatus:lastHttpStatus,error:lastError,nextAllowedAtV1111:budgetAfterV1111.providerCooldownUntil||null,budgetTierV1111:budgetAfterV1111.tier});
+    return {active:budgetAfterV1111.hardLocked!==true,status:statusV1111,requests,verifiedObservations,lastHttpStatus,lastError,budgetTierV1111:budgetAfterV1111.tier,providerCooldownUntilV1111:budgetAfterV1111.providerCooldownUntil};
   }
 
   async horizonRegisterV413(request) {
@@ -198247,6 +198484,8 @@ export class V3LiveCollectorV363 {
     if (url.pathname === "/horizon-snapshots-v413") return Response.json(await this.horizonSnapshotV413());
     if (url.pathname === "/priority-live-register-v1109" && request.method === "POST") return await this.priorityLiveRegisterV1109(request);
     if (url.pathname === "/priority-live-test-v1110" && request.method === "POST") return await this.priorityLiveTestV1110(request);
+    if (url.pathname === "/priority-live-budget-v1111") return Response.json(await this.priorityLiveBudgetSnapshotV1111());
+    if (url.pathname === "/priority-live-budget-control-v1111" && request.method === "POST") return Response.json(await this.priorityLiveBudgetControlV1111(request));
     if (url.pathname === "/priority-live-snapshot-v1109") return Response.json(await this.priorityLiveSnapshotV1109());
     if (url.pathname === "/start") {
       const cfg = {
