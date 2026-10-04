@@ -1,11 +1,13 @@
 /**
- * ChainVanta — V1148
- * V1148: V958 fallback-budget decision trace — diagnostic only.
- * - Traces the Validation Cloud primary -> Blockscout fallback budget path.
- * - Records whether V1147 pair protection armed, request-budget state before/after primary,
- *   whether the fallback reached consumeBudget, and the exact predicate that blocks it.
- * - Adds no provider/RPC requests, request ceilings, collection slots, scoring, promotion,
- *   watch-capacity, risk, or Telegram changes.
+ * ChainVanta — V1149
+ * V1149: durable latest-flow-trace persistence.
+ * - Persists the latest V551/V958 flow-collection trace immediately after directional collection,
+ *   instead of relying only on the much later main-state write.
+ * - Uses a compact dedicated KV key so early-return / later-state-write paths cannot leave the
+ *   flow diagnostic frozen on an older scan while the main scanner continues advancing.
+ * - The live flow endpoint reads the newest of the dedicated V1149 trace and legacy main-state trace.
+ * - Adds zero provider/RPC requests, changes no request ceilings, collection slots, scoring,
+ *   promotion, watch capacity, risk, or Telegram behavior.
  *
  * Historical source-lineage changelog follows below.
  *
@@ -9736,7 +9738,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1148"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1149"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -26248,6 +26250,76 @@ function newState() {
     updatedAt:
       now()
   };
+}
+
+/*
+ * V1149: compact dedicated persistence for the latest exact-pool flow trace.
+ * This is intentionally separate from STATE_KEY so a later main-state save,
+ * compaction path, or early scan termination cannot leave the diagnostic frozen.
+ */
+const EXACT_POOL_FLOW_TRACE_KEY_V1149 =
+  "robinhood-meme-hunter-exact-pool-flow-trace-v1149";
+
+async function persistExactPoolFlowTraceV1149(env, trace) {
+  const { kv, binding } = getKV(env);
+  if (!kv) {
+    return { saved:false, binding:null, error:"KV_NOT_CONFIGURED_V1149" };
+  }
+  try {
+    const payload = {
+      ...(trace && typeof trace === "object" ? trace : {}),
+      persistedAtV1149:Date.now(),
+      persistenceVersion:"V1149",
+      dedicatedKeyV1149:EXACT_POOL_FLOW_TRACE_KEY_V1149
+    };
+    await kv.put(
+      EXACT_POOL_FLOW_TRACE_KEY_V1149,
+      jsonStringifySafeV246(payload, 0)
+    );
+    return {
+      saved:true,
+      binding,
+      error:null,
+      capturedAt:payload?.capturedAt || null,
+      persistedAtV1149:payload.persistedAtV1149
+    };
+  } catch (error) {
+    return {
+      saved:false,
+      binding,
+      error:errorString(error)
+    };
+  }
+}
+
+async function readExactPoolFlowTraceV1149(env) {
+  const { kv, binding } = getKV(env);
+  if (!kv) {
+    return { ok:false, binding:null, trace:null, error:"KV_NOT_CONFIGURED_V1149" };
+  }
+  try {
+    const raw = await kv.get(EXACT_POOL_FLOW_TRACE_KEY_V1149);
+    if (!raw) return { ok:true, binding, trace:null, error:null };
+    let parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (error) {
+      return { ok:false, binding, trace:null, error:"INVALID_JSON_V1149" };
+    }
+    return {
+      ok:true,
+      binding,
+      trace:parsed && typeof parsed === "object" ? parsed : null,
+      error:null
+    };
+  } catch (error) {
+    return {
+      ok:false,
+      binding,
+      trace:null,
+      error:errorString(error)
+    };
+  }
 }
 
 async function readState(env) {
@@ -122800,6 +122872,210 @@ for (
     telegramThresholdChanged:false
   };
 
+
+  /*
+   * V1149: persist the latest V551/V958 collection trace immediately after the
+   * directional collection/catch-up work finishes. This happens before later
+   * optional/post-analysis work, so the diagnostic advances even if a later
+   * code path returns early or the large main-state write is not refreshed.
+   */
+  let exactPoolFlowTracePersistenceV1149 = {
+    saved:false,
+    error:"NOT_ATTEMPTED_V1149"
+  };
+  try {
+    const watchRootV1149 = directionalWatchRootV551(state);
+    const watchRowsV1149 = Object.values(watchRootV1149?.entries || {})
+      .filter(row => row && typeof row === "object")
+      .map(row => {
+        const poolId = normalize(row?.poolId);
+        const lastCollectedBlock = Number(row?.lastCollectedBlock);
+        const head = Number(latestNumber);
+        const chunkRows = (Array.isArray(directionalCatchupChunksV554)
+          ? directionalCatchupChunksV554 : [])
+          .filter(chunk => normalize(chunk?.selectedPoolId) === poolId)
+          .map(chunk => ({
+            attempted:chunk?.attempted === true,
+            requestConsumed:chunk?.requestConsumed === true,
+            fromBlock:Number.isFinite(Number(chunk?.fromBlock)) ? Number(chunk.fromBlock) : null,
+            toBlock:Number.isFinite(Number(chunk?.toBlock)) ? Number(chunk.toBlock) : null,
+            returnedLogs:safeNumber(chunk?.returnedLogs),
+            exactUsdTrades:safeNumber(chunk?.exactUsdTrades),
+            coverageAdvanced:chunk?.coverageAdvanced === true,
+            rangeSaturated:chunk?.rangeSaturated === true,
+            blocksRemainingToHead:Number.isFinite(Number(chunk?.blocksRemainingToHead))
+              ? Number(chunk.blocksRemainingToHead) : null,
+            status:chunk?.status || null,
+            error:chunk?.error || null
+          }));
+        return {
+          tokenAddress:normalize(row?.tokenAddress),
+          symbol:row?.symbol || null,
+          poolId,
+          quoteTokenAddress:normalize(row?.quoteTokenAddress) || null,
+          registrationSourceV552:row?.registrationSourceV552 || null,
+          registeredAt:safeNumber(row?.registeredAt) || null,
+          lastQualifiedAt:safeNumber(row?.lastQualifiedAt) || null,
+          lastCollectedBlock:Number.isFinite(lastCollectedBlock) ? lastCollectedBlock : null,
+          lastCollectedAt:safeNumber(row?.lastCollectedAt) || null,
+          latestNumber:Number.isFinite(head) ? head : null,
+          blocksBehind:Number.isFinite(head) && Number.isFinite(lastCollectedBlock)
+            ? Math.max(0, head - lastCollectedBlock) : null,
+          eligibleForAdvance:Number.isFinite(head) &&
+            Number.isFinite(lastCollectedBlock) &&
+            lastCollectedBlock < head,
+          selectionPriorityTierV567:directionalWatchPriorityTierV567(row),
+          promotionEvidenceFirstRangePriorityV1142:
+            directionalWatchNeedsPromotionEvidenceFirstRangePriorityV1142(row),
+          promotionEvidenceBootstrapV1142:row?.promotionEvidenceBootstrapV1142 || null,
+          promotionEvidenceDurableBridgeV1143:
+            row?.promotionEvidenceBootstrapV1142?.durableBridgeV1143 === true,
+          promotionEvidenceDurablePromotionBridgeV1143:
+            row?.promotionEvidenceBootstrapV1142?.durablePromotionBridgeV1143 === true,
+          promotionEvidenceDurableCohortFlowBootstrapV1143:
+            row?.promotionEvidenceBootstrapV1142?.durableCohortFlowBootstrapV1143 === true,
+          promotionEvidenceCurrentAdmissionV1143:
+            row?.promotionEvidenceBootstrapV1142?.currentAdmissionV1143 === true,
+          promotionEvidenceBootstrapQualitySafeV1143:
+            row?.promotionEvidenceBootstrapV1142?.qualitySafeBridgeV1143 === true,
+          promotionEvidenceBootstrapSourceV1143:
+            row?.promotionEvidenceBootstrapV1142?.source || null,
+          promotionEvidenceEligibilityAuditV1144:
+            row?.promotionEvidenceEligibilityAuditV1144 || null,
+          firstRangePriorityV744:directionalWatchNeedsRawFirstRangePriorityV744(row),
+          priorCompletionCatchupV578:
+            directionalWatchNeedsPriorCompletionCatchupV578(row, latestNumber),
+          expansionReadyV567:directionalWatchExpansionReadyV567(row),
+          activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
+          recentExactPoolSeedV556:row?.recentExactPoolSeedV556 === true,
+          zeroActivityDeprioritisedV555:row?.zeroActivityDeprioritisedV555 === true,
+          successfulRanges:safeNumber(row?.successfulRanges),
+          exactUsdTrades:safeNumber(row?.exactUsdTrades),
+          lastStatus:row?.lastStatus || null,
+          selectedThisScan:chunkRows.length > 0,
+          chunks:chunkRows
+        };
+      })
+      .sort((a,b) => {
+        const selectedDelta =
+          Number(b?.selectedThisScan === true) - Number(a?.selectedThisScan === true);
+        if (selectedDelta !== 0) return selectedDelta;
+        const tierDelta =
+          safeNumber(b?.selectionPriorityTierV567) -
+          safeNumber(a?.selectionPriorityTierV567);
+        if (tierDelta !== 0) return tierDelta;
+        return safeNumber(b?.lastQualifiedAt) - safeNumber(a?.lastQualifiedAt);
+      })
+      .slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
+
+    const traceV1149 = {
+      schema:"EXACT_POOL_FLOW_COLLECTION_TRACE_V1149",
+      scanStartedAt:
+        safeNumber(state?.nearMissAnalyzeSelectionTraceV1137?.scanStartedAt) ||
+        safeNumber(state?.identityHandoffRuntimeTraceV1136?.scanStartedAt) ||
+        Date.now(),
+      capturedAt:Date.now(),
+      latestNumber:safeNumber(latestNumber) || null,
+      watchCount:Object.keys(watchRootV1149?.entries || {}).length,
+      maxWatchEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+      maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
+      chunksAttempted:Array.isArray(directionalCatchupChunksV554)
+        ? directionalCatchupChunksV554.length : 0,
+      requestsConsumed:Array.isArray(directionalCatchupChunksV554)
+        ? directionalCatchupChunksV554.filter(row => row?.requestConsumed === true).length : 0,
+      stopReason:directionalCatchupStopReasonV554 || null,
+      reserve:{
+        enabled:directionalWatchReserveV553?.enabled === true,
+        reservedRequests:safeNumber(directionalWatchReserveV553?.reservedRequests),
+        minimumGuaranteedRequests:
+          safeNumber(directionalWatchReserveV553?.minimumGuaranteedRequestsV559),
+        behindPoolCount:safeNumber(directionalWatchReserveV553?.behindPoolCountV559),
+        hardMinimumProtectionV1141:
+          directionalWatchReserveV553?.hardMinimumProtectionV1141 === true,
+        hardMinimumGuaranteedRequestsV1141:
+          safeNumber(directionalWatchReserveV553?.hardMinimumGuaranteedRequestsV1141),
+        hardMinimumBlocksV1141:
+          safeNumber(directionalWatchReserveV553?.hardMinimumBlocksV1141),
+        validationCloudFallbackPairProtectionV1147:
+          directionalWatchReserveV553?.validationCloudFallbackPairProtectionV1147 === true,
+        validationCloudFallbackPairArmedV1147:
+          directionalWatchReserveV553?.validationCloudFallbackPairArmedV1147 === true,
+        validationCloudFallbackEstimatedSpanV1147:
+          safeNumber(directionalWatchReserveV553?.validationCloudFallbackEstimatedSpanV1147) || null,
+        validationCloudPrimaryConsumedV1147:
+          directionalWatchReserveV553?.validationCloudPrimaryConsumedV1147 === true,
+        blockscoutFallbackConsumedV1147:
+          directionalWatchReserveV553?.blockscoutFallbackConsumedV1147 === true,
+        fallbackPairBlockedHardBoundaryV1147:
+          directionalWatchReserveV553?.fallbackPairBlockedHardBoundaryV1147 === true,
+        fallbackPairBlockReasonV1147:
+          directionalWatchReserveV553?.fallbackPairBlockReasonV1147 || null,
+        v1148PrimaryAttempted:directionalWatchReserveV553?.v1148PrimaryAttempted === true,
+        v1148PrimaryFailed:directionalWatchReserveV553?.v1148PrimaryFailed === true,
+        v1148PrimaryError:directionalWatchReserveV553?.v1148PrimaryError || null,
+        v1148PrimaryBudgetBefore:directionalWatchReserveV553?.v1148PrimaryBudgetBefore || null,
+        v1148PrimaryBudgetAfter:directionalWatchReserveV553?.v1148PrimaryBudgetAfter || null,
+        v1148FallbackPresented:directionalWatchReserveV553?.v1148FallbackPresented === true,
+        v1148FallbackPairEligibleAtConsume:
+          directionalWatchReserveV553?.v1148FallbackPairEligibleAtConsume,
+        v1148FallbackPairRejectPredicate:
+          directionalWatchReserveV553?.v1148FallbackPairRejectPredicate || null,
+        v1148FallbackBoundaryAudit:
+          directionalWatchReserveV553?.v1148FallbackBoundaryAudit || null,
+        v1148FallbackPairConsumed:
+          directionalWatchReserveV553?.v1148FallbackPairConsumed === true,
+        v1148BudgetBeforeFallback:
+          directionalWatchReserveV553?.v1148BudgetBeforeFallback || null,
+        v1148BudgetAfterFallback:
+          directionalWatchReserveV553?.v1148BudgetAfterFallback || null,
+        promotionEvidenceFirstRangePriorityV1142:
+          directionalWatchReserveV553?.promotionEvidenceFirstRangePriorityV1142 === true,
+        promotionEvidenceDurableBridgeV1143:
+          directionalWatchReserveV553?.promotionEvidenceDurableBridgeV1143 === true,
+        promotionEvidenceDurablePromotionBridgeV1143:
+          directionalWatchReserveV553?.promotionEvidenceDurablePromotionBridgeV1143 === true,
+        promotionEvidenceDurableCohortFlowBootstrapV1143:
+          directionalWatchReserveV553?.promotionEvidenceDurableCohortFlowBootstrapV1143 === true,
+        promotionEvidenceCurrentAdmissionV1143:
+          directionalWatchReserveV553?.promotionEvidenceCurrentAdmissionV1143 === true,
+        promotionEvidenceBootstrapSourceV1143:
+          directionalWatchReserveV553?.promotionEvidenceBootstrapSourceV1143 || null,
+        ownerRequestsPresentedV1141:
+          safeNumber(directionalWatchReserveV553?.ownerRequestsPresentedV1141),
+        lastHardMinimumBlockedTypeV1141:
+          directionalWatchReserveV553?.lastHardMinimumBlockedTypeV1141 || null,
+        releaseReason:
+          directionalWatchReserveResultV553?.releaseReason ||
+          directionalWatchReserveResultV553?.reason ||
+          null
+      },
+      rows:watchRowsV1149,
+      persistence:{
+        dedicated:true,
+        key:EXACT_POOL_FLOW_TRACE_KEY_V1149,
+        mainStateIndependent:true,
+        stage:"IMMEDIATELY_AFTER_V551_V554_COLLECTION_V1149"
+      },
+      externalRequestsAdded:0,
+      diagnosticStateWritesAdded:1,
+      extraCollectionSlotsAdded:0,
+      requestCeilingsChanged:false,
+      watchCapacityChanged:false,
+      scoringChanged:false,
+      promotionRulesChanged:false,
+      telegramMutation:false
+    };
+
+    state.exactPoolFlowCollectionTraceV1140 = traceV1149;
+    exactPoolFlowTracePersistenceV1149 =
+      await persistExactPoolFlowTraceV1149(env, traceV1149);
+  } catch (errorV1149) {
+    exactPoolFlowTracePersistenceV1149 = {
+      saved:false,
+      error:errorString(errorV1149)
+    };
+  }
+
   const directionalMultiPoolSchedulerV558 = {
     enabled:true,
     measurementOnly:true,
@@ -208303,8 +208579,23 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
   const requested=normalize(url?.searchParams?.get("token"));
   const stateRead=await readState(env);
   const state=stateRead?.state||{};
-  const trace=state?.exactPoolFlowCollectionTraceV1140&&typeof state.exactPoolFlowCollectionTraceV1140==="object"
+  const legacyTrace=state?.exactPoolFlowCollectionTraceV1140&&typeof state.exactPoolFlowCollectionTraceV1140==="object"
     ? state.exactPoolFlowCollectionTraceV1140 : null;
+  const dedicatedReadV1149=await readExactPoolFlowTraceV1149(env);
+  const dedicatedTraceV1149=dedicatedReadV1149?.trace&&typeof dedicatedReadV1149.trace==="object"
+    ? dedicatedReadV1149.trace : null;
+  const legacyCapturedV1149=safeNumber(legacyTrace?.capturedAt);
+  const dedicatedCapturedV1149=safeNumber(dedicatedTraceV1149?.capturedAt);
+  const trace=
+    dedicatedTraceV1149 && dedicatedCapturedV1149 >= legacyCapturedV1149
+      ? dedicatedTraceV1149
+      : legacyTrace;
+  const traceSourceV1149=
+    trace===dedicatedTraceV1149
+      ? "DEDICATED_LATEST_FLOW_TRACE_V1149"
+      : trace===legacyTrace
+        ? "LEGACY_MAIN_STATE_FLOW_TRACE"
+        : null;
   let rows=Array.isArray(trace?.rows)?trace.rows:[];
   if(isAddress(requested)) rows=rows.filter(row=>normalize(row?.tokenAddress)===requested);
 
@@ -208358,6 +208649,10 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
     success:Boolean(trace),readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
     thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,
     externalProviderRequestsAdded:0,extraCollectionSlotsAdded:0,requestCeilingsChanged:false,watchCapacityChanged:false,
+    diagnosticStateWritesAddedV1149:1,
+    traceSourceV1149,
+    dedicatedTraceReadOkV1149:dedicatedReadV1149?.ok === true,
+    dedicatedTraceReadErrorV1149:dedicatedReadV1149?.error || null,
     requestedToken:isAddress(requested)?requested:null,
     status:trace?"EXACT_POOL_FLOW_COLLECTION_CLASSIFIED_V1140":"NO_V1140_FLOW_COLLECTION_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
     trace:trace?{
@@ -208374,7 +208669,7 @@ async function liveExactPoolFlowCollectionStatusV1140(env,url){
       selected:"selectedThisScan/chunks show whether the existing V551 collector actually attempted this exact pool and whether coverage advanced.",
       zeroRange:"A verified pool with successfulRanges=0 is not itself proof of failure; V1140 distinguishes waiting-for-turn from a consumed request that failed to advance."
     },
-    note:"V1140 is diagnostic only. It adds no provider/RPC requests or collection slots and changes no watch capacity, budgets, scoring, promotion, risk, or Telegram behavior.",
+    note:"V1149 keeps the V1140 diagnostic semantics but persists the latest compact flow trace to a dedicated KV key immediately after V551/V554 collection, adding one diagnostic KV write per normal scan and zero provider/RPC requests.",
     timestamp:now()
   };
 }
