@@ -1,5 +1,13 @@
 /**
- * ChainVanta — V1120
+ * ChainVanta — V1121
+ * V1121: outcome quality guard + valuation-basis integrity — shadow V1.
+ * - Adds horizon-specific maximum observation lag so late freezes remain recorded but cannot contaminate performance statistics.
+ * - Distinguishes EXACT / ACCEPTABLE_LAG / STALE outcome quality and exposes performanceEligible per horizon.
+ * - Prevents provider market-cap snapshots from being compared with RPC supply-derived market caps as if they used the same valuation basis.
+ * - Keeps price returns usable when verified even when market-cap bases are incomparable.
+ * - Projects quality onto legacy V1117–V1120 frozen outcomes read-only; no historical decision or raw observation is rewritten.
+ * - Zero new provider/RPC requests; Telegram/production actions remain off.
+ *
  * V1120: lightweight decision-outcome observer — shadow V1.
  * - Keeps forward-only decision outcomes observable after a token leaves the max-3 fast lane.
  * - Uses one bounded DexScreener batch only when an audit horizon is actually due.
@@ -9719,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1120"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1121"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -195697,6 +195705,58 @@ function pctOutcomeV1117(before,after){
   const a=Number(before),b=Number(after); if(!Number.isFinite(a)||!Number.isFinite(b)||a<=0) return null; return ((b-a)/a)*100;
 }
 
+// V1121: performance-quality guard. Frozen evidence remains historically immutable,
+// but only sufficiently timely observations may contribute to performance calibration.
+const PRIORITY_OUTCOME_MAX_LAG_MS_V1121 = Object.freeze({
+  m1:2*60*1000, m5:3*60*1000, m15:5*60*1000, m30:10*60*1000,
+  h1:15*60*1000, h2:20*60*1000, h4:30*60*1000
+});
+const PRIORITY_OUTCOME_EXACT_LAG_MS_V1121 = 15*1000;
+
+function priorityValuationBasisV1121(snapshot){
+  const source=String(snapshot?.source||snapshot?.observationSource||"").toUpperCase();
+  const basis=String(snapshot?.priceBasis||"").toUpperCase();
+  if(source.includes("EXACT_RPC")||basis.includes("EXACT_USD_TRADES")) return "ONCHAIN_SUPPLY_DERIVED_V1121";
+  if(source.includes("DEXSCREENER")||source.includes("PROVIDER_MARKET")||basis.includes("VERIFIED_PROVIDER_PRICE")) return "PROVIDER_REPORTED_MARKET_CAP_V1121";
+  return "UNKNOWN_VALUATION_BASIS_V1121";
+}
+
+function priorityOutcomeQualityV1121(key,baseline,outcome){
+  const lag=Math.max(0,safeNumber(outcome?.observationLagMs));
+  const maxLag=safeNumber(PRIORITY_OUTCOME_MAX_LAG_MS_V1121?.[key]);
+  const priceVerified=Number.isFinite(Number(outcome?.priceUsd))&&Number(outcome?.priceUsd)>0&&Number.isFinite(Number(baseline?.priceUsd))&&Number(baseline?.priceUsd)>0;
+  let quality="STALE";
+  if(priceVerified&&lag<=PRIORITY_OUTCOME_EXACT_LAG_MS_V1121) quality="EXACT";
+  else if(priceVerified&&maxLag>0&&lag<=maxLag) quality="ACCEPTABLE_LAG";
+  const performanceEligible=priceVerified&&(quality==="EXACT"||quality==="ACCEPTABLE_LAG");
+  const baselineValuationBasis=priorityValuationBasisV1121(baseline);
+  const outcomeValuationBasis=priorityValuationBasisV1121(outcome);
+  const marketCapsPresent=Number.isFinite(Number(baseline?.marketCap))&&Number(baseline?.marketCap)>0&&Number.isFinite(Number(outcome?.marketCap))&&Number(outcome?.marketCap)>0;
+  const marketCapComparable=marketCapsPresent&&baselineValuationBasis!=="UNKNOWN_VALUATION_BASIS_V1121"&&baselineValuationBasis===outcomeValuationBasis;
+  return {
+    performanceQualityV1121:quality,performanceEligibleV1121:performanceEligible,
+    maxAcceptedLagMsV1121:maxLag||null,baselineValuationBasisV1121:baselineValuationBasis,
+    outcomeValuationBasisV1121:outcomeValuationBasis,marketCapComparableV1121:marketCapComparable,
+    marketCapComparisonStatusV1121:marketCapComparable?"COMPARABLE_V1121":(marketCapsPresent?"INCOMPARABLE_VALUATION_BASIS_V1121":"MARKET_CAP_UNAVAILABLE_V1121")
+  };
+}
+
+function priorityOutcomeDecorateV1121(key,baseline,outcome){
+  if(!outcome||outcome?.status!=="FROZEN") return outcome;
+  const q=priorityOutcomeQualityV1121(key,baseline,outcome);
+  const rawMc=outcome?.marketCapChangePct??null;
+  return {...outcome,...q,rawMarketCapChangePctV1121:rawMc,marketCapChangePct:q.marketCapComparableV1121?pctOutcomeV1117(baseline?.marketCap,outcome?.marketCap):null};
+}
+
+function priorityDecisionAuditQualityProjectionV1121(projected){
+  const records=(Array.isArray(projected?.records)?projected.records:[]).map(rec=>{
+    const horizons={};
+    for(const [key,h] of Object.entries(rec?.horizons||{})) horizons[key]=priorityOutcomeDecorateV1121(key,rec?.baseline,h);
+    return {...rec,horizons};
+  });
+  return {...projected,records,outcomeQualityGuardV1121:true};
+}
+
 function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
   const state=(audit&&typeof audit==="object"&&!Array.isArray(audit))?audit:{};
   let records=Array.isArray(state.records)?state.records:[];
@@ -195750,6 +195810,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
       const snap=priorityLivePriceSnapshotV1117(row,nowMs,targetAt);
       if(snap?.verified===true&&safeNumber(snap?.observedAt)>=targetAt){
         rec.horizons[key]={status:"FROZEN",targetAt,targetPassed:true,freezeEligible:true,pendingReason:null,capturedAt:nowMs,observationAt:snap.observedAt,latestEligibleObservationAt:snap.observedAt,latestEligiblePrice:snap.priceUsd,observationSource:snap.source,observationLagMs:Math.max(0,safeNumber(snap.observedAt)-targetAt),priceUsd:snap.priceUsd,marketCap:snap.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,snap.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,snap.marketCap),source:snap.source,priceBasis:snap.priceBasis||null,targetAwareV1118:true,evaluatorProcessedAtV1119:nowMs,evaluatorVersion:"V1119"};
+        rec.horizons[key]=priorityOutcomeDecorateV1121(key,baseline,rec.horizons[key]);
         outcomesFrozen++; changed=true;
       }else{
         const next={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:snap?.status||"TARGET_PASSED_NO_POST_TARGET_VERIFIED_PRICE_V1118",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,latestSeenObservationAt:snap?.latestSeenObservedAt||null,latestSeenPrice:snap?.latestSeenPriceUsd||null,latestSeenSource:snap?.latestSeenSource||null,targetAwareV1118:true,evaluatorProcessedAtV1119:nowMs,evaluatorVersion:"V1119"};
@@ -195758,7 +195819,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
     }
   }
   if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
-  return {audit:{version:"V1120",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119",outcomeObserverV1120:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
+  return {audit:{version:"V1121",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119",outcomeObserverV1120:true,outcomeQualityGuardV1121:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
 }
 
 // V1119: read-time audit projection. This is deliberately read-only: it never
@@ -196884,12 +196945,17 @@ async function readLiveDecisionAuditV1117(env){
 async function liveDecisionAuditStatusV1117(env){
   const snap=await readLiveDecisionAuditV1117(env);
   const records=Array.isArray(snap?.records)?snap.records:[];
-  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0,duePendingOutcomes=0,freezeEligiblePending=0; const pendingReasonCounts={};
+  const stateCounts={}; let frozenOutcomes=0,pendingOutcomes=0,duePendingOutcomes=0,freezeEligiblePending=0,performanceEligibleOutcomes=0,staleFrozenOutcomes=0,incomparableMarketCapOutcomes=0; const pendingReasonCounts={},performanceQualityCounts={};
   for(const r of records){
     stateCounts[r?.state]=(stateCounts[r?.state]||0)+1;
     for(const h of Object.values(r?.horizons||{})){
-      if(h?.status==="FROZEN") frozenOutcomes++;
-      else if(h?.status==="PENDING"){
+      if(h?.status==="FROZEN"){
+        frozenOutcomes++;
+        const q=h?.performanceQualityV1121||"UNCLASSIFIED"; performanceQualityCounts[q]=(performanceQualityCounts[q]||0)+1;
+        if(h?.performanceEligibleV1121===true) performanceEligibleOutcomes++;
+        if(q==="STALE") staleFrozenOutcomes++;
+        if(h?.marketCapComparisonStatusV1121==="INCOMPARABLE_VALUATION_BASIS_V1121") incomparableMarketCapOutcomes++;
+      } else if(h?.status==="PENDING"){
         pendingOutcomes++;
         if(h?.targetPassed===true) duePendingOutcomes++;
         if(h?.freezeEligible===true) freezeEligiblePending++;
@@ -196899,11 +196965,11 @@ async function liveDecisionAuditStatusV1117(env){
     }
   }
   return {
-    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1120",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
-    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,lightweightOutcomeObserverV1120:true,readProjectionV1119:snap?.readProjectionV1119===true,
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_DECISION_OUTCOME_AUDIT_V1121",success:snap?.available===true,readOnly:true,shadowOnly:true,productionAlertsEnabled:false,
+    forwardOnly:true,hindsightBackfillAllowed:false,targetAwareOutcomeFreezerV1118:true,auditEvaluatorIntegrityV1119:true,lightweightOutcomeObserverV1120:true,outcomeQualityGuardV1121:true,valuationBasisIntegrityV1121:true,readProjectionV1119:snap?.readProjectionV1119===true,
     projectionEvaluatedAt:snap?.projectionEvaluatedAt||null,legacyHorizonsProjected:safeNumber(snap?.legacyHorizonsProjected),duePendingProjected:safeNumber(snap?.duePendingProjected),freezeEligibleProjected:safeNumber(snap?.freezeEligibleProjected),
-    outcomeObserverV1120:snap?.outcomeObserverV1120||null,records:records.length,stateCounts,frozenOutcomes,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
-    note:"V1120 keeps audit outcomes observable after fast-lane expiry with a lightweight, target-triggered price observer. It freezes only verified post-target observations, records lag, shares the V1111 request governor, and never hindsight-backfills.",timestamp:now()
+    outcomeObserverV1120:snap?.outcomeObserverV1120||null,records:records.length,stateCounts,frozenOutcomes,performanceEligibleOutcomes,staleFrozenOutcomes,incomparableMarketCapOutcomes,performanceQualityCounts,pendingOutcomes,duePendingOutcomes,freezeEligiblePending,pendingReasonCounts,maxAcceptedLagMsV1121:PRIORITY_OUTCOME_MAX_LAG_MS_V1121,outcomeWindows:Object.keys(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117),latest:records.slice(-20).reverse(),
+    note:"V1121 preserves every frozen observation but only timely outcomes are performance-eligible. Market-cap returns are suppressed when baseline/outcome valuation bases differ; verified price returns remain available. No hindsight backfill or extra requests.",timestamp:now()
   };
 }
 
@@ -198747,6 +198813,7 @@ export class V3LiveCollectorV363 {
         }
         if(market&&Number(market.priceUsd)>0){
           rec.horizons[key]={status:"FROZEN",targetAt,targetPassed:true,freezeEligible:true,pendingReason:null,capturedAt:observedAt,observationAt:observedAt,latestEligibleObservationAt:observedAt,latestEligiblePrice:market.priceUsd,observationSource:"DEXSCREENER_LIGHTWEIGHT_OUTCOME_OBSERVER_V1120",observationLagMs:Math.max(0,observedAt-targetAt),priceUsd:market.priceUsd,marketCap:market.marketCap,priceChangePct:pctOutcomeV1117(baseline.priceUsd,market.priceUsd),marketCapChangePct:pctOutcomeV1117(baseline.marketCap,market.marketCap),source:"DEXSCREENER_LIGHTWEIGHT_OUTCOME_OBSERVER_V1120",priceBasis:"VERIFIED_PROVIDER_PRICE_POST_TARGET",observerProcessedAtV1120:observedAt,observerVersion:"V1120",forwardOnly:true,hindsightBackfillAllowed:false};
+          rec.horizons[key]=priorityOutcomeDecorateV1121(key,baseline,rec.horizons[key]);
           outcomesFrozen++; changed=true;
         }else{
           rec.horizons[key]={...h,targetAt,targetPassed:true,freezeEligible:false,pendingReason:"OUTCOME_OBSERVER_NO_VERIFIED_MARKET_V1120",latestEligibleObservationAt:null,latestEligiblePrice:null,observationSource:null,observerProcessedAtV1120:observedAt,observerVersion:"V1120"};
@@ -198756,7 +198823,7 @@ export class V3LiveCollectorV363 {
       if(touchedRecord) recordsObserved++;
     }
     if(changed){
-      audit={...audit,version:"V1120",records:audit.records,lastUpdatedAt:observedAt,outcomeObserverV1120:true};
+      audit={...audit,version:"V1121",records:audit.records,lastUpdatedAt:observedAt,outcomeObserverV1120:true,outcomeQualityGuardV1121:true};
       await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,audit);
     }
     await this.priorityLiveRecordPollV1111({externalRequests:1,verifiedObservations:outcomesFrozen,httpStatus});
@@ -198775,12 +198842,13 @@ export class V3LiveCollectorV363 {
     const audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
     const entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     const liveRows=Object.values(entries||{});
-    const projected=priorityDecisionAuditReadProjectionV1119(audit,liveRows,Date.now());
+    const projectedRaw=priorityDecisionAuditReadProjectionV1119(audit,liveRows,Date.now());
+    const projected=priorityDecisionAuditQualityProjectionV1121(projectedRaw);
     const observerStatus=await this.state.storage.get(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120)||null;
     const observerEnabled=(await this.state.storage.get(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120))===true;
     return {
-      version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1120",
-      forwardOnly:true,hindsightBackfillAllowed:false,readProjectionV1119:true,
+      version:CHAINVANTA_DISPLAY_VERSION,available:true,status:"PRIORITY_LIVE_DECISION_AUDIT_READY_V1121",
+      forwardOnly:true,hindsightBackfillAllowed:false,readProjectionV1119:true,outcomeQualityGuardV1121:true,
       projectionEvaluatedAt:projected?.projectionEvaluatedAt||null,
       legacyHorizonsProjected:safeNumber(projected?.legacyHorizonsProjected),
       duePendingProjected:safeNumber(projected?.duePendingProjected),
