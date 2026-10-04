@@ -1,4 +1,21 @@
 /**
+ * ChainVanta — V1093
+ * FLOW-AWARE ACCUMULATION MATERIALITY GATE
+ * Builds directly from deployed V1092.
+ * - Live V1092 evidence exposed a calibration issue: pBTC3x reached
+ *   ACCUMULATING from only two tiny verified flow snapshots (median 1.5 trades,
+ *   about $10.69 net) despite otherwise correct persistence math.
+ * - Adds a material-flow requirement before accumulation becomes evidenceReady:
+ *   repeated verified observations still matter, but the median 1h sample must
+ *   also contain at least 5 trades and at least $250 gross BUY+SELL USD.
+ * - Small verified flow is still displayed and retained; it remains
+ *   BUILDING_FLOW_HISTORY rather than being discarded.
+ * - PONS-style deep flow remains eligible, so the model can distinguish
+ *   sustained distribution from a single recent positive hour.
+ * - Shadow/read-only only. No production scoring or Telegram changes.
+ */
+
+/**
  * ChainVanta — V1092
  * FLOW-AWARE ACCUMULATION — SHADOW V1
  * Builds directly from deployed V1091.
@@ -9249,7 +9266,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1092"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1093"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -187019,6 +187036,8 @@ const FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092 = 2;
 const FLOW_ACCUM_MIN_SPAN_MS_V1092 = 5 * 60 * 1000;
 const FLOW_ACCUM_STRONG_MIN_OBSERVATIONS_V1092 = 3;
 const FLOW_ACCUM_STRONG_MIN_SPAN_MS_V1092 = 15 * 60 * 1000;
+const FLOW_ACCUM_MIN_MEDIAN_TRADES_V1093 = 5;
+const FLOW_ACCUM_MIN_MEDIAN_GROSS_USD_V1093 = 250;
 
 function medianV1092(values) {
   const rows = (Array.isArray(values) ? values : [])
@@ -187114,17 +187133,10 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
       buyUsd,
       sellUsd,
       netUsd,
+      grossUsd:buyUsd + sellUsd,
       buyPressurePct
     };
   }).filter(Boolean);
-
-  const evidenceReady =
-    usable1h.length >= FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092 &&
-    flowSpanMs >= FLOW_ACCUM_MIN_SPAN_MS_V1092;
-
-  const strongEvidence =
-    usable1h.length >= FLOW_ACCUM_STRONG_MIN_OBSERVATIONS_V1092 &&
-    flowSpanMs >= FLOW_ACCUM_STRONG_MIN_SPAN_MS_V1092;
 
   const medianBuyPressurePct = medianV1092(
     usable1h.map(row => row.buyPressurePct)
@@ -187135,6 +187147,28 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
   const medianTrades = medianV1092(
     usable1h.map(row => row.trades)
   );
+  const medianGrossUsd = medianV1092(
+    usable1h.map(row => row.grossUsd)
+  );
+
+  const repeatedEvidenceReadyV1093 =
+    usable1h.length >= FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092 &&
+    flowSpanMs >= FLOW_ACCUM_MIN_SPAN_MS_V1092;
+
+  const materialFlowReadyV1093 =
+    medianTrades !== null &&
+    medianTrades >= FLOW_ACCUM_MIN_MEDIAN_TRADES_V1093 &&
+    medianGrossUsd !== null &&
+    medianGrossUsd >= FLOW_ACCUM_MIN_MEDIAN_GROSS_USD_V1093;
+
+  const evidenceReady =
+    repeatedEvidenceReadyV1093 &&
+    materialFlowReadyV1093;
+
+  const strongEvidence =
+    evidenceReady &&
+    usable1h.length >= FLOW_ACCUM_STRONG_MIN_OBSERVATIONS_V1092 &&
+    flowSpanMs >= FLOW_ACCUM_STRONG_MIN_SPAN_MS_V1092;
 
   const positiveNetCount = usable1h.filter(row => row.netUsd > 0).length;
   const positiveNetShare = usable1h.length
@@ -187202,6 +187236,12 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
     warnings.push("INSUFFICIENT_VERIFIED_FLOW_TIME_SPAN");
   }
   if (
+    repeatedEvidenceReadyV1093 &&
+    materialFlowReadyV1093 !== true
+  ) {
+    warnings.push("VERIFIED_FLOW_TOO_SMALL_FOR_ACCUMULATION_V1093");
+  }
+  if (
     medianBuyPressurePct !== null &&
     medianBuyPressurePct < 45
   ) {
@@ -187257,6 +187297,8 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
     lastVerifiedFlowAt:lastFlowAt || null,
     verifiedFlowSpanMinutes:Number((flowSpanMs / 60000).toFixed(1)),
     evidenceReady,
+    repeatedEvidenceReadyV1093,
+    materialFlowReadyV1093,
     strongEvidence,
     flowAccumulationScore:flowScore,
     structuralAccumulationScore:structuralScore,
@@ -187275,6 +187317,10 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
         medianNetUsd === null
           ? null
           : Number(medianNetUsd.toFixed(2)),
+      medianGrossUsd:
+        medianGrossUsd === null
+          ? null
+          : Number(medianGrossUsd.toFixed(2)),
       medianTrades:
         medianTrades === null
           ? null
@@ -187300,7 +187346,11 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
     warnings:[...new Set(warnings)],
     interpretation:
       !evidenceReady
-        ? "Verified on-chain flow exists only as an incomplete or single-snapshot history; no sustained accumulation conclusion is made."
+        ? (
+            repeatedEvidenceReadyV1093 && materialFlowReadyV1093 !== true
+              ? "Repeated verified on-chain flow exists, but the activity is too small to treat as meaningful accumulation."
+              : "Verified on-chain flow exists only as incomplete longitudinal evidence; no sustained accumulation conclusion is made."
+          )
         : state === "STRONG_ACCUMULATION"
           ? "Repeated verified on-chain flow shows strong, persistent accumulation characteristics in shadow mode."
           : state === "ACCUMULATING"
@@ -187318,7 +187368,11 @@ function flowAwareAccumulationFromRowsV1092(address, rows) {
       minimumVerifiedFlowObservations:
         FLOW_ACCUM_MIN_VERIFIED_OBSERVATIONS_V1092,
       minimumFlowSpanMinutes:
-        FLOW_ACCUM_MIN_SPAN_MS_V1092 / 60000
+        FLOW_ACCUM_MIN_SPAN_MS_V1092 / 60000,
+      minimumMedianTradesV1093:
+        FLOW_ACCUM_MIN_MEDIAN_TRADES_V1093,
+      minimumMedianGrossUsdV1093:
+        FLOW_ACCUM_MIN_MEDIAN_GROSS_USD_V1093
     },
     productionImpact:{
       opportunityChanged:false,
@@ -187336,7 +187390,7 @@ async function flowAccumulationTokenDiagnosticV1092(env, url) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"FLOW_ACCUMULATION_TOKEN_V1092",
+    diagnostic:"FLOW_ACCUMULATION_TOKEN_V1093",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -187366,7 +187420,7 @@ async function flowAccumulationTokenDiagnosticV1092(env, url) {
   return {
     ...base,
     success:true,
-    status:"FLOW_ACCUMULATION_TOKEN_OK_V1092",
+    status:"FLOW_ACCUMULATION_TOKEN_OK_V1093",
     result:flowAwareAccumulationFromRowsV1092(token, history.rows),
     timestamp:now()
   };
@@ -187376,7 +187430,7 @@ async function flowAccumulationStatusV1092(env) {
   const base = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"FLOW_ACCUMULATION_STATUS_V1092",
+    diagnostic:"FLOW_ACCUMULATION_STATUS_V1093",
     success:false,
     readOnly:true,
     shadowOnly:true,
@@ -187407,7 +187461,7 @@ async function flowAccumulationStatusV1092(env) {
   return {
     ...base,
     success:true,
-    status:"FLOW_ACCUMULATION_STATUS_OK_V1092",
+    status:"FLOW_ACCUMULATION_STATUS_OK_V1093",
     evaluated:results.length,
     evidenceReady:results.filter(r => r.evidenceReady).length,
     strongAccumulation:results.filter(
@@ -187423,7 +187477,7 @@ async function flowAccumulationStatusV1092(env) {
       r => r.accumulationState === "BUILDING_FLOW_HISTORY"
     ).length,
     tokens:results,
-    note:"Shadow only. Repeated verified V212 flow is required before the model calls accumulation evidence ready. No Telegram or production score changes.",
+    note:"Shadow only. Repeated and materially sized verified V212 flow is required before accumulation becomes evidence ready. No Telegram or production score changes.",
     timestamp:now()
   };
 }
