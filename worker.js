@@ -9727,7 +9727,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1136"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1137"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /*
  * V1128 — FAIR COHORT EVIDENCE REFRESH
@@ -110977,6 +110977,100 @@ for (
       currentLiveVerifiedLaunchWatchedV621.length
   };
 
+
+  // V1137: bounded selection telemetry for durable-cohort / near-miss candidates.
+  // Records only decisions already made by the normal scanner; no new requests,
+  // analysis slots, scoring changes, or routing changes are introduced.
+  {
+    const cohortV1137 = ensureIntelligenceCohortV1079(state);
+    const selectedBeforeSetV1137 = new Set((Array.isArray(selected) ? selected : [])
+      .map(token => normalize(token?.address)).filter(isAddress));
+    const selectedRawSetV1137 = new Set((Array.isArray(analysisSelectedRawV142) ? analysisSelectedRawV142 : [])
+      .map(token => normalize(token?.address)).filter(isAddress));
+    const selectedFinalSetV1137 = new Set((Array.isArray(analysisSelected) ? analysisSelected : [])
+      .map(token => normalize(token?.address)).filter(isAddress));
+    const terminalSetV1137 = new Set((Array.isArray(preAnalysisTerminalRowsV142) ? preAnalysisTerminalRowsV142 : [])
+      .map(row => normalize(row?.token?.address)).filter(isAddress));
+    const nowV1137 = Date.now();
+    const selectorAddressV1137 = normalize(intelligenceFollowUpAddressV1077);
+    const rowsV1137 = (Array.isArray(cohortV1137?.entries) ? cohortV1137.entries : [])
+      .slice(0, INTELLIGENCE_COHORT_MAX_V1079)
+      .map(entry => {
+        const address = normalize(entry?.address || entry?.token?.address);
+        const lastSelectedAt = safeNumber(entry?.lastSelectedAt) || null;
+        const lastAnalysedAt = safeNumber(entry?.lastAnalysedAt) || null;
+        const cooldownRemainingMs = lastSelectedAt
+          ? Math.max(0, INTELLIGENCE_COHORT_SELECTION_COOLDOWN_MS_V1079 - (nowV1137 - lastSelectedAt))
+          : 0;
+        const selectedByCohortSelector = Boolean(address && selectorAddressV1137 === address);
+        const inSelectedBeforeAdmission = selectedBeforeSetV1137.has(address);
+        const inAnalysisSelectedRaw = selectedRawSetV1137.has(address);
+        const inFinalAnalysisSelected = selectedFinalSetV1137.has(address);
+        const terminalPruned = terminalSetV1137.has(address);
+        let selectionReason = "NOT_CHOSEN_FOR_SINGLE_COHORT_SLOT_V1137";
+        if (inFinalAnalysisSelected) selectionReason = "ADMITTED_TO_FINAL_ANALYSIS_SET_V1137";
+        else if (terminalPruned) selectionReason = "PREANALYSIS_TERMINAL_PRUNED_V1137";
+        else if (selectedByCohortSelector && intelligenceFreshLaunchPressureLowV1077 !== true) selectionReason = "FRESH_LAUNCH_PRESSURE_BLOCKED_COHORT_SLOT_V1137";
+        else if (selectedByCohortSelector && intelligenceSlotEligibleV1077 !== true) selectionReason = "COHORT_SLOT_NOT_ELIGIBLE_V1137";
+        else if (selectedByCohortSelector && inAnalysisSelectedRaw && !inFinalAnalysisSelected) selectionReason = "SELECTED_RAW_BUT_REMOVED_BEFORE_FINAL_ANALYSIS_V1137";
+        else if (selectedByCohortSelector && !inAnalysisSelectedRaw) selectionReason = "SELECTOR_WINNER_NOT_ADMITTED_TO_RAW_ANALYSIS_SET_V1137";
+        else if (cooldownRemainingMs > 0) selectionReason = "COHORT_SELECTION_COOLDOWN_V1137";
+        else if (inSelectedBeforeAdmission) selectionReason = "ORGANIC_SELECTION_REMOVED_BEFORE_FINAL_ANALYSIS_V1137";
+        return {
+          address,
+          symbol:entry?.symbol || entry?.token?.metadata?.symbol || entry?.token?.symbol || null,
+          observationCount:safeNumber(entry?.observationCount),
+          opportunityScore:finiteOrNullV1076(entry?.opportunityScore),
+          confidenceScore:finiteOrNullV1076(entry?.confidenceScore),
+          riskScore:finiteOrNullV1076(entry?.riskScore),
+          lastSelectedAt,
+          lastAnalysedAt,
+          cooldownRemainingMs,
+          selectedByCohortSelector,
+          selectorPurpose:selectedByCohortSelector ? (intelligenceFollowUpSelectionV1077?.selectionPurposeV1100 || null) : null,
+          fairnessFallback:selectedByCohortSelector && intelligenceFollowUpSelectionV1077?.fairnessFallbackV1128 === true,
+          inSelectedBeforeAdmission,
+          inAnalysisSelectedRaw,
+          inFinalAnalysisSelected,
+          terminalPruned,
+          analysisLoopEntered:false,
+          analysisLoopEnteredAt:null,
+          selectionReason
+        };
+      })
+      .filter(row => isAddress(row?.address));
+
+    state.nearMissAnalyzeSelectionTraceV1137 = {
+      schema:"NEAR_MISS_ANALYZE_SELECTION_TRACE_V1137",
+      scanStartedAt:nowV1137,
+      scheduledRun:scheduled === true,
+      latestNumber:safeNumber(latestNumber)||null,
+      maxTokenChecks:MAX_TOKEN_CHECKS,
+      selectedBeforeAdmissionCount:safeNumber(selected?.length),
+      analysisSelectedRawCount:safeNumber(analysisSelectedRawV142?.length),
+      analysisSelectedFinalCount:safeNumber(analysisSelected?.length),
+      selector:{
+        status:intelligenceFollowUpSelectionV1077?.status || null,
+        selectedAddress:selectorAddressV1137 || null,
+        selectedSymbol:intelligenceFollowUpSelectionV1077?.selectedSymbol || null,
+        selectionPurpose:intelligenceFollowUpSelectionV1077?.selectionPurposeV1100 || null,
+        fairnessFallback:intelligenceFollowUpSelectionV1077?.fairnessFallbackV1128 === true,
+        fairnessReason:intelligenceFollowUpSelectionV1077?.fairnessReasonV1128 || null,
+        slotEligible:intelligenceSlotEligibleV1077 === true,
+        freshLaunchPressureLow:intelligenceFreshLaunchPressureLowV1077 === true,
+        alreadyOrganicallySelected:intelligenceAlreadyInSelectedV1077 === true,
+        actuallyAdmitted:intelligenceActuallyAdmittedV1086 === true,
+        admissionBlocker:intelligenceCohortAdmissionAttemptV1090?.blocker || null
+      },
+      rows:rowsV1137,
+      thresholdsChanged:false,
+      promotionRulesChanged:false,
+      externalProviderRequestsAdded:0,
+      extraAnalysisSlotsAdded:0,
+      telegramMutation:false
+    };
+  }
+
   if (marketFreshTargetAddress) {
     reservePriorityFreshMarket(
       state,
@@ -112598,6 +112692,17 @@ for (
       );
 
     scannerFunnelV415.analysisLoopEntered++;
+
+    // V1137: record when an existing cohort token actually enters analyzeToken.
+    if (address && Array.isArray(state?.nearMissAnalyzeSelectionTraceV1137?.rows)) {
+      const traceRowV1137 = state.nearMissAnalyzeSelectionTraceV1137.rows
+        .find(row => normalize(row?.address) === address);
+      if (traceRowV1137) {
+        traceRowV1137.analysisLoopEntered = true;
+        traceRowV1137.analysisLoopEnteredAt = Date.now();
+        traceRowV1137.selectionReason = "ENTERED_ANALYZE_TOKEN_V1137";
+      }
+    }
 
     if (
       address
@@ -192709,6 +192814,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-near-miss-analyze-selection-status"
+  ) {
+    return jsonResponse(
+      await liveNearMissAnalyzeSelectionStatusV1137(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/live-decision-observer-start"
   ) {
     return jsonResponse(
@@ -206755,6 +206869,61 @@ async function liveRegistryCandidateIdentityHandoffStatusV1135(env, url){
     },
     note:"V1135 is diagnostic only. It adds zero provider/RPC requests, performs zero state writes, changes no thresholds, promotion logic, watch capacity, budgets, or Telegram behavior.",
     timestamp:now()
+  };
+}
+
+
+// V1137: read-only join between the current near-miss view and the latest
+// bounded normal-scan cohort selection trace.
+async function liveNearMissAnalyzeSelectionStatusV1137(env,url){
+  const requested=normalize(url?.searchParams?.get("token"));
+  const [nearMiss,stateRead]=await Promise.all([livePromotionNearMissStatusV1125(env),readState(env)]);
+  const state=stateRead?.state||{};
+  const trace=state?.nearMissAnalyzeSelectionTraceV1137&&typeof state.nearMissAnalyzeSelectionTraceV1137==="object"
+    ? state.nearMissAnalyzeSelectionTraceV1137 : null;
+  const traceRows=Array.isArray(trace?.rows)?trace.rows:[];
+  const traceByAddress=new Map(traceRows.map(row=>[normalize(row?.address),row]).filter(([address])=>isAddress(address)));
+  const cohort=ensureIntelligenceCohortV1079(state);
+  const cohortByAddress=new Map((Array.isArray(cohort?.entries)?cohort.entries:[])
+    .map(entry=>[normalize(entry?.address),entry]).filter(([address])=>isAddress(address)));
+  const sourceRows=(Array.isArray(nearMiss?.watchCandidates)?nearMiss.watchCandidates:[])
+    .filter(row=>!isAddress(requested)||normalize(row?.address)===requested);
+  const candidates=sourceRows.map(row=>{
+    const address=normalize(row?.address);
+    const t=traceByAddress.get(address)||null;
+    const cohortEntry=cohortByAddress.get(address)||null;
+    let classification="NOT_IN_DURABLE_COHORT_V1137";
+    let nextAction="NO_COHORT_SELECTION_FIX_INDICATED_V1137";
+    if(cohortEntry){
+      if(!trace){ classification="NO_V1137_SCAN_TRACE_YET_V1137"; nextAction="WAIT_FOR_ONE_NORMAL_SCAN_V1137"; }
+      else if(!t){ classification="COHORT_ENTRY_NOT_SNAPSHOTTED_IN_LATEST_SCAN_V1137"; nextAction="REVIEW_COHORT_REFRESH_OR_PRUNE_TIMING_V1137"; }
+      else if(t?.analysisLoopEntered===true){ classification="ENTERED_ANALYZE_TOKEN_V1137"; nextAction="NO_SELECTION_FIX_REQUIRED_V1137"; }
+      else if(t?.inFinalAnalysisSelected===true){ classification="ADMITTED_BUT_ANALYSIS_LOOP_NOT_REACHED_V1137"; nextAction="TRACE_ANALYSIS_QUEUE_EARLY_STOP_OR_BUDGET_V1137"; }
+      else if(t?.selectionReason==="COHORT_SELECTION_COOLDOWN_V1137"){ classification="COHORT_SELECTION_COOLDOWN_V1137"; nextAction="WAIT_FOR_EXISTING_COOLDOWN_V1137"; }
+      else if(t?.selectedByCohortSelector===true){ classification=t?.selectionReason||"SELECTOR_WINNER_NOT_ADMITTED_V1137"; nextAction="TRACE_COHORT_SLOT_ADMISSION_V1137"; }
+      else { classification="ELIGIBLE_COHORT_TOKEN_NOT_CHOSEN_THIS_SCAN_V1137"; nextAction="SINGLE_COHORT_SLOT_WENT_TO_OTHER_TOKEN_V1137"; }
+    }
+    return {
+      address,symbol:row?.symbol||cohortEntry?.symbol||null,rank:row?.rank??null,
+      nearMissTier:row?.nearMissTier||null,nearMissScore:safeNumber(row?.nearMissScore),priorityScore:safeNumber(row?.priorityScore),
+      storedObservations:safeNumber(row?.storedObservations),readinessGaps:Array.isArray(row?.readinessGaps)?row.readinessGaps:[],
+      inDurableCohort:Boolean(cohortEntry),
+      cohort:{observationCount:safeNumber(cohortEntry?.observationCount),lastSelectedAt:safeNumber(cohortEntry?.lastSelectedAt)||null,lastAnalysedAt:safeNumber(cohortEntry?.lastAnalysedAt)||null,opportunityScore:finiteOrNullV1076(cohortEntry?.opportunityScore),confidenceScore:finiteOrNullV1076(cohortEntry?.confidenceScore),riskScore:finiteOrNullV1076(cohortEntry?.riskScore)},
+      latestScanSelection:t?{selectedByCohortSelector:t?.selectedByCohortSelector===true,selectorPurpose:t?.selectorPurpose||null,fairnessFallback:t?.fairnessFallback===true,cooldownRemainingMs:safeNumber(t?.cooldownRemainingMs),inSelectedBeforeAdmission:t?.inSelectedBeforeAdmission===true,inAnalysisSelectedRaw:t?.inAnalysisSelectedRaw===true,inFinalAnalysisSelected:t?.inFinalAnalysisSelected===true,terminalPruned:t?.terminalPruned===true,analysisLoopEntered:t?.analysisLoopEntered===true,selectionReason:t?.selectionReason||null}:null,
+      classification,nextAction
+    };
+  });
+  const statusCounts={};
+  for(const row of candidates) statusCounts[row.classification]=(statusCounts[row.classification]||0)+1;
+  const affectedNotEntering=candidates.filter(row=>row?.inDurableCohort===true&&row?.classification!=="ENTERED_ANALYZE_TOKEN_V1137").length;
+  return {
+    agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,diagnostic:"LIVE_NEAR_MISS_ANALYZE_SELECTION_STATUS_V1137",
+    success:Boolean(trace),readOnly:true,shadowOnly:true,productionAlertsEnabled:false,thresholdsChanged:false,promotionRulesChanged:false,telegramMutation:false,externalProviderRequestsAdded:0,extraAnalysisSlotsAdded:0,
+    requestedToken:isAddress(requested)?requested:null,status:trace?"NEAR_MISS_ANALYZE_SELECTION_CLASSIFIED_V1137":"NO_V1137_SCAN_TRACE_YET_WAIT_FOR_NORMAL_SCAN",
+    trace:trace?{scanStartedAt:safeNumber(trace?.scanStartedAt)||null,latestNumber:safeNumber(trace?.latestNumber)||null,scheduledRun:trace?.scheduledRun===true,maxTokenChecks:safeNumber(trace?.maxTokenChecks),cohortRowsCaptured:traceRows.length,selector:trace?.selector||null}:{scanStartedAt:null,latestNumber:null,scheduledRun:null,maxTokenChecks:MAX_TOKEN_CHECKS,cohortRowsCaptured:0,selector:null},
+    currentNearMissCandidates:candidates.length,durableNearMissCandidates:candidates.filter(row=>row?.inDurableCohort===true).length,durableNearMissNotEnteringAnalyzeToken:affectedNotEntering,statusCounts,candidates,
+    interpretation:{singleSlot:"The durable intelligence cohort contributes at most one existing analysis slot per eligible scheduled scan; V1137 does not add another slot.",cooldown:"A cooldown classification means the existing V1079 four-minute re-selection guard excluded that token this scan.",notChosen:"A durable near-miss not chosen this scan may simply have lost the single cohort slot to another eligible cohort token; repeated occurrences across scans indicate scheduling starvation.",admittedNotEntered:"A token present in the final analysis set but not entering analyzeToken points downstream to queue/budget termination rather than cohort selection."},
+    note:"V1137 records bounded selection telemetry inside the existing normal scan state save. It adds zero provider/RPC requests, zero analysis slots, changes no thresholds, promotion rules, scoring, watch capacity, budgets, or Telegram behavior.",timestamp:now()
   };
 }
 
