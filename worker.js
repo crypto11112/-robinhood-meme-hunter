@@ -1,4 +1,21 @@
 /**
+ * ChainVanta — V1110
+ * CONTROLLED LIVE-LANE SHADOW TEST
+ * Builds directly from deployed V1109.
+ * - Adds an explicit, bounded test-only path for the V1109 ~60-second priority lane.
+ * - /live-priority-lane-test?confirm=shadow selects one current V1108 cohort candidate
+ *   with no live-priority blockers and registers it as CONTROLLED_TEST_ONLY.
+ * - The test never sets promote=true, never changes production scoring/qualification,
+ *   and can never create a Telegram call.
+ * - Refuses to start while a genuine promoted live-priority entry is active.
+ * - Test lifetime is hard-bounded to 10 minutes; normal promoted rows retain V1109's
+ *   30-minute weakening/reversal observation window.
+ * - Reuses the existing single DexScreener batch request and V413 Durable Object alarm.
+ * - Adds zero requests to the five-minute scanner; only an explicitly started test polls.
+ * - /live-priority-lane-status exposes controlled-test identity, source and expiry.
+ */
+
+/**
  * ChainVanta — V1109
  * PROMOTED-TOKEN 60-SECOND LIVE PRIORITY LANE — SHADOW V1
  * Builds directly from deployed V1108.
@@ -9553,7 +9570,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1109"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1110"; // display-only; legacy VERSION remains untouched for scanner compatibility
 /* V1027 TELEGRAM ADMIN TRANSPORT + IDENTITY DIAGNOSTIC ONLY:
  * - routes Admin /help and /start through the existing proven V292 chunked sender;
  * - records Telegram from.id / sender_chat.id identity fields for safe Admin hardening;
@@ -192125,6 +192142,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   if (
     path ===
+      "/live-priority-lane-test"
+  ) {
+    return jsonResponse(
+      await controlledPriorityLiveLaneTestV1110(env, url)
+    );
+  }
+
+  if (
+    path ===
       "/weakening-status"
   ) {
     return jsonResponse(
@@ -195341,6 +195367,7 @@ const PRIORITY_LIVE_ENABLED_KEY_V1109 = "v1109:priorityLiveEnabled";
 const PRIORITY_LIVE_LAST_STATUS_KEY_V1109 = "v1109:priorityLiveLastStatus";
 const PRIORITY_LIVE_MAX_ACTIVE_V1109 = 3;
 const PRIORITY_LIVE_RETENTION_MS_V1109 = 30 * 60 * 1000;
+const PRIORITY_LIVE_TEST_RETENTION_MS_V1110 = 10 * 60 * 1000;
 const PRIORITY_LIVE_MAX_POINTS_V1109 = 75;
 const HORIZON_LIVE_MAX_ACTIVE_V413 = 60;
 const HORIZON_LIVE_MAX_BATCH_V413 = 30;
@@ -195851,6 +195878,76 @@ async function registerPriorityLiveLaneV1109(env, promotedRows) {
   }
 }
 
+async function controlledPriorityLiveLaneTestV1110(env, url) {
+  const confirm = String(url?.searchParams?.get("confirm") || "").toLowerCase();
+  if (confirm !== "shadow") {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      started:false, shadowOnly:true, productionAlertsEnabled:false,
+      status:"CONFIRM_SHADOW_REQUIRED_V1110",
+      instruction:"Use /live-priority-lane-test?confirm=shadow to start one bounded 10-minute test-only lane."
+    };
+  }
+
+  const priority = await livePriorityStatusV1108(env);
+  const candidates = Array.isArray(priority?.allCandidates) ? priority.allCandidates : [];
+  const requested = normalize(url?.searchParams?.get("token") || "");
+  let candidate = null;
+  if (isAddress(requested)) {
+    candidate = candidates.find(row => normalize(row?.address || "") === requested) || null;
+  } else {
+    candidate = candidates
+      .filter(row => isAddress(normalize(row?.address || "")))
+      .filter(row => !Array.isArray(row?.blockers) || row.blockers.length === 0)
+      .sort((a,b)=>safeNumber(b?.priorityScore)-safeNumber(a?.priorityScore))[0] || null;
+  }
+  if (!candidate) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      started:false, shadowOnly:true, productionAlertsEnabled:false,
+      status:isAddress(requested)?"REQUESTED_TOKEN_NOT_ELIGIBLE_FOR_CONTROLLED_TEST_V1110":"NO_BLOCKER_FREE_TEST_CANDIDATE_V1110"
+    };
+  }
+  if (Array.isArray(candidate?.blockers) && candidate.blockers.length) {
+    return {
+      agent:"ChainVanta", version:CHAINVANTA_DISPLAY_VERSION,
+      started:false, shadowOnly:true, productionAlertsEnabled:false,
+      status:"CONTROLLED_TEST_CANDIDATE_HAS_BLOCKERS_V1110",
+      address:normalize(candidate.address), symbol:candidate?.symbol||null, blockers:candidate.blockers
+    };
+  }
+
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"V1110_DO_BINDING_UNAVAILABLE"};
+  }
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/priority-live-test-v1110", {
+      method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        address:normalize(candidate.address), symbol:candidate?.symbol||null,
+        priorityScore:safeNumber(candidate?.priorityScore),
+        breakoutState:candidate?.breakoutState||null,
+        entryQuality:candidate?.entryQuality||null,
+        accumulationState:candidate?.accumulationState||null,
+        flowEvidenceReady:candidate?.flowEvidenceReady===true,
+        marketEvidenceReady:candidate?.marketEvidenceReady===true,
+        requestedAt:Date.now()
+      })
+    });
+    const body = await response.json().catch(()=>({}));
+    return {
+      agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,
+      shadowOnly:true,productionAlertsEnabled:false,
+      genuinePromotion:false,telegramMutation:false,
+      ...body
+    };
+  } catch(error) {
+    return {agent:"ChainVanta",version:CHAINVANTA_DISPLAY_VERSION,started:false,status:"V1110_CONTROLLED_TEST_FETCH_FAILED",error:errorString(error)};
+  }
+}
+
 async function readPriorityLiveLaneV1109(env) {
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
   if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
@@ -195872,7 +195969,7 @@ async function livePriorityLaneStatusV1109(env) {
   return {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1109",
+    diagnostic:"LIVE_PRIORITY_LANE_STATUS_V1110",
     success:snap?.available === true,
     readOnly:true,
     shadowOnly:true,
@@ -195898,18 +195995,23 @@ async function livePriorityLaneStatusV1109(env) {
       liveSignals:row?.liveSignalsV1109 || null,
       pinnedProviderPair:row?.pinnedProviderPairV1109 || null,
       pairMisses:safeNumber(row?.pairMissesV1109),
+      controlledShadowTestV1110:row?.controlledShadowTestV1110===true,
+      laneEntrySourceV1110:row?.laneEntrySourceV1110||"GENUINE_V1108_PROMOTION",
+      testStartedAtV1110:row?.testStartedAtV1110||null,
+      testExpiresAtV1110:row?.controlledShadowTestV1110===true&&Number.isFinite(Number(row?.testStartedAtV1110))?Number(row.testStartedAtV1110)+PRIORITY_LIVE_TEST_RETENTION_MS_V1110:null,
       shadowOnly:true
     })),
     methodology:{
       promotionSource:"V1108_UNCHANGED_PROMOTION_RULES",
       liveMarketSource:"DEXSCREENER_FRESH_BATCH_PINNED_PAIR",
       polling:"DURABLE_OBJECT_MINUTE_ALARM",
+      controlledTestV1110:"EXPLICIT_ONLY_10_MINUTES_NO_PROMOTION_NO_TELEGRAM",
       exactPoolRpcAcceleration:false,
       holderDeltaAcceleration:false,
       whaleDeltaAcceleration:false,
       telegramMutation:false
     },
-    nextStage:"After V1109 proves stable minute-level promoted-token tracking, add exact-pool RPC flow plus holder/whale delta acceleration to the same bounded max-3 lane.",
+    nextStage:"After the V1110 controlled test proves repeated minute polling, add the hard monthly usage governor before exact-pool RPC plus holder/whale acceleration.",
     timestamp:now()
   };
 }
@@ -197311,6 +197413,9 @@ export class V3LiveCollectorV363 {
         liveStateV1109:previous?.liveStateV1109||"BUILDING_LIVE_HISTORY",
         pinnedProviderPairV1109:previous?.pinnedProviderPairV1109||null,
         pairMissesV1109:safeNumber(previous?.pairMissesV1109),
+        controlledShadowTestV1110:false,
+        laneEntrySourceV1110:"GENUINE_V1108_PROMOTION",
+        testStartedAtV1110:null,
         shadowOnly:true
       };
     }
@@ -197320,7 +197425,7 @@ export class V3LiveCollectorV363 {
     // does not permit stale rows to occupy the lane indefinitely.
     for(const [address,row] of Object.entries(entries)){
       const refreshed=Number(row?.lastPromotionRefreshAt||row?.promotedAt||0);
-      if(!isAddress(normalize(address)) || !Number.isFinite(refreshed) || nowMs-refreshed>PRIORITY_LIVE_RETENTION_MS_V1109){
+      if(!isAddress(normalize(address)) || !Number.isFinite(refreshed) || nowMs-refreshed>(row?.controlledShadowTestV1110===true?PRIORITY_LIVE_TEST_RETENTION_MS_V1110:PRIORITY_LIVE_RETENTION_MS_V1109)){
         delete entries[address];
       }
     }
@@ -197336,18 +197441,69 @@ export class V3LiveCollectorV363 {
     return Response.json({version:CHAINVANTA_DISPLAY_VERSION,registered:true,status:Object.keys(entries).length?"PRIORITY_LIVE_ROSTER_UPDATED_V1109":"NO_PROMOTED_TOKENS_V1109",incoming:incoming.length,activeEntries:Object.keys(entries).length,retentionMinutes:Math.round(PRIORITY_LIVE_RETENTION_MS_V1109/60000)});
   }
 
+  async priorityLiveTestV1110(request) {
+    let body={};
+    try { body=await request.json(); } catch (_) {}
+    const address=normalize(body?.address||"");
+    if(!isAddress(address)) return Response.json({started:false,status:"INVALID_CONTROLLED_TEST_TOKEN_V1110"},{status:400});
+
+    const nowMs=Date.now();
+    let entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
+    entries=entries&&typeof entries==="object"?entries:{};
+    const genuine=Object.values(entries).filter(row=>row&&row?.controlledShadowTestV1110!==true);
+    if(genuine.length){
+      return Response.json({started:false,status:"GENUINE_PRIORITY_LANE_ACTIVE_TEST_NOT_NEEDED_V1110",activeGenuineEntries:genuine.length});
+    }
+
+    // Exactly one controlled test at a time. Replacing a prior controlled test
+    // prevents an explicit diagnostic from growing the live roster or request rate.
+    entries={};
+    entries[address]={
+      address,
+      symbol:body?.symbol||null,
+      priorityScore:safeNumber(body?.priorityScore),
+      breakoutStateAtPromotion:body?.breakoutState||null,
+      entryQualityAtPromotion:body?.entryQuality||null,
+      accumulationStateAtPromotion:body?.accumulationState||null,
+      flowEvidenceReadyAtPromotion:body?.flowEvidenceReady===true,
+      marketEvidenceReadyAtPromotion:body?.marketEvidenceReady===true,
+      promotedAt:null,
+      lastPromotionRefreshAt:nowMs,
+      latestObservationV1109:null,
+      rollingMarketV1109:[],
+      liveSignalsV1109:null,
+      liveStateV1109:"BUILDING_LIVE_HISTORY",
+      pinnedProviderPairV1109:null,
+      pairMissesV1109:0,
+      controlledShadowTestV1110:true,
+      laneEntrySourceV1110:"CONTROLLED_TEST_ONLY_V1110",
+      testStartedAtV1110:nowMs,
+      shadowOnly:true
+    };
+    await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
+    await this.doPutV404(PRIORITY_LIVE_ENABLED_KEY_V1109,true);
+    await this.doPutV404(PRIORITY_LIVE_LAST_STATUS_KEY_V1109,{lastPollAt:null,status:"CONTROLLED_TEST_ARMED_WAITING_FOR_FIRST_POLL_V1110",requests:0,verifiedObservations:0,httpStatus:null,error:null});
+    await this.doSetAlarmV404(Date.now()+1000);
+    return Response.json({
+      started:true,status:"CONTROLLED_LIVE_LANE_TEST_STARTED_V1110",address,symbol:body?.symbol||null,
+      controlledShadowTest:true,genuinePromotion:false,productionAlertsEnabled:false,telegramMutation:false,
+      pollIntervalMs:HORIZON_LIVE_POLL_MS_V413,testRetentionMinutes:Math.round(PRIORITY_LIVE_TEST_RETENTION_MS_V1110/60000),
+      expiresAt:nowMs+PRIORITY_LIVE_TEST_RETENTION_MS_V1110
+    });
+  }
+
   async priorityLiveSnapshotV1109() {
     const entries=await this.state.storage.get(PRIORITY_LIVE_ENTRIES_KEY_V1109)||{};
     const last=await this.state.storage.get(PRIORITY_LIVE_LAST_STATUS_KEY_V1109)||{};
     return {
       version:CHAINVANTA_DISPLAY_VERSION,
       available:true,
-      tracker:"PROMOTED_TOKEN_MINUTE_LANE_V1109",
+      tracker:"PROMOTED_OR_CONTROLLED_TEST_MINUTE_LANE_V1110",
       pollIntervalMs:HORIZON_LIVE_POLL_MS_V413,
       entries,
       activeEntries:Object.keys(entries).length,
       lastPollAt:last?.lastPollAt||null,
-      lastStatus:last?.status||"WAITING_FOR_FIRST_PRIORITY_POLL_V1109",
+      lastStatus:last?.status||"WAITING_FOR_FIRST_PRIORITY_POLL_V1110",
       lastHttpStatus:last?.httpStatus??null,
       lastError:last?.error||null,
       requests:safeNumber(last?.requests),
@@ -197362,7 +197518,7 @@ export class V3LiveCollectorV363 {
 
     for(const [address,row] of Object.entries(entries)){
       const refreshed=Number(row?.lastPromotionRefreshAt||row?.promotedAt||0);
-      if(!isAddress(normalize(address)) || !Number.isFinite(refreshed) || nowMs-refreshed>PRIORITY_LIVE_RETENTION_MS_V1109) delete entries[address];
+      if(!isAddress(normalize(address)) || !Number.isFinite(refreshed) || nowMs-refreshed>(row?.controlledShadowTestV1110===true?PRIORITY_LIVE_TEST_RETENTION_MS_V1110:PRIORITY_LIVE_RETENTION_MS_V1109)) delete entries[address];
     }
     const liveRows=Object.values(entries).filter(Boolean).slice(0,PRIORITY_LIVE_MAX_ACTIVE_V1109);
     if(!liveRows.length){
@@ -198090,6 +198246,7 @@ export class V3LiveCollectorV363 {
     if (url.pathname === "/horizon-register-v413" && request.method === "POST") return await this.horizonRegisterV413(request);
     if (url.pathname === "/horizon-snapshots-v413") return Response.json(await this.horizonSnapshotV413());
     if (url.pathname === "/priority-live-register-v1109" && request.method === "POST") return await this.priorityLiveRegisterV1109(request);
+    if (url.pathname === "/priority-live-test-v1110" && request.method === "POST") return await this.priorityLiveTestV1110(request);
     if (url.pathname === "/priority-live-snapshot-v1109") return Response.json(await this.priorityLiveSnapshotV1109());
     if (url.pathname === "/start") {
       const cfg = {
