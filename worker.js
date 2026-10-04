@@ -1,4 +1,15 @@
 /**
+ * ChainVanta — V1157
+
+ * V1157 — released FLOW slot -> same-target V254 completion handoff.
+ * - V1156 /evidenceaudit proved V151 can select a real candidate but make no Gecko request during an active 429 cooldown,
+ *   release its protected FLOW slot unused, and still fail to arm the existing V889 transfer because V887 was not stamped earlier.
+ * - When that SAME directional target later satisfies every existing V801/V254 gate using local exact-pool evidence, V1157 lets it
+ *   inherit the already-released FLOW slot for its first existing V254 exact-USD request.
+ * - V887 remains first-class and unchanged; V1157 only closes the same-scan timing gap where exact-pool eligibility is visible at V254.
+ * - The transferred slot still preserves the V258 timestamp reserve and the real pre-Telegram/global boundary through V890.
+ * - Adds zero provider/RPC capacity and changes no request ceilings, candidate cap, scoring, promotion thresholds, risk, or Telegram behavior.
+ *
  * ChainVanta — V1156
 
  * V1156 — canonical-continuity-first durable cohort watch recovery.
@@ -9776,7 +9787,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1156"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1157"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -21254,7 +21265,8 @@ function ensureV889V254TransferredFlowSlot(budget) {
       consumedType: null,
       armReason: null,
       blockedByGlobalBoundary: 0,
-      releaseSource: null
+      releaseSource: null,
+      v1157: null
     };
   }
   return budget.analysis.v254TransferredFlowSlotV889;
@@ -21270,22 +21282,27 @@ function armV889V254TransferredFlowSlot(
 
   const token = normalize(candidate?.address);
   const priority = candidate?.directionalExactHistoryPriorityV887;
+  const v1157 = candidate?.releasedFlowV254HandoffV1157 || null;
   const releasedFlow = Math.max(
     0,
     safeNumber(flowReleaseResult?.released)
   );
+  const authorisedPriority =
+    priority?.requested === true ||
+    v1157?.eligible === true;
 
   if (
     releasedFlow <= 0 ||
-    priority?.requested !== true ||
+    authorisedPriority !== true ||
     !isAddress(token)
   ) {
     slot.armReason =
       releasedFlow <= 0
         ? "NO_UNUSED_FLOW_SLOT_TO_TRANSFER_V889"
-        : priority?.requested !== true
-          ? "V887_EXACT_HISTORY_PRIORITY_NOT_REQUESTED_V889"
+        : authorisedPriority !== true
+          ? "NO_V887_OR_V1157_EXACT_HISTORY_PRIORITY_V1157"
           : "INVALID_V254_TARGET_ADDRESS_V889";
+    slot.v1157 = v1157;
     return slot;
   }
 
@@ -21300,11 +21317,20 @@ function armV889V254TransferredFlowSlot(
   slot.active = true;
   slot.reservedRequests = 1;
   slot.targetAddress = token;
-  slot.exactPoolId = normalize(priority?.exactPoolId) || null;
+  slot.exactPoolId = normalize(
+    priority?.exactPoolId ||
+    v1157?.exactPoolId ||
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.onChainPoolIdentityV153?.pairAddress ||
+    ""
+  ) || null;
   slot.armedAt = Date.now();
-  slot.armReason = "UNUSED_FLOW_SLOT_TRANSFERRED_TO_V887_V254_TARGET_V889";
+  slot.armReason = priority?.requested === true
+    ? "UNUSED_FLOW_SLOT_TRANSFERRED_TO_V887_V254_TARGET_V889"
+    : "UNUSED_FLOW_SLOT_TRANSFERRED_TO_SAME_TARGET_V254_V1157";
   slot.releaseSource =
     flowReleaseResult?.reason || "V151_DIRECTIONAL_STAGE";
+  slot.v1157 = v1157;
   return slot;
 }
 
@@ -119918,6 +119944,53 @@ for (
             verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true
         };
 
+        /*
+         * V1157: V151 can legitimately select this candidate but spend zero FLOW
+         * requests during Gecko cooldown.  If the SAME target is fully V254-eligible
+         * here, local exact-pool evidence is now sufficient to transfer the already
+         * released FLOW slot even when the earlier V887 stamp was unavailable.
+         */
+        const directionalAddressV1157 = normalize(directionalTradeEnrichment?.address);
+        const directionalStatusV1157 = String(directionalTradeEnrichment?.status || "");
+        const geckoDeferredNoAttemptV1157 =
+          directionalTradeEnrichment?.attempted !== true &&
+          (
+            directionalStatusV1157 === "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824" ||
+            directionalStatusV1157 === "GECKOTERMINAL_FRESH_SPACING" ||
+            directionalStatusV1157 === "GECKOTERMINAL_COOLDOWN"
+          );
+        const exactPoolIdV1157 = normalize(
+          candidate?.onChainPoolIdentityV153?.poolId ||
+          candidate?.onChainPoolIdentityV153?.pairAddress ||
+          (Array.isArray(poolEvidenceV801?.poolIds) ? poolEvidenceV801.poolIds[0] : null) ||
+          ""
+        );
+        const sameDirectionalTargetV1157 =
+          isAddress(directionalAddressV1157) &&
+          normalize(candidate?.address) === directionalAddressV1157;
+        const v254BaseEligibleV1157 =
+          candidate?.validERC20 === true &&
+          safeNumber(candidate?.activity?.swaps) > 0 &&
+          riskAcceptableV801 &&
+          exactPoolAvailableV801 &&
+          verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true;
+
+        candidate.releasedFlowV254HandoffV1157 = {
+          eligible:
+            safeNumber(evidenceCompletionFlowReleaseV822?.released) > 0 &&
+            geckoDeferredNoAttemptV1157 &&
+            sameDirectionalTargetV1157 &&
+            v254BaseEligibleV1157 &&
+            /^0x[a-f0-9]{64}$/.test(String(exactPoolIdV1157 || "")),
+          sameDirectionalTarget: sameDirectionalTargetV1157,
+          geckoDeferredNoAttempt: geckoDeferredNoAttemptV1157,
+          directionalStatus: directionalStatusV1157 || null,
+          releasedFlowSlots: safeNumber(evidenceCompletionFlowReleaseV822?.released),
+          exactPoolId: /^0x[a-f0-9]{64}$/.test(String(exactPoolIdV1157 || "")) ? exactPoolIdV1157 : null,
+          v254BaseEligible: v254BaseEligibleV1157,
+          requestCeilingsUnchanged: true
+        };
+
         return (
           candidate?.validERC20 === true &&
           safeNumber(candidate?.activity?.swaps) > 0 &&
@@ -119933,6 +120006,12 @@ for (
         const aq = qualifiesTelegram(a) ? 1 : 0;
         const bq = qualifiesTelegram(b) ? 1 : 0;
         if (bq !== aq) return bq - aq;
+
+        /* V1157: the same V151 target may become provably exact-pool eligible only
+         * here at V254.  Give that already-protected released FLOW owner first access. */
+        const aV1157 = a?.releasedFlowV254HandoffV1157?.eligible === true ? 1 : 0;
+        const bV1157 = b?.releasedFlowV254HandoffV1157?.eligible === true ? 1 : 0;
+        if (bV1157 !== aV1157) return bV1157 - aV1157;
 
         /*
          * V887: among candidates that already passed every existing V254 gate,
@@ -119998,6 +120077,7 @@ for (
       consumed: v889TransferredFlowSlot?.consumed === true,
       reservedRequests: safeNumber(v889TransferredFlowSlot?.reservedRequests)
     },
+    releasedFlowV254HandoffV1157: verifiedUsdCompletionCandidatesV254[0]?.releasedFlowV254HandoffV1157 || null,
     attempted: 0,
     recovered: 0,
     results: []
