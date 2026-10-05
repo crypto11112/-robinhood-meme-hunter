@@ -1,4 +1,20 @@
 /**
+ * ChainVanta — V1163
+
+ * V1163 — released FLOW -> same-target V888 first-chunk ownership handoff.
+ * - V1162 live evidence produced RSTR: same V151/production target, valid ERC20,
+ *   risk-acceptable, market-ready, verified exact PoolId, Gecko deferred by 429,
+ *   but V923 had no FOUNDATION slot and V777 had already reached zero.
+ * - When V151 releases its already-protected FLOW slot unused and the SAME selected
+ *   pre-V891 exact-pool priority target reaches production V4 with no V179 rows,
+ *   V1163 may reclaim exactly ONE of those already-existing released FLOW slots for
+ *   the FIRST V888 exact-pool chunk.
+ * - The handoff may cross the exhausted analysis sub-budget only while preserving
+ *   the V258 timestamp reserve and real pre-Telegram/global boundary.
+ * - The released FLOW slot cannot also be transferred later to V889/V1157 V254.
+ * - No request ceilings, provider quotas, scoring, qualification, risk, Telegram
+ *   thresholds, watch capacity, Pons routing, or Bitquery dependency are changed.
+ *
  * ChainVanta — V1162
 
  * V1162 — current-live exact-pool V777 first-chunk ownership fix.
@@ -9839,7 +9855,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1162"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1163"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -21337,7 +21353,8 @@ function armV889V254TransferredFlowSlot(
   const v1157 = candidate?.releasedFlowV254HandoffV1157 || null;
   const releasedFlow = Math.max(
     0,
-    safeNumber(flowReleaseResult?.released)
+    safeNumber(flowReleaseResult?.released) -
+      (budget?.analysis?.releasedFlowExactPoolSlotV1163?.consumed === true ? 1 : 0)
   );
   const authorisedPriority =
     priority?.requested === true ||
@@ -22005,6 +22022,157 @@ function consumeV1162CurrentLiveExactPoolV777Slot(
     safeNumber(reserve?.handoffRemainingV777)
   );
   slot.reason = "EXISTING_V777_HANDOFF_SLOT_CONSUMED_V1162";
+  return true;
+}
+
+/* =========================================================
+   V1163 RELEASED FLOW -> SAME-TARGET V888 FIRST-CHUNK HANDOFF
+   =========================================================
+   V1162/RSTR proof:
+   - V151 and production V4 selected the same risk-acceptable verified exact-pool
+     target during Gecko 429 cooldown.
+   - The directional FLOW reserve had been released unused, V923 had no FOUNDATION
+     owner, and V777 had reached zero, so V888 could not run even though one
+     completion slot had already been protected earlier in the same scan.
+   - Reclaim exactly ONE such released FLOW slot for the first V888 chunk only.
+   - Never raise real request ceilings; preserve V258 + Telegram/global headroom.
+*/
+function ensureV1163ReleasedFlowExactPoolSlot(budget) {
+  if (!budget?.analysis) return null;
+  if (
+    !budget.analysis.releasedFlowExactPoolSlotV1163 ||
+    typeof budget.analysis.releasedFlowExactPoolSlotV1163 !== "object"
+  ) {
+    budget.analysis.releasedFlowExactPoolSlotV1163 = {
+      enabled:true, active:false, consumed:false, targetAddress:null,
+      exactPoolId:null, armedAt:null, consumedAt:null, consumedType:null,
+      releasedFlowAtArm:0, blockedByProtectedHeadroom:0,
+      reason:"V1163_NOT_ARMED"
+    };
+  }
+  return budget.analysis.releasedFlowExactPoolSlotV1163;
+}
+
+function armV1163ReleasedFlowExactPoolSlot(
+  budget,
+  candidate,
+  state,
+  preV891PriorityV908 = null,
+  flowReleaseResult = null
+) {
+  const slot = ensureV1163ReleasedFlowExactPoolSlot(budget);
+  if (!slot || slot.consumed === true) return slot;
+
+  const token = normalize(candidate?.address || "");
+  const exactPoolId = normalize(
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.onChainPoolIdentityV153?.pairAddress ||
+    ""
+  );
+  const preAddress = normalize(preV891PriorityV908?.address || "");
+  const samePriorityTarget =
+    preV891PriorityV908?.activeGecko429Cooldown === true &&
+    isAddress(preAddress) && preAddress === token;
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const exactPoolVerified =
+    candidate?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""));
+  const releasedFlow = Math.max(0, safeNumber(flowReleaseResult?.released));
+
+  const ledger = isAddress(token)
+    ? onChainDirectionalStoreV179(state)?.[token]
+    : null;
+  const exactRows = Array.isArray(ledger?.records)
+    ? ledger.records.filter(row =>
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === exactPoolId
+      )
+    : [];
+
+  slot.active = false;
+  slot.targetAddress = isAddress(token) ? token : null;
+  slot.exactPoolId = /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""))
+    ? exactPoolId : null;
+  slot.releasedFlowAtArm = releasedFlow;
+  slot.preV891PriorityAddress = isAddress(preAddress) ? preAddress : null;
+
+  if (!isAddress(token) || candidate?.validERC20 !== true) {
+    slot.reason = "INVALID_OR_UNVERIFIED_ERC20_V1163";
+    return slot;
+  }
+  if (sameRunTerminalReject(candidate)?.terminal === true) {
+    slot.reason = "SAME_RUN_TERMINAL_V1163";
+    return slot;
+  }
+  if (!riskAcceptable) {
+    slot.reason = "RISK_NOT_ACCEPTABLE_V1163";
+    return slot;
+  }
+  if (!samePriorityTarget) {
+    slot.reason = "SELECTED_TARGET_NOT_PRE_V891_PRIORITY_V1163";
+    return slot;
+  }
+  if (!exactPoolVerified) {
+    slot.reason = "VERIFIED_EXACT_POOL_REQUIRED_V1163";
+    return slot;
+  }
+  if (exactRows.length > 0) {
+    slot.reason = "EXACT_POOL_V179_ROWS_ALREADY_PRESENT_V1163";
+    return slot;
+  }
+  if (releasedFlow < 1) {
+    slot.reason = "NO_RELEASED_UNUSED_FLOW_SLOT_V1163";
+    return slot;
+  }
+
+  slot.active = true;
+  slot.armedAt = Date.now();
+  slot.reason = "RELEASED_FLOW_SAME_TARGET_V888_FIRST_CHUNK_ARMED_V1163";
+  return slot;
+}
+
+function consumeV1163ReleasedFlowExactPoolSlot(
+  budget,
+  tokenAddress,
+  exactPoolId,
+  type = "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+) {
+  const slot = budget?.analysis?.releasedFlowExactPoolSlotV1163;
+  if (slot?.active !== true || slot?.consumed === true) return null;
+
+  const token = normalize(tokenAddress || "");
+  const poolId = normalize(exactPoolId || "");
+  const requestType = String(type || "");
+  if (
+    token !== normalize(slot?.targetAddress || "") ||
+    poolId !== normalize(slot?.exactPoolId || "") ||
+    requestType !== "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+  ) return null;
+
+  const v258Reserve = budget?.analysis?.v258TimestampReserveV880;
+  const v258Remaining =
+    v258Reserve?.enabled === true && v258Reserve?.active === true
+      ? Math.max(0, safeNumber(v258Reserve?.reservedRequests))
+      : 0;
+  const preTelegramLimit = preTelegramGlobalLimitV728(budget);
+
+  if (safeNumber(budget?.totalUsed) + 1 + v258Remaining > preTelegramLimit) {
+    slot.blockedByProtectedHeadroom =
+      safeNumber(slot.blockedByProtectedHeadroom) + 1;
+    slot.lastBlockedAt = Date.now();
+    slot.reason = "V1163_BLOCKED_TO_PRESERVE_V258_OR_TELEGRAM_HEADROOM";
+    return null;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+  slot.active = false;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = requestType;
+  slot.reason = "RELEASED_FLOW_SLOT_CONSUMED_BY_V888_V1163";
   return true;
 }
 
@@ -109631,9 +109799,22 @@ async function enrichCandidateWithProductionV4V772(
             )
           : null;
 
+      const releasedFlowFundedV1163 =
+        indexV899 === 0 &&
+        priorityFoundationFundedV923 !== true &&
+        currentLiveV777FundedV1162 !== true
+          ? consumeV1163ReleasedFlowExactPoolSlot(
+              budget,
+              token,
+              exactPoolIdV888,
+              "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+            )
+          : null;
+
       const exactPoolRequestFundedV923 =
         priorityFoundationFundedV923 === true ||
         currentLiveV777FundedV1162 === true ||
+        releasedFlowFundedV1163 === true ||
         consumeBudget(
           budget,
           "analysis",
@@ -118165,6 +118346,18 @@ for (
         currentLiveVerifiedLaunchTokensV621
       );
 
+    /* V1163: if directional FLOW was already released unused, earmark that
+     * same existing slot for this SAME pre-V891 exact-pool target's first V888
+     * chunk. This is ownership transfer only; no ceiling is increased. */
+    const releasedFlowExactPoolSlotV1163 =
+      armV1163ReleasedFlowExactPoolSlot(
+        budget,
+        productionV4TargetV772,
+        state,
+        preV891PriorityV908,
+        evidenceCompletionFlowReleaseV822
+      );
+
     productionV4EnrichmentV772 =
       await enrichCandidateWithProductionV4V772(
         env,
@@ -118732,6 +118925,13 @@ for (
         budget?.analysis?.currentLiveExactPoolV777SlotV1162?.active === true,
       consumed:
         budget?.analysis?.currentLiveExactPoolV777SlotV1162?.consumed === true
+    },
+    releasedFlowExactPoolSlotV1163: {
+      ...(budget?.analysis?.releasedFlowExactPoolSlotV1163 || {}),
+      active:
+        budget?.analysis?.releasedFlowExactPoolSlotV1163?.active === true,
+      consumed:
+        budget?.analysis?.releasedFlowExactPoolSlotV1163?.consumed === true
     }
   };
 
@@ -144957,6 +145157,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V901/V908 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
       `V923 priority exact-pool FOUNDATION: active <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.targetAddress || "NONE")}</code> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.armReason || "NONE")}</b>`,
       `V1162 current-live V777 exact-pool slot: active <b>${state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.targetAddress || "NONE")}</code> · PoolId <code>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.exactPoolId || "NONE")}</code> · V777 at arm/after ${fmt(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.v777RemainingAtArm)}/${fmt(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.v777RemainingAfterConsume)} · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.reason || "NONE")}</b>`,
+      `V1163 released FLOW -> V888 slot: active <b>${state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.targetAddress || "NONE")}</code> · PoolId <code>${escapeHtml(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.exactPoolId || "NONE")}</code> · released FLOW at arm ${fmt(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.releasedFlowAtArm)} · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.reason || "NONE")}</b>`,
       `V908 pre-V891 target: <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.address || "NONE")}</code> · production target <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.productionSelectedAddress || "NONE")}</code> · same <b>${state?.preV891PriorityDiagnosticV908?.sameAsProductionSelected ? "YES" : "NO"}</b> · cooldown ${state?.preV891PriorityDiagnosticV908?.activeGecko429Cooldown ? "YES" : "NO"} · exact candidates ${fmt(state?.preV891PriorityDiagnosticV908?.exactPoolCandidates)}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
