@@ -1,4 +1,14 @@
 /*
+ * ChainVanta V1172 — TOKEN-SPECIFIC MARKET / LIQUIDITY WHY TRACE
+ * - Builds directly from deployed V1171 and preserves the V254 verified candidate PoolId handoff.
+ * - Adds /marketwhy <contract> plus matching /marketwhy?token= web output from the same retained diagnostic state.
+ * - Reports market/liquidity verification, exact PoolId/PoolKey, execution price, USD quote basis,
+ *   ReservesLens state, exact-pool V179 evidence, verified flow and exact failure reasons.
+ * - Read-only diagnostic addition: zero new provider/RPC requests and no scoring, risk, qualification,
+ *   V726, Telegram-send, budget, watch-capacity, provider-priority or threshold changes.
+ */
+
+/*
  * ChainVanta V1171 — V254 VERIFIED CANDIDATE POOL-ID HANDOFF
  * - DTF proved V801 could report exactPoolAvailable YES from candidate.onChainPoolIdentityV153 while
  *   verifiedUsdCompletionPassV254 immediately returned NO_CANDIDATE_POOL_ID because
@@ -83668,6 +83678,194 @@ function telegramWhyPlainTextV1168(d){
 
 
 
+
+/* =========================================================
+   V1172 TOKEN-SPECIFIC MARKET / LIQUIDITY WHY TRACE
+   Diagnostic only. Captures already-computed market-completion evidence for
+   each autonomous candidate during the normal scan. Zero provider requests,
+   zero scoring/risk/qualification changes, zero Telegram sends.
+   ========================================================= */
+const MARKET_WHY_TRACE_MAX_V1172 = 30;
+
+function captureMarketWhyTraceV1172(state, candidates) {
+  if (!state || !Array.isArray(candidates)) return null;
+  const prior = Array.isArray(state?.marketWhyTraceV1172?.records)
+    ? state.marketWhyTraceV1172.records : [];
+  const byAddress = new Map(
+    prior.filter(row => isAddress(normalize(row?.address)))
+      .map(row => [normalize(row.address), row])
+  );
+  const recordedAt = Date.now();
+
+  for (const candidate of candidates) {
+    const address = normalize(candidate?.address);
+    if (!isAddress(address)) continue;
+    const market = candidate?.market || {};
+    const key = completePoolKeyV441(state, candidate);
+    const readiness = reservesLensValuationReadinessV447(state, candidate, key) || {};
+    const identity = candidate?.onChainPoolIdentityV153 || {};
+    const exact = priorityLiveExactPoolIdentityV1112(state, address) || {};
+    const poolId = normalize(
+      exact?.poolId || exact?.pool_id || key?.poolId || identity?.poolId || identity?.pairAddress || ""
+    ) || null;
+    const lens = candidate?.reservesLensLiquidityDiagnosticV441 || {};
+    const refresh = candidate?.onChainMarketFoundationRefreshV973 || {};
+    const flow = candidateVerifiedOnChainFlowV212(candidate, state) || {};
+    const eligibility = strictOnChainMarketFallbackEligibilityV455(candidate) || {};
+    const pairDecision = state?.marketPairDecisionAuditV979 || null;
+    const pairDecisionMatch = normalize(pairDecision?.candidateAddress) === address;
+    const qualificationReasons = telegramQualificationReasons(candidate);
+    const marketReasons = [];
+    if (market?.verified !== true) marketReasons.push("MARKET_UNVERIFIED");
+    if (!(market?.verified === true && Number.isFinite(Number(market?.liquidityUsd)) && Number(market.liquidityUsd) >= MIN_ALERT_LIQUIDITY)) {
+      marketReasons.push("LIQUIDITY_TOO_LOW_OR_UNVERIFIED");
+    }
+    if (key?.verified !== true) marketReasons.push("VERIFIED_COMPLETE_POOLKEY_REQUIRED");
+    if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) marketReasons.push("VERIFIED_EXACT_POOL_ID_REQUIRED");
+    if (readiness?.priceVerified !== true) marketReasons.push("VERIFIED_EXECUTION_PRICE_REQUIRED");
+    if (readiness?.quoteUsdReady !== true) marketReasons.push("VERIFIED_USD_QUOTE_BASIS_REQUIRED");
+    if (readiness?.strictValuationReady !== true) marketReasons.push("STRICT_VALUATION_NOT_READY");
+    if (lens?.decoded?.verifiedUsdLiquidity !== true && lens?.usdLiquidityVerified !== true) marketReasons.push("VERIFIED_RESERVESLENS_USD_LIQUIDITY_NOT_RETAINED");
+
+    byAddress.set(address, {
+      version:"V1172", runtimeVersion:VERSION, recordedAt, address,
+      symbol:candidate?.symbol || null,
+      marketVerified:market?.verified === true,
+      liquidityUsd:market?.verified === true && Number.isFinite(Number(market?.liquidityUsd)) ? Number(market.liquidityUsd) : null,
+      priceUsd:Number.isFinite(Number(market?.priceUsd)) ? Number(market.priceUsd) : null,
+      marketSource:market?.source || market?.provider || null,
+      exactPoolId:poolId,
+      exactPoolVerified:exact?.verified === true || identity?.verified === true,
+      poolKeyVerified:key?.verified === true,
+      poolKeyCurrency0:normalize(key?.currency0) || null,
+      poolKeyCurrency1:normalize(key?.currency1) || null,
+      executionPriceVerified:readiness?.priceVerified === true,
+      usdQuoteBasisReady:readiness?.quoteUsdReady === true,
+      strictValuationReady:readiness?.strictValuationReady === true,
+      lensAttempted:lens?.attempted === true,
+      lensRequestSent:lens?.requestSent === true,
+      lensProvider:lens?.provider || null,
+      lensStatus:lens?.status || null,
+      lensError:lens?.error || null,
+      lensUsdLiquidityVerified:lens?.decoded?.verifiedUsdLiquidity === true || lens?.usdLiquidityVerified === true,
+      lensExternalRequestsUsed:safeNumber(lens?.externalRequestsUsed),
+      priceRefreshApplied:refresh?.applied === true,
+      priceRefreshStatus:refresh?.status || null,
+      priceRefreshSamples:safeNumber(refresh?.afterSampleCount),
+      exactPoolExactUsdRecords:safeNumber(refresh?.exactPoolExactUsdRecordsV974),
+      freshExactPoolExactUsdRecords:safeNumber(refresh?.freshExactPoolExactUsdRecordsV974),
+      amountReadyExactUsdRecords:safeNumber(refresh?.amountReadyExactUsdRecordsV974),
+      verifiedFlow:flow?.verified === true,
+      verifiedFlowRecords:safeNumber(flow?.recordCount),
+      verifiedFlowPoolIds:Array.isArray(flow?.poolIds) ? flow.poolIds.map(normalize).filter(Boolean).slice(0,12) : [],
+      strictFallbackEligible:eligibility?.eligible === true,
+      strictFallbackReasons:Array.isArray(eligibility?.reasons) ? eligibility.reasons.slice(0,12) : [],
+      latestPairDecision:pairDecisionMatch ? {
+        recordedAt:pairDecision?.recordedAt || null,
+        pairEligible:pairDecision?.pairEligible === true,
+        pairedSlotArmed:pairDecision?.pairedSlotArmed === true,
+        exactPoolSlotConsumed:pairDecision?.exactPoolSlotConsumed === true,
+        lensSlotConsumed:pairDecision?.lensSlotConsumed === true,
+        decision:pairDecision?.decision || null,
+        missingPrerequisites:Array.isArray(pairDecision?.missingPrerequisites) ? pairDecision.missingPrerequisites.slice(0,8) : []
+      } : null,
+      marketFailureReasons:[...new Set(marketReasons)].slice(0,16),
+      telegramMarketBlockers:qualificationReasons.filter(x => /MARKET|LIQUIDITY/i.test(String(x))).slice(0,8),
+      diagnosticOnly:true, providerRequestsAdded:0, stateWritesAdded:0,
+      scoringChanged:false, riskChanged:false, qualificationChanged:false, telegramThresholdsChanged:false
+    });
+  }
+
+  const records = [...byAddress.values()]
+    .sort((a,b)=>safeNumber(b?.recordedAt)-safeNumber(a?.recordedAt))
+    .slice(0,MARKET_WHY_TRACE_MAX_V1172);
+  state.marketWhyTraceV1172 = {
+    version:"V1172", recordedAt, records, providerRequestsAdded:0,
+    scoringChanged:false, riskChanged:false, qualificationChanged:false,
+    telegramThresholdsChanged:false
+  };
+  return state.marketWhyTraceV1172;
+}
+
+function marketWhySnapshotV1172(state, rawAddress) {
+  const address = normalize(rawAddress);
+  if (!isAddress(address)) return {ok:false,version:"V1172",status:"INVALID_TOKEN_ADDRESS_V1172",address:null};
+  const row = Array.isArray(state?.marketWhyTraceV1172?.records)
+    ? state.marketWhyTraceV1172.records.find(x => normalize(x?.address) === address)
+    : null;
+  if (!row) return {
+    ok:false,version:"V1172",runtimeVersion:VERSION,status:"TOKEN_NOT_IN_RETAINED_MARKET_TRACE_V1172",address,
+    note:"Complete a normal autonomous scan containing this token, then retry. /analyse manual state is intentionally not substituted."
+  };
+  return {ok:true,...row};
+}
+
+function marketWhyMessageV1172(state, rawAddress) {
+  const d = marketWhySnapshotV1172(state, rawAddress);
+  if (!d.ok) return [
+    "💧 <b>Market / Liquidity Why — V1172</b>","",
+    `Status: <b>${escapeHtml(d.status||"UNAVAILABLE")}</b>`,
+    d.address ? `Token: <code>${escapeHtml(d.address)}</code>` : "ℹ️ Use <code>/marketwhy 0xADDRESS</code>.",
+    d.note ? `ℹ️ ${escapeHtml(d.note)}` : "","",
+    "<i>Read-only. Zero provider requests and zero scoring/risk/qualification changes.</i>"
+  ].filter(Boolean).join("\n");
+  const p=d.latestPairDecision||{};
+  return [
+    "💧 <b>Market / Liquidity Why — V1172</b>","",
+    `<b>${escapeHtml(d.symbol||"UNKNOWN")}</b> · <code>${escapeHtml(d.address)}</code>`,
+    `Recorded: <b>${escapeHtml(d.recordedAt?new Date(d.recordedAt).toISOString():"UNVERIFIED")}</b>`,"",
+    `💰 Market verified: <b>${d.marketVerified?"YES":"NO"}</b> · liquidity <b>${d.liquidityUsd==null?"UNVERIFIED":`$${safeNumber(d.liquidityUsd).toFixed(2)}`}</b>`,
+    `Price USD: <b>${d.priceUsd==null?"UNVERIFIED":safeNumber(d.priceUsd)}</b> · source <b>${escapeHtml(d.marketSource||"NONE")}</b>`,
+    `🧬 Exact PoolId: <code>${escapeHtml(d.exactPoolId||"UNVERIFIED")}</code> · verified <b>${d.exactPoolVerified?"YES":"NO"}</b>`,
+    `PoolKey verified: <b>${d.poolKeyVerified?"YES":"NO"}</b>`,
+    `Execution price / USD quote / strict valuation: <b>${d.executionPriceVerified?"YES":"NO"} / ${d.usdQuoteBasisReady?"YES":"NO"} / ${d.strictValuationReady?"YES":"NO"}</b>`,
+    `💵 Verified flow: <b>${d.verifiedFlow?"YES":"NO"}</b> · records ${safeNumber(d.verifiedFlowRecords)}`,"",
+    `ReservesLens attempted/sent: <b>${d.lensAttempted?"YES":"NO"} / ${d.lensRequestSent?"YES":"NO"}</b> · provider ${escapeHtml(d.lensProvider||"NONE")}`,
+    `Lens status: <code>${escapeHtml(d.lensStatus||"NONE")}</code>`,
+    `Lens error: <code>${escapeHtml(d.lensError||"NONE")}</code>`,
+    `Verified Lens USD liquidity: <b>${d.lensUsdLiquidityVerified?"YES":"NO"}</b>`,
+    `V973 price refresh: <b>${d.priceRefreshApplied?"APPLIED":"NO"}</b> · ${escapeHtml(d.priceRefreshStatus||"NONE")} · samples ${safeNumber(d.priceRefreshSamples)}`,
+    `V974 exactPool/fresh/amount-ready exactUSD: <b>${safeNumber(d.exactPoolExactUsdRecords)} / ${safeNumber(d.freshExactPoolExactUsdRecords)} / ${safeNumber(d.amountReadyExactUsdRecords)}</b>`,"",
+    `Latest paired-market decision: <b>${d.latestPairDecision?escapeHtml(p.decision||"NONE"):"NO SAME-TOKEN DECISION RETAINED"}</b>`,
+    d.latestPairDecision ? `Pair eligible / armed / exact-pool used / Lens used: <b>${p.pairEligible?"YES":"NO"} / ${p.pairedSlotArmed?"YES":"NO"} / ${p.exactPoolSlotConsumed?"YES":"NO"} / ${p.lensSlotConsumed?"YES":"NO"}</b>` : null,
+    "","🚧 <b>Market failure reason(s)</b>",
+    ...((d.marketFailureReasons||[]).length ? d.marketFailureReasons.map(x=>`• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
+    `Telegram market blockers: <code>${escapeHtml((d.telegramMarketBlockers||[]).join(" | ")||"NONE")}</code>`,"",
+    `🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/marketwhy?token=${escapeHtml(d.address)}</code>`,"",
+    "<i>Autonomous retained candidate evidence only. Read-only; zero provider requests, zero writes, no scoring/risk/qualification/Telegram-threshold changes.</i>"
+  ].filter(x=>x!==null).join("\n");
+}
+
+function marketWhyPlainTextV1172(d) {
+  if (!d?.ok) return `ChainVanta Market / Liquidity Why — V1172\nStatus: ${d?.status||"UNAVAILABLE"}\nToken: ${d?.address||"INVALID"}\n${d?.note||""}`;
+  const p=d.latestPairDecision||{};
+  return [
+    "ChainVanta Market / Liquidity Why — V1172",
+    `Token: ${d.symbol||"UNKNOWN"} ${d.address}`,
+    `Recorded: ${d.recordedAt?new Date(d.recordedAt).toISOString():"UNVERIFIED"}`,
+    `Market verified: ${d.marketVerified?"YES":"NO"}`,
+    `Liquidity USD: ${d.liquidityUsd==null?"UNVERIFIED":d.liquidityUsd}`,
+    `Price USD: ${d.priceUsd==null?"UNVERIFIED":d.priceUsd}`,
+    `Market source: ${d.marketSource||"NONE"}`,
+    `Exact PoolId: ${d.exactPoolId||"UNVERIFIED"}`,
+    `Exact pool verified: ${d.exactPoolVerified?"YES":"NO"}`,
+    `PoolKey verified: ${d.poolKeyVerified?"YES":"NO"}`,
+    `Execution price verified: ${d.executionPriceVerified?"YES":"NO"}`,
+    `USD quote basis ready: ${d.usdQuoteBasisReady?"YES":"NO"}`,
+    `Strict valuation ready: ${d.strictValuationReady?"YES":"NO"}`,
+    `Verified flow: ${d.verifiedFlow?"YES":"NO"} (${safeNumber(d.verifiedFlowRecords)} records)`,
+    `ReservesLens attempted/sent: ${d.lensAttempted?"YES":"NO"}/${d.lensRequestSent?"YES":"NO"}`,
+    `Lens provider/status/error: ${d.lensProvider||"NONE"} / ${d.lensStatus||"NONE"} / ${d.lensError||"NONE"}`,
+    `Verified Lens USD liquidity: ${d.lensUsdLiquidityVerified?"YES":"NO"}`,
+    `V973 price refresh: ${d.priceRefreshApplied?"APPLIED":"NO"} / ${d.priceRefreshStatus||"NONE"} / samples ${safeNumber(d.priceRefreshSamples)}`,
+    `V974 exactPool/fresh/amount-ready exactUSD: ${safeNumber(d.exactPoolExactUsdRecords)} / ${safeNumber(d.freshExactPoolExactUsdRecords)} / ${safeNumber(d.amountReadyExactUsdRecords)}`,
+    `Latest paired-market decision: ${d.latestPairDecision?(p.decision||"NONE"):"NO SAME-TOKEN DECISION RETAINED"}`,
+    `Market failure reasons: ${(d.marketFailureReasons||[]).join(" | ")||"NONE"}`,
+    `Telegram market blockers: ${(d.telegramMarketBlockers||[]).join(" | ")||"NONE"}`,
+    "Read-only. Autonomous retained evidence only. Zero provider requests/writes and no scoring/risk/qualification changes."
+  ].join("\n");
+}
+
 /* =========================================================
    V1169 AUTHORITATIVE TELEGRAM SENDER DRY-RUN TRACE
    Captured at the real pre-send boundary. READ ONLY diagnostics:
@@ -126209,6 +126407,7 @@ for (
     );
 
   captureTelegramWhyTraceV1168(state, candidates);
+  captureMarketWhyTraceV1172(state, candidates);
 
   if (
     state?.coinGeckoDecisionTraceV664 &&
@@ -177260,6 +177459,7 @@ function telegramHelpV271() {
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/marketaudit</code> — V968 show the latest strict on-chain Market completion prerequisites and exact failure reason",
+    "<code>/marketwhy 0xADDRESS</code> — V1172 exact token-specific Market/liquidity blocker trace (read-only; web link included)",
     "<code>/schedulerstatus</code> — V969 show the V673 five-minute scheduler alarm and last completed scheduled run",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4poolsearch [0xTOKEN] [p2...]</code> — V796 bounded 100-PoolId/page active reverse search through Uniswap Pool Info, with historical fallback after the final page (diagnostic only)",
@@ -179795,6 +179995,22 @@ async function telegramCommandReplyV271(
     if (diagnosticV273) {
       const whyV1168 = telegramWhySnapshotV1168(state, parsed.argument);
       diagnosticV273.telegramWhyV1168 = {scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,address:whyV1168?.address||null,status:whyV1168?.status||null,firstBlocker:whyV1168?.telegram?.firstBlocker||null,qualificationChanged:false};
+    }
+  } else if (
+    parsed.command === "/marketwhy" ||
+    parsed.command === "/whymarket"
+  ) {
+    reply = marketWhyMessageV1172(state, parsed.argument);
+    if (diagnosticV273) {
+      const marketWhyV1172 = marketWhySnapshotV1172(state, parsed.argument);
+      diagnosticV273.marketWhyV1172 = {
+        scannerBudgetConsumed:false, externalProviderRequests:0, stateWrites:0,
+        address:marketWhyV1172?.address||null, status:marketWhyV1172?.status||null,
+        marketVerified:marketWhyV1172?.marketVerified===true,
+        liquidityUsd:marketWhyV1172?.liquidityUsd??null,
+        firstReason:Array.isArray(marketWhyV1172?.marketFailureReasons)?marketWhyV1172.marketFailureReasons[0]||null:null,
+        scoringChanged:false, riskChanged:false, qualificationChanged:false
+      };
     }
   } else if (
     parsed.command === "/sendwhy" ||
@@ -198200,6 +198416,13 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     const resultV1168 = telegramWhySnapshotV1168(loadedV1168?.state || newState(), url.searchParams.get("token") || "");
     if (String(url.searchParams.get("format") || "").toLowerCase() === "json") return jsonResponse(resultV1168, resultV1168?.ok === false ? 404 : 200);
     return new Response(telegramWhyPlainTextV1168(resultV1168), {status:resultV1168?.ok === false ? 404 : 200,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","access-control-allow-origin":"*"}});
+  }
+
+  if (path === "/marketwhy") {
+    const loadedV1172 = await readState(env);
+    const resultV1172 = marketWhySnapshotV1172(loadedV1172?.state || newState(), url.searchParams.get("token") || "");
+    if (String(url.searchParams.get("format") || "").toLowerCase() === "json") return jsonResponse(resultV1172, resultV1172?.ok === false ? 404 : 200);
+    return new Response(marketWhyPlainTextV1172(resultV1172), {status:resultV1172?.ok === false ? 404 : 200,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","access-control-allow-origin":"*"}});
   }
 
   if (path === "/sendwhy") {
