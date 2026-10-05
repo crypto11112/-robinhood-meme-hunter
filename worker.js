@@ -1,5 +1,5 @@
 /*
- * V1167 — VERIFIED V888 -> V179 RECENT-WINDOW HANDOFF
+ * V1168 — AUTHORITATIVE PER-TOKEN TELEGRAM QUALIFICATION TRACE + WEB LINK
  * - Builds directly from V1166 and preserves the V1166 current call-ready candidate priority fix.
  * - Live AI evidence proved V1164 could recover a real exact-pool swap through V888, but the
  *   verified row was not entering V179/V212 and therefore could not feed authoritative momentum.
@@ -83479,6 +83479,93 @@ function telegramQualificationReasons(
   return reasons;
 }
 
+
+/* =========================================================
+   V1168 AUTHORITATIVE PER-TOKEN TELEGRAM QUALIFICATION TRACE
+   DIAGNOSTIC ONLY — ZERO PROVIDER REQUESTS / NO QUALIFICATION CHANGE
+   ========================================================= */
+const TELEGRAM_WHY_TRACE_MAX_V1168 = 25;
+
+function captureTelegramWhyTraceV1168(state, candidates) {
+  if (!state || !Array.isArray(candidates)) return null;
+  const existing = state?.telegramWhyTraceV1168 && typeof state.telegramWhyTraceV1168 === "object"
+    ? state.telegramWhyTraceV1168 : {version:"V1168",records:[]};
+  const prior = Array.isArray(existing.records) ? existing.records : [];
+  const byAddress = new Map(prior.filter(row=>isAddress(normalize(row?.address))).map(row=>[normalize(row.address),row]));
+  const recordedAt = Date.now();
+  for (const candidate of candidates) {
+    const address = normalize(candidate?.address);
+    if (!isAddress(address)) continue;
+    const reasons = telegramQualificationReasons(candidate);
+    const freshness = telegramCoreEvidenceFreshnessV169(candidate);
+    const bearish = telegramVerifiedBearishFlowProtectionV232(candidate);
+    const mature = matureOpportunityCurrentConfirmationV726(candidate);
+    const exact = priorityLiveExactPoolIdentityV1112(state,address) || {};
+    const verifiedFlow = candidateVerifiedOnChainFlowV212(candidate,state) || {};
+    const holderEvidenceVerified = Boolean(candidate?.holders?.integrity?.verified===true && candidate?.holders?.concentrationVerified===true && candidate?.holders?.whale?.verified===true);
+    const launchAgeVerified = Boolean(candidate?.verifiedLaunchAgeV223?.verified===true || candidate?.launchStage?.verified===true);
+    byAddress.set(address,{
+      version:"V1168",recordedAt,runtimeVersion:VERSION,address,symbol:candidate?.symbol||null,
+      authoritativePoolId:normalize(exact?.poolId||exact?.pool_id)||null,
+      authoritativePoolVerified:exact?.verified===true,
+      authoritativePoolSource:exact?.source||exact?.status||null,
+      opportunityScore:safeNumber(candidate?.opportunity?.score),confidenceScore:safeNumber(candidate?.confidence?.score),
+      riskVerified:candidate?.risk?.verified===true,riskScore:candidate?.risk?.verified===true?safeNumber(candidate?.risk?.score):null,
+      riskLabel:candidate?.risk?.label||null,severeRiskOverride:candidate?.risk?.severeOverride===true,
+      marketVerified:candidate?.market?.verified===true,liquidityUsd:candidate?.market?.verified===true?safeNumber(candidate?.market?.liquidityUsd):null,
+      holderEvidenceVerified,launchAgeVerified,momentumVerified:candidate?.momentum?.verified===true,momentumScore:safeNumber(candidate?.momentum?.score),
+      signalCount:safeNumber(candidate?.signalConfirmation?.signals),verifiedFlow:verifiedFlow?.verified===true,
+      verifiedFlowRecords:safeNumber(verifiedFlow?.recordCount),verifiedFlowPoolIds:Array.isArray(verifiedFlow?.poolIds)?verifiedFlow.poolIds.map(normalize).filter(Boolean).slice(0,12):[],
+      freshnessPasses:freshness?.passes===true,marketFreshnessState:freshness?.marketFreshnessState||null,holderFreshnessState:freshness?.holderFreshnessState||null,
+      bearishFlowSuppresses:bearish?.suppresses===true,matureConfirmationRequired:mature?.required===true,matureConfirmationPasses:mature?.required===true?mature?.passes===true:true,
+      telegramQualified:qualifiesTelegram(candidate),telegramReasons:reasons.slice(0,12),firstBlocker:reasons[0]||null,
+      thresholds:{opportunityMin:MIN_ALERT_SCORE,confidenceMin:MIN_CONFIDENCE_ALERT,riskMax:MAX_ALERT_RISK,liquidityMin:MIN_ALERT_LIQUIDITY,signalsMin:2},
+      diagnosticOnly:true,providerRequestsAdded:0,scoringChanged:false,qualificationChanged:false,telegramThresholdsChanged:false
+    });
+  }
+  const records=[...byAddress.values()].sort((a,b)=>safeNumber(b?.recordedAt)-safeNumber(a?.recordedAt)).slice(0,TELEGRAM_WHY_TRACE_MAX_V1168);
+  state.telegramWhyTraceV1168={version:"V1168",recordedAt,records,providerRequestsAdded:0,scoringChanged:false,qualificationChanged:false,telegramThresholdsChanged:false};
+  return state.telegramWhyTraceV1168;
+}
+
+function telegramWhySnapshotV1168(state,rawAddress){
+  const address=normalize(rawAddress);
+  if(!isAddress(address)) return {ok:false,version:"V1168",status:"INVALID_TOKEN_ADDRESS_V1168",address:null};
+  const direct=Array.isArray(state?.telegramWhyTraceV1168?.records)?state.telegramWhyTraceV1168.records.find(row=>normalize(row?.address)===address):null;
+  const retained=Array.isArray(state?.qualificationAuditV663?.records)?[...state.qualificationAuditV663.records].reverse().find(row=>normalize(row?.address)===address):null;
+  const post=state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809||state?.lastV254PostRecoveryScoreV809||null;
+  const postMatch=normalize(post?.address)===address?post:null;
+  const exact=priorityLiveExactPoolIdentityV1112(state,address)||{};
+  const production=state?.productionV4EnrichmentV772||{};
+  const productionMatch=normalize(production?.tokenAddress)===address;
+  const productionPool=productionMatch?normalize(production?.poolId||production?.selectedPoolId||production?.exactPoolId||production?.exactPoolTargetedBackfillV888?.poolId||production?.targetedCollectorHandoffDiagnosticV895?.poolId):null;
+  if(!direct&&!retained&&!postMatch) return {ok:false,version:"V1168",status:"TOKEN_NOT_IN_RETAINED_QUALIFICATION_TRACE_V1168",address,authoritativePoolId:normalize(exact?.poolId||exact?.pool_id)||productionPool||null,note:"Complete a live scan containing this token, then retry. Manual /analyse state is intentionally not substituted for autonomous qualification state."};
+  const reasons=Array.isArray(direct?.telegramReasons)?direct.telegramReasons:Array.isArray(retained?.telegramReasons)?retained.telegramReasons:[];
+  const qualified=direct?direct.telegramQualified===true:retained?retained.telegramQualified===true:postMatch?.qualifiesTelegram===true;
+  const authoritativePoolId=direct?.authoritativePoolId||normalize(exact?.poolId||exact?.pool_id)||productionPool||null;
+  const flowPools=Array.isArray(direct?.verifiedFlowPoolIds)?direct.verifiedFlowPoolIds:[];
+  const poolAlignment=authoritativePoolId&&flowPools.length?flowPools.includes(normalize(authoritativePoolId)):null;
+  return {ok:true,version:"V1168",runtimeVersion:VERSION,status:qualified?"TELEGRAM_QUALIFIED_V1168":"TELEGRAM_BLOCKED_V1168",source:direct?"AUTONOMOUS_FINAL_CANDIDATE_TRACE_V1168":retained?"QUALIFICATION_AUDIT_V663_FALLBACK":"POST_RECOVERY_SCORE_V809_FALLBACK",address,symbol:direct?.symbol||retained?.symbol||postMatch?.symbol||null,recordedAt:direct?.recordedAt||retained?.lastEvaluatedAt||postMatch?.recordedAt||null,
+    authoritativePool:{poolId:authoritativePoolId,verified:direct?.authoritativePoolVerified===true||exact?.verified===true,source:direct?.authoritativePoolSource||exact?.source||exact?.status||null,productionPoolId:productionPool,flowPoolIds:flowPools,flowPoolAligned:poolAlignment},
+    scoring:{opportunity:direct?direct.opportunityScore:(postMatch?safeNumber(postMatch?.opportunityScore):safeNumber(retained?.opportunityScore)),confidence:direct?direct.confidenceScore:(postMatch?safeNumber(postMatch?.confidenceScore):safeNumber(retained?.confidenceScore)),momentum:direct?direct.momentumScore:(postMatch?safeNumber(postMatch?.momentumScore):null),signals:direct?direct.signalCount:safeNumber(retained?.signalCount)},
+    gates:{riskVerified:direct?direct.riskVerified:retained?.riskVerified===true,riskScore:direct?direct.riskScore:(retained?.riskVerified===true?safeNumber(retained?.riskScore):null),riskLabel:direct?.riskLabel||null,severeRiskOverride:direct?.severeRiskOverride===true,marketVerified:direct?direct.marketVerified:retained?.marketVerified===true,liquidityUsd:direct?direct.liquidityUsd:(retained?.marketVerified===true?safeNumber(retained?.liquidityUsd):null),holderEvidenceVerified:direct?direct.holderEvidenceVerified:retained?.holderEvidenceVerified===true,launchAgeVerified:direct?.launchAgeVerified??null,momentumVerified:direct?.momentumVerified??null,verifiedFlow:direct?.verifiedFlow??(postMatch?.verifiedFlow===true),verifiedFlowRecords:direct?.verifiedFlowRecords??safeNumber(postMatch?.verifiedRecordCount),freshnessPasses:direct?.freshnessPasses??null,marketFreshnessState:direct?.marketFreshnessState||null,holderFreshnessState:direct?.holderFreshnessState||null,bearishFlowSuppresses:direct?.bearishFlowSuppresses??null,matureConfirmationRequired:direct?.matureConfirmationRequired??null,matureConfirmationPasses:direct?.matureConfirmationPasses??null},
+    telegram:{qualified,reasons,firstBlocker:reasons[0]||(!qualified?"BLOCKER_NOT_RETAINED_IN_FALLBACK_SOURCE_V1168":null),thresholds:direct?.thresholds||{opportunityMin:MIN_ALERT_SCORE,confidenceMin:MIN_CONFIDENCE_ALERT,riskMax:MAX_ALERT_RISK,liquidityMin:MIN_ALERT_LIQUIDITY,signalsMin:2}},
+    readOnly:true,providerRequestsAdded:0,stateWritesAddedByCommand:0,scoringChanged:false,qualificationChanged:false,telegramThresholdsChanged:false};
+}
+
+function telegramWhyMessageV1168(state,rawAddress){
+  const d=telegramWhySnapshotV1168(state,rawAddress);
+  if(!d.ok) return ["🧭 <b>Telegram Qualification Why — V1168</b>","",`Status: <b>${escapeHtml(d.status||"UNAVAILABLE")}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:"ℹ️ Use <code>/telegramwhy 0xADDRESS</code>.",d.note?`ℹ️ ${escapeHtml(d.note)}`:"","","<i>Read-only. Zero provider requests and zero scoring/qualification changes.</i>"].filter(Boolean).join("\n");
+  const g=d.gates||{},s=d.scoring||{},p=d.authoritativePool||{},t=d.telegram||{};
+  return ["🧭 <b>Telegram Qualification Why — V1168</b>","",`<b>${escapeHtml(d.symbol||"UNKNOWN")}</b> · <code>${escapeHtml(d.address)}</code>`,`Source: <b>${escapeHtml(d.source||"NONE")}</b>`,`Recorded: <b>${escapeHtml(d.recordedAt?new Date(d.recordedAt).toISOString():"UNVERIFIED")}</b>`,"",`🎯 Opportunity: <b>${safeNumber(s.opportunity)}</b> / ${MIN_ALERT_SCORE} minimum`,`🔎 Confidence: <b>${safeNumber(s.confidence)}</b> / ${MIN_CONFIDENCE_ALERT} minimum`,`🧠 Momentum: <b>${s.momentum===null||s.momentum===undefined?"UNVERIFIED":safeNumber(s.momentum)}</b>`,`📡 Signals: <b>${safeNumber(s.signals)}</b> / 2 minimum`,"",`🛡 Risk: <b>${g.riskVerified?`${safeNumber(g.riskScore)} VERIFIED`:"UNVERIFIED"}</b> · max ${MAX_ALERT_RISK}`,`💰 Market verified: <b>${g.marketVerified?"YES":"NO"}</b> · liquidity <b>${g.liquidityUsd===null||g.liquidityUsd===undefined?"UNVERIFIED":`$${safeNumber(g.liquidityUsd).toFixed(2)}`}</b>`,`👥 Holder evidence: <b>${g.holderEvidenceVerified?"VERIFIED":"UNVERIFIED"}</b>`,`⏱ Launch age: <b>${g.launchAgeVerified===null?"NOT RETAINED":g.launchAgeVerified?"VERIFIED":"UNVERIFIED"}</b>`,`💵 Verified flow: <b>${g.verifiedFlow?"YES":"NO"}</b> · records ${safeNumber(g.verifiedFlowRecords)}`,"",`🧬 Authoritative PoolId: <code>${escapeHtml(p.poolId||"UNVERIFIED")}</code>`,`Pool verified: <b>${p.verified?"YES":"NO"}</b> · flow alignment: <b>${p.flowPoolAligned===null?"NOT PROVEN":p.flowPoolAligned?"YES":"NO"}</b>`,"",`📨 Telegram qualified: <b>${t.qualified?"YES":"NO"}</b>`,`🚧 First blocker: <b>${escapeHtml(t.firstBlocker||"NONE")}</b>`,`All blockers: <code>${escapeHtml((Array.isArray(t.reasons)&&t.reasons.length)?t.reasons.join(" | "):"NONE")}</code>`,"",`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/telegramwhy?token=${escapeHtml(d.address)}</code>`,"","<i>Uses autonomous retained qualification state. /analyse manual pool selection is not substituted. Read-only; zero provider requests or scoring/threshold changes.</i>"].join("\n");
+}
+
+function telegramWhyPlainTextV1168(d){
+  if(!d?.ok) return `ChainVanta Telegram Qualification Why — V1168\nStatus: ${d?.status||"UNAVAILABLE"}\nToken: ${d?.address||"INVALID"}\n${d?.note||""}`;
+  const s=d.scoring||{},g=d.gates||{},p=d.authoritativePool||{},t=d.telegram||{};
+  return ["ChainVanta Telegram Qualification Why — V1168",`Token: ${d.symbol||"UNKNOWN"} ${d.address}`,`Source: ${d.source||"NONE"}`,`Recorded: ${d.recordedAt?new Date(d.recordedAt).toISOString():"UNVERIFIED"}`,"",`Opportunity: ${safeNumber(s.opportunity)} (min ${MIN_ALERT_SCORE})`,`Confidence: ${safeNumber(s.confidence)} (min ${MIN_CONFIDENCE_ALERT})`,`Momentum: ${s.momentum===null||s.momentum===undefined?"UNVERIFIED":safeNumber(s.momentum)}`,`Signals: ${safeNumber(s.signals)} (min 2)`,`Risk: ${g.riskVerified?`${safeNumber(g.riskScore)} VERIFIED`:"UNVERIFIED"} (max ${MAX_ALERT_RISK})`,`Market verified: ${g.marketVerified?"YES":"NO"}`,`Liquidity USD: ${g.liquidityUsd===null||g.liquidityUsd===undefined?"UNVERIFIED":safeNumber(g.liquidityUsd)}`,`Holder evidence: ${g.holderEvidenceVerified?"VERIFIED":"UNVERIFIED"}`,`Launch age: ${g.launchAgeVerified===null?"NOT RETAINED":g.launchAgeVerified?"VERIFIED":"UNVERIFIED"}`,`Verified flow: ${g.verifiedFlow?"YES":"NO"} (${safeNumber(g.verifiedFlowRecords)} records)`,`Authoritative PoolId: ${p.poolId||"UNVERIFIED"}`,`Pool verified: ${p.verified?"YES":"NO"}`,`Flow pool aligned: ${p.flowPoolAligned===null?"NOT PROVEN":p.flowPoolAligned?"YES":"NO"}`,"",`Telegram qualified: ${t.qualified?"YES":"NO"}`,`First blocker: ${t.firstBlocker||"NONE"}`,`All blockers: ${(Array.isArray(t.reasons)&&t.reasons.length)?t.reasons.join(" | "):"NONE"}`,"","Read-only. Autonomous retained qualification state only. Zero provider requests and zero scoring/threshold changes."].join("\n");
+}
+
 function buildTelegramQualificationDiagnostics(
   candidates
 ) {
@@ -125861,6 +125948,8 @@ for (
       state,
       launchCoverageFunnelV474
     );
+
+  captureTelegramWhyTraceV1168(state, candidates);
 
   if (
     state?.coinGeckoDecisionTraceV664 &&
@@ -176904,6 +176993,7 @@ function telegramHelpV271() {
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
+    "<code>/telegramwhy 0xADDRESS</code> — exact autonomous Telegram blocker + authoritative pool (read-only; web link included)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
@@ -179436,6 +179526,15 @@ async function telegramCommandReplyV271(
         momentumMissing: safeNumber(evidenceAuditV727?.counts?.momentumMissing),
         launchAgeMissing: safeNumber(evidenceAuditV727?.counts?.launchMissing)
       };
+    }
+  } else if (
+    parsed.command === "/telegramwhy" ||
+    parsed.command === "/whytelegram"
+  ) {
+    reply = telegramWhyMessageV1168(state, parsed.argument);
+    if (diagnosticV273) {
+      const whyV1168 = telegramWhySnapshotV1168(state, parsed.argument);
+      diagnosticV273.telegramWhyV1168 = {scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,address:whyV1168?.address||null,status:whyV1168?.status||null,firstBlocker:whyV1168?.telegram?.firstBlocker||null,qualificationChanged:false};
     }
   } else if (
     parsed.command === "/telegramaudit" ||
@@ -197825,6 +197924,13 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   }
   if (path === "/v3live-stop") {
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "stop"));
+  }
+
+  if (path === "/telegramwhy") {
+    const loadedV1168 = await readState(env);
+    const resultV1168 = telegramWhySnapshotV1168(loadedV1168?.state || newState(), url.searchParams.get("token") || "");
+    if (String(url.searchParams.get("format") || "").toLowerCase() === "json") return jsonResponse(resultV1168, resultV1168?.ok === false ? 404 : 200);
+    return new Response(telegramWhyPlainTextV1168(resultV1168), {status:resultV1168?.ok === false ? 404 : 200,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","access-control-allow-origin":"*"}});
   }
 
   if (path === "/scheduler-status-v673") {
