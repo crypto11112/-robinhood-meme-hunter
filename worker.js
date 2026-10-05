@@ -1,4 +1,18 @@
 /**
+ * ChainVanta — V1158
+
+ * V1158 — deterministic Bitquery authentication/connectivity test.
+ * - Replaces the legacy /bitquerytest path that only read BITQUERY_ACCESS_TOKEN and therefore could not test the
+ *   Automatic-app BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET configuration used by ChainVanta.
+ * - /bitquerytest now prefers Automatic OAuth client-credentials auth, reports OAuth HTTP/token outcome, then runs
+ *   one tiny bounded Robinhood GraphQL query with the returned bearer token. Manual BITQUERY_ACCESS_TOKEN remains
+ *   a fallback only when Automatic credentials are absent.
+ * - Both OAuth and GraphQL calls have hard timeouts and every code path returns a final Telegram result.
+ * - A successful fresh test explicitly marks any previously persisted scanner HTTP-402 cooldown as stale for the
+ *   newly supplied credentials; this diagnostic does not itself mutate or clear production provider state.
+ * - Diagnostic/manual only: no scanner budget, scoring, qualification, provider cadence, risk, Telegram alert, KV,
+ *   D1, Stripe, watch-capacity or request-ceiling changes. Maximum external requests per invocation: 2 (OAuth + query).
+ *
  * ChainVanta — V1157
 
  * V1157 — released FLOW slot -> same-target V254 completion handoff.
@@ -9787,7 +9801,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1157"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1158"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -176392,6 +176406,146 @@ async function telegramAnalyseCheckpointV352(
 }
 
 
+
+async function bitqueryFetchWithTimeoutV1158(url, init, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    try { controller.abort("BITQUERY_TEST_TIMEOUT_V1158"); } catch (_) {}
+  }, Math.max(1000, Number(timeoutMs) || 5000));
+  try {
+    const response = await fetch(url, { ...(init || {}), signal: controller.signal });
+    clearTimeout(timer);
+    return { ok:true, response, timedOut:false, error:null };
+  } catch (error) {
+    clearTimeout(timer);
+    const timedOut = controller.signal.aborted === true || String(error?.name || "").toLowerCase() === "aborterror";
+    return { ok:false, response:null, timedOut, error: timedOut ? "BITQUERY_TEST_TIMEOUT_V1158" : errorString(error) };
+  }
+}
+
+async function bitqueryConnectivityTestV1158(env) {
+  const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
+  const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
+  const manualToken = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
+  const automaticConfigured = Boolean(clientId && clientSecret);
+  const manualConfigured = Boolean(manualToken);
+  const authMode = automaticConfigured ? "AUTOMATIC_OAUTH_CLIENT_CREDENTIALS" : (manualConfigured ? "MANUAL_ACCESS_TOKEN_FALLBACK" : "NOT_CONFIGURED");
+  const result = {
+    agent:"ChainVanta",
+    version:CHAINVANTA_DISPLAY_VERSION,
+    diagnostic:"BITQUERY_CONNECTIVITY_TEST_V1158",
+    success:false,
+    readOnly:true,
+    authMode,
+    automaticConfigured,
+    manualConfigured,
+    oauthAttempted:false,
+    oauthHttpStatus:null,
+    oauthTokenReturned:false,
+    oauthProviderMessage:null,
+    queryAttempted:false,
+    queryHttpStatus:null,
+    graphqlErrors:[],
+    rowCount:0,
+    latestBlock:null,
+    latestTime:null,
+    externalRequestsUsed:0,
+    scannerBudgetConsumed:false,
+    productionProviderStateMutated:false,
+    stale402Interpretation:"UNDETERMINED",
+    status:"BITQUERY_TEST_NOT_STARTED_V1158",
+    error:null,
+    timestamp:now()
+  };
+  if (authMode === "NOT_CONFIGURED") {
+    return {...result,status:"BITQUERY_CREDENTIALS_NOT_CONFIGURED_V1158",error:"Configure BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET (preferred) or BITQUERY_ACCESS_TOKEN."};
+  }
+
+  let bearer = manualToken;
+  if (automaticConfigured) {
+    result.oauthAttempted = true;
+    const body = new URLSearchParams({grant_type:"client_credentials",client_id:clientId,client_secret:clientSecret,scope:"api"});
+    const oauth = await bitqueryFetchWithTimeoutV1158(
+      BITQUERY_OAUTH_TOKEN_URL_V1060,
+      {method:"POST",headers:{"content-type":"application/x-www-form-urlencoded","accept":"application/json"},body:body.toString()},
+      5000
+    );
+    result.externalRequestsUsed += 1;
+    if (!oauth.ok) {
+      return {...result,status:oauth.timedOut?"BITQUERY_OAUTH_TIMEOUT_V1158":"BITQUERY_OAUTH_FETCH_FAILED_V1158",error:oauth.error,timestamp:now()};
+    }
+    result.oauthHttpStatus = oauth.response.status;
+    let payload=null, txt="";
+    try { txt = await oauth.response.text(); try { payload = txt ? JSON.parse(txt) : null; } catch (_) {} } catch (_) {}
+    bearer = String(payload?.access_token || "").trim();
+    result.oauthTokenReturned = Boolean(bearer);
+    result.oauthProviderMessage = payload?.error_description || payload?.error || payload?.message || null;
+    if (!oauth.response.ok || !bearer) {
+      const status = Number(oauth.response.status || 0);
+      return {...result,status:`BITQUERY_OAUTH_HTTP_${status}_V1158`,stale402Interpretation:status===402?"FRESH_CREDENTIALS_ALSO_RETURN_402":"UNDETERMINED",error:result.oauthProviderMessage,timestamp:now()};
+    }
+  }
+
+  const query = `
+    {
+      EVM(network: robinhood, dataset: realtime) {
+        Events(limit: {count: 1}, orderBy: {descending: Block_Time}) {
+          Block { Number Time }
+          Transaction { Hash }
+        }
+      }
+    }
+  `;
+  result.queryAttempted = true;
+  const gql = await bitqueryFetchWithTimeoutV1158(
+    BITQUERY_GRAPHQL_URL_V1060,
+    {method:"POST",headers:{"content-type":"application/json","accept":"application/json","authorization":`Bearer ${bearer}`},body:JSON.stringify({query})},
+    6000
+  );
+  result.externalRequestsUsed += 1;
+  if (!gql.ok) {
+    return {...result,status:gql.timedOut?"BITQUERY_GRAPHQL_TIMEOUT_V1158":"BITQUERY_GRAPHQL_FETCH_FAILED_V1158",error:gql.error,timestamp:now()};
+  }
+  result.queryHttpStatus = gql.response.status;
+  let payload=null, txt="";
+  try { txt = await gql.response.text(); try { payload = txt ? JSON.parse(txt) : null; } catch (_) {} } catch (_) {}
+  result.graphqlErrors = Array.isArray(payload?.errors) ? payload.errors.map(x=>String(x?.message||"GRAPHQL_ERROR")).slice(0,5) : [];
+  const rows = Array.isArray(payload?.data?.EVM?.Events) ? payload.data.EVM.Events : [];
+  result.rowCount = rows.length;
+  result.latestBlock = rows?.[0]?.Block?.Number ?? null;
+  result.latestTime = rows?.[0]?.Block?.Time ?? null;
+
+  if (!gql.response.ok) {
+    const status = Number(gql.response.status || 0);
+    return {...result,status:`BITQUERY_GRAPHQL_HTTP_${status}_V1158`,stale402Interpretation:status===402?"FRESH_CREDENTIALS_ALSO_RETURN_402":"UNDETERMINED",error:result.graphqlErrors[0] || payload?.message || null,timestamp:now()};
+  }
+  if (result.graphqlErrors.length) {
+    return {...result,status:"BITQUERY_GRAPHQL_200_WITH_ERRORS_V1158",stale402Interpretation:"FRESH_AUTH_WORKS_BUT_QUERY_HAS_GRAPHQL_ERRORS",timestamp:now()};
+  }
+  return {...result,success:true,status:"BITQUERY_FRESH_CREDENTIALS_OK_V1158",stale402Interpretation:"PREVIOUS_SCANNER_HTTP_402_COOLDOWN_IS_STALE_FOR_FRESH_CREDENTIALS",timestamp:now()};
+}
+
+function bitqueryConnectivityMessageV1158(result) {
+  const lines = [
+    `🛰 <b>Bitquery Fresh-Credential Test — ${escapeHtml(CHAINVANTA_DISPLAY_VERSION)}</b>`,
+    "",
+    `Auth mode: <b>${escapeHtml(String(result?.authMode || "UNKNOWN"))}</b>`,
+    `Automatic credentials present: <b>${result?.automaticConfigured === true ? "YES" : "NO"}</b>`,
+    `Manual token present: <b>${result?.manualConfigured === true ? "YES" : "NO"}</b>`,
+    `OAuth attempted: <b>${result?.oauthAttempted === true ? "YES" : "NO"}</b> · HTTP: <b>${result?.oauthHttpStatus ?? "N/A"}</b> · token returned: <b>${result?.oauthTokenReturned === true ? "YES" : "NO"}</b>`,
+    `GraphQL attempted: <b>${result?.queryAttempted === true ? "YES" : "NO"}</b> · HTTP: <b>${result?.queryHttpStatus ?? "N/A"}</b>`,
+    `Rows: <b>${fmt(safeNumber(result?.rowCount))}</b> · latest Robinhood block: <b>${result?.latestBlock ?? "UNVERIFIED"}</b>`,
+    `Status: <b>${escapeHtml(String(result?.status || "UNKNOWN"))}</b>`,
+    `Old 402 interpretation: <b>${escapeHtml(String(result?.stale402Interpretation || "UNDETERMINED"))}</b>`,
+    `External requests used: <b>${safeNumber(result?.externalRequestsUsed)}</b> (max 2)`,
+  ];
+  if (result?.oauthProviderMessage) lines.push(`OAuth provider: ${escapeHtml(String(result.oauthProviderMessage).slice(0,500))}`);
+  if (Array.isArray(result?.graphqlErrors) && result.graphqlErrors.length) lines.push(`GraphQL: ${escapeHtml(result.graphqlErrors.join(" | ").slice(0,700))}`);
+  if (result?.error) lines.push(`Error: ${escapeHtml(String(result.error).slice(0,700))}`);
+  lines.push("", "<i>Manual diagnostic only. It does not clear scanner cooldown state, alter provider routing, consume scanner budget, or change scoring/Telegram qualification.</i>");
+  return lines.join("\n");
+}
+
 async function bitqueryConnectivityTestV1013(env) {
   const token = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
 
@@ -177896,18 +178050,18 @@ async function telegramCommandReplyV271(
     const routeAckV1014 =
       await sendTelegram(
         env,
-        `🧭 <b>Bitquery Test Route — ${escapeHtml(VERSION)}</b>\n\nRoute reached: <b>YES</b>\nStarting one bounded Bitquery request now…`,
+        `🧭 <b>Bitquery Test Route — ${escapeHtml(CHAINVANTA_DISPLAY_VERSION)}</b>\n\nRoute reached: <b>YES</b>\nTesting fresh Bitquery credentials now…`,
         null,
         null
       );
 
     const resultV1014 =
-      await bitqueryConnectivityTestV1013(
+      await bitqueryConnectivityTestV1158(
         env
       );
 
     const replyV1014 =
-      bitqueryConnectivityMessageV1013(
+      bitqueryConnectivityMessageV1158(
         resultV1014
       );
 
@@ -177921,18 +178075,17 @@ async function telegramCommandReplyV271(
 
     if (diagnosticV273) {
       diagnosticV273.replyAttempted = true;
-      diagnosticV273.bitqueryConnectivityV1014 = {
-        routeAckSuccess:
-          routeAckV1014?.success === true,
+      diagnosticV273.bitqueryConnectivityV1158 = {
+        routeAckSuccess: routeAckV1014?.success === true,
         scannerBudgetConsumed: false,
-        externalProviderRequests:
-          resultV1014?.attempted === true ? 1 : 0,
-        configured:
-          resultV1014?.configured === true,
-        httpStatus:
-          resultV1014?.httpStatus ?? null,
-        status:
-          resultV1014?.status || null
+        externalProviderRequests: safeNumber(resultV1014?.externalRequestsUsed),
+        authMode: resultV1014?.authMode || null,
+        automaticConfigured: resultV1014?.automaticConfigured === true,
+        manualConfigured: resultV1014?.manualConfigured === true,
+        oauthHttpStatus: resultV1014?.oauthHttpStatus ?? null,
+        queryHttpStatus: resultV1014?.queryHttpStatus ?? null,
+        stale402Interpretation: resultV1014?.stale402Interpretation || null,
+        status: resultV1014?.status || null
       };
       diagnosticV273.replySuccess =
         resultSendV1014?.success === true;
@@ -177958,8 +178111,8 @@ async function telegramCommandReplyV271(
         routeAckV1014?.success === true,
       scannerBudgetConsumed: false,
       externalProviderRequests:
-        resultV1014?.attempted === true ? 1 : 0,
-      bitqueryConnectivityV1014:
+        safeNumber(resultV1014?.externalRequestsUsed),
+      bitqueryConnectivityV1158:
         resultV1014
     };
   }
