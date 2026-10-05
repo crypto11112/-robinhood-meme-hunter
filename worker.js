@@ -1,6 +1,11 @@
 /**
- * ChainVanta — V1158
+ * ChainVanta — V1159
 
+ * V1159 — full-lifecycle Bitquery diagnostic timeout fix.
+ * - V1158 correctly selected Automatic OAuth credentials, but its timeout ended when response headers arrived; response.text() could still hang forever and prevent the final Telegram result.
+ * - V1159 keeps the AbortController alive through body consumption and wraps each OAuth/GraphQL stage in a hard outer deadline so /bitquerytest always returns a final result even if Bitquery stalls after headers.
+ * - Diagnostic/manual only: no scanner, scoring, provider cadence, budgets, qualification, risk, watch capacity, or production Telegram alert changes.
+ *
  * V1158 — deterministic Bitquery authentication/connectivity test.
  * - Replaces the legacy /bitquerytest path that only read BITQUERY_ACCESS_TOKEN and therefore could not test the
  *   Automatic-app BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET configuration used by ChainVanta.
@@ -9801,7 +9806,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1158"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1159"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -176407,23 +176412,43 @@ async function telegramAnalyseCheckpointV352(
 
 
 
-async function bitqueryFetchWithTimeoutV1158(url, init, timeoutMs = 5000) {
+async function bitqueryFetchWithTimeoutV1159(url, init, timeoutMs = 5000) {
   const controller = new AbortController();
+  const deadlineMs = Math.max(1000, Number(timeoutMs) || 5000);
   const timer = setTimeout(() => {
-    try { controller.abort("BITQUERY_TEST_TIMEOUT_V1158"); } catch (_) {}
-  }, Math.max(1000, Number(timeoutMs) || 5000));
+    try { controller.abort("BITQUERY_TEST_TIMEOUT_V1159"); } catch (_) {}
+  }, deadlineMs);
   try {
     const response = await fetch(url, { ...(init || {}), signal: controller.signal });
-    clearTimeout(timer);
-    return { ok:true, response, timedOut:false, error:null };
+    let text = "";
+    try {
+      text = await response.text();
+    } catch (bodyError) {
+      const timedOut = controller.signal.aborted === true || String(bodyError?.name || "").toLowerCase() === "aborterror";
+      return { ok:false, response:null, status:response?.status ?? null, text:"", timedOut, stage:"BODY_READ", error: timedOut ? "BITQUERY_BODY_TIMEOUT_V1159" : errorString(bodyError) };
+    }
+    return { ok:true, response, status:response?.status ?? null, text, timedOut:false, stage:"COMPLETE", error:null };
   } catch (error) {
-    clearTimeout(timer);
     const timedOut = controller.signal.aborted === true || String(error?.name || "").toLowerCase() === "aborterror";
-    return { ok:false, response:null, timedOut, error: timedOut ? "BITQUERY_TEST_TIMEOUT_V1158" : errorString(error) };
+    return { ok:false, response:null, status:null, text:"", timedOut, stage:"FETCH", error: timedOut ? "BITQUERY_FETCH_TIMEOUT_V1159" : errorString(error) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-async function bitqueryConnectivityTestV1158(env) {
+async function bitqueryStageDeadlineV1159(promise, timeoutMs, label) {
+  let timer = null;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({__v1159Deadline:true,label}), Math.max(1500, Number(timeoutMs)||7000));
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function bitqueryConnectivityTestV1159(env) {
   const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
   const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
   const manualToken = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
@@ -176433,7 +176458,7 @@ async function bitqueryConnectivityTestV1158(env) {
   const result = {
     agent:"ChainVanta",
     version:CHAINVANTA_DISPLAY_VERSION,
-    diagnostic:"BITQUERY_CONNECTIVITY_TEST_V1158",
+    diagnostic:"BITQUERY_CONNECTIVITY_TEST_V1159",
     success:false,
     readOnly:true,
     authMode,
@@ -176465,18 +176490,26 @@ async function bitqueryConnectivityTestV1158(env) {
   if (automaticConfigured) {
     result.oauthAttempted = true;
     const body = new URLSearchParams({grant_type:"client_credentials",client_id:clientId,client_secret:clientSecret,scope:"api"});
-    const oauth = await bitqueryFetchWithTimeoutV1158(
-      BITQUERY_OAUTH_TOKEN_URL_V1060,
-      {method:"POST",headers:{"content-type":"application/x-www-form-urlencoded","accept":"application/json"},body:body.toString()},
-      5000
+    const oauth = await bitqueryStageDeadlineV1159(
+      bitqueryFetchWithTimeoutV1159(
+        BITQUERY_OAUTH_TOKEN_URL_V1060,
+        {method:"POST",headers:{"content-type":"application/x-www-form-urlencoded","accept":"application/json"},body:body.toString()},
+        6000
+      ),
+      7500,
+      "OAUTH"
     );
+    if (oauth?.__v1159Deadline === true) {
+      result.externalRequestsUsed += 1;
+      return {...result,status:"BITQUERY_OAUTH_STAGE_DEADLINE_V1159",error:"OAuth stage exceeded hard V1159 deadline.",timestamp:now()};
+    }
     result.externalRequestsUsed += 1;
     if (!oauth.ok) {
       return {...result,status:oauth.timedOut?"BITQUERY_OAUTH_TIMEOUT_V1158":"BITQUERY_OAUTH_FETCH_FAILED_V1158",error:oauth.error,timestamp:now()};
     }
-    result.oauthHttpStatus = oauth.response.status;
-    let payload=null, txt="";
-    try { txt = await oauth.response.text(); try { payload = txt ? JSON.parse(txt) : null; } catch (_) {} } catch (_) {}
+    result.oauthHttpStatus = oauth.status ?? oauth.response?.status ?? null;
+    let payload=null, txt=String(oauth.text || "");
+    try { payload = txt ? JSON.parse(txt) : null; } catch (_) {}
     bearer = String(payload?.access_token || "").trim();
     result.oauthTokenReturned = Boolean(bearer);
     result.oauthProviderMessage = payload?.error_description || payload?.error || payload?.message || null;
@@ -176497,18 +176530,26 @@ async function bitqueryConnectivityTestV1158(env) {
     }
   `;
   result.queryAttempted = true;
-  const gql = await bitqueryFetchWithTimeoutV1158(
-    BITQUERY_GRAPHQL_URL_V1060,
-    {method:"POST",headers:{"content-type":"application/json","accept":"application/json","authorization":`Bearer ${bearer}`},body:JSON.stringify({query})},
-    6000
+  const gql = await bitqueryStageDeadlineV1159(
+    bitqueryFetchWithTimeoutV1159(
+      BITQUERY_GRAPHQL_URL_V1060,
+      {method:"POST",headers:{"content-type":"application/json","accept":"application/json","authorization":`Bearer ${bearer}`},body:JSON.stringify({query})},
+      7000
+    ),
+    8500,
+    "GRAPHQL"
   );
+  if (gql?.__v1159Deadline === true) {
+    result.externalRequestsUsed += 1;
+    return {...result,status:"BITQUERY_GRAPHQL_STAGE_DEADLINE_V1159",error:"GraphQL stage exceeded hard V1159 deadline.",timestamp:now()};
+  }
   result.externalRequestsUsed += 1;
   if (!gql.ok) {
     return {...result,status:gql.timedOut?"BITQUERY_GRAPHQL_TIMEOUT_V1158":"BITQUERY_GRAPHQL_FETCH_FAILED_V1158",error:gql.error,timestamp:now()};
   }
-  result.queryHttpStatus = gql.response.status;
-  let payload=null, txt="";
-  try { txt = await gql.response.text(); try { payload = txt ? JSON.parse(txt) : null; } catch (_) {} } catch (_) {}
+  result.queryHttpStatus = gql.status ?? gql.response?.status ?? null;
+  let payload=null, txt=String(gql.text || "");
+  try { payload = txt ? JSON.parse(txt) : null; } catch (_) {}
   result.graphqlErrors = Array.isArray(payload?.errors) ? payload.errors.map(x=>String(x?.message||"GRAPHQL_ERROR")).slice(0,5) : [];
   const rows = Array.isArray(payload?.data?.EVM?.Events) ? payload.data.EVM.Events : [];
   result.rowCount = rows.length;
@@ -176525,7 +176566,7 @@ async function bitqueryConnectivityTestV1158(env) {
   return {...result,success:true,status:"BITQUERY_FRESH_CREDENTIALS_OK_V1158",stale402Interpretation:"PREVIOUS_SCANNER_HTTP_402_COOLDOWN_IS_STALE_FOR_FRESH_CREDENTIALS",timestamp:now()};
 }
 
-function bitqueryConnectivityMessageV1158(result) {
+function bitqueryConnectivityMessageV1159(result) {
   const lines = [
     `🛰 <b>Bitquery Fresh-Credential Test — ${escapeHtml(CHAINVANTA_DISPLAY_VERSION)}</b>`,
     "",
@@ -178056,12 +178097,12 @@ async function telegramCommandReplyV271(
       );
 
     const resultV1014 =
-      await bitqueryConnectivityTestV1158(
+      await bitqueryConnectivityTestV1159(
         env
       );
 
     const replyV1014 =
-      bitqueryConnectivityMessageV1158(
+      bitqueryConnectivityMessageV1159(
         resultV1014
       );
 
@@ -178075,7 +178116,7 @@ async function telegramCommandReplyV271(
 
     if (diagnosticV273) {
       diagnosticV273.replyAttempted = true;
-      diagnosticV273.bitqueryConnectivityV1158 = {
+      diagnosticV273.bitqueryConnectivityV1159 = {
         routeAckSuccess: routeAckV1014?.success === true,
         scannerBudgetConsumed: false,
         externalProviderRequests: safeNumber(resultV1014?.externalRequestsUsed),
