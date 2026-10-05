@@ -1,4 +1,17 @@
 /**
+ * ChainVanta — V1160
+
+ * V1160 — native Pons raw-curve continuity without Bitquery/USD guessing.
+ * - When a verified Pons V2 candidate has a verified curve but its pair token has no trustworthy canonical USD basis,
+ *   V916 previously returned before any on-chain curve request, leaving that candidate completely blind without Bitquery.
+ * - V1160 uses one existing protected direct-RPC slot to inspect the recent 1,900-block curve window and records only
+ *   verified raw CurveBuy/CurveSell activity (counts + exact token/curve/pair identity + block window).
+ * - Raw-only evidence is stored separately in state.ponsCurveRawActivityV1160 and is NEVER promoted into V216/V218,
+ *   Momentum, Opportunity, Confidence, Market, Whale Flow, qualification, or Telegram until a verified USD basis exists.
+ * - This deliberately does not guess prices for arbitrary quote tokens. It improves native coverage while preserving the
+ *   existing verified-USD safety boundary. Request ceilings are unchanged; at most one protected RPC request is used
+ *   for the selected raw-only Pons target that previously exited with PONS_QUOTE_USD_BASIS_UNVERIFIED_V916.
+ *
  * ChainVanta — V1159
 
  * V1159 — full-lifecycle Bitquery diagnostic timeout fix.
@@ -9806,7 +9819,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1159"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1160"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -85253,15 +85266,136 @@ async function runDirectPonsCurveFlowV916(
   if (
     usdBasis?.verified !== true
   ) {
-    return {
-      ...base,
+    /*
+     * V1160: do not make an unverified USD conversion, but do not stay blind either.
+     * Inspect only the recent live curve window and persist raw on-chain activity
+     * separately from every verified-USD/scoring store.
+     */
+    const rawHeadV1160 = safeNumber(latestNumber);
+
+    if (!(rawHeadV1160 > 0)) {
+      return {
+        ...base,
+        tokenAddress: token,
+        symbol: candidate?.symbol || null,
+        curve,
+        pairToken,
+        quoteUsdBasis: usdBasis?.source || "QUOTE_USD_BASIS_UNVERIFIED_V916",
+        rawOnlyV1160: true,
+        status: "LATEST_BLOCK_UNVERIFIED_V1160"
+      };
+    }
+
+    const rawLaunchBlockV1160 = safeNumber(selected?.meta?.launchBlock);
+    const rawFromBlockV1160 = Math.max(
+      rawLaunchBlockV1160 > 0 ? rawLaunchBlockV1160 : 0,
+      Math.max(0, rawHeadV1160 - 1899)
+    );
+    const rawToBlockV1160 = rawHeadV1160;
+
+    const rawRequestV1160 = await v916RawRpcHttp(
+      env,
+      budget,
+      {
+        jsonrpc: "2.0",
+        id: 116001,
+        method: "eth_getLogs",
+        params: [
+          {
+            address: curve,
+            fromBlock: `0x${Math.trunc(rawFromBlockV1160).toString(16)}`,
+            toBlock: `0x${Math.trunc(rawToBlockV1160).toString(16)}`,
+            topics: [[PONS_V2_CURVE_BUY_TOPIC_V916, PONS_V2_CURVE_SELL_TOPIC_V916]]
+          }
+        ]
+      },
+      "RPC:V1160_PONS_RAW_CURVE_LOGS"
+    );
+
+    if (!rawRequestV1160.ok) {
+      return {
+        ...base,
+        attempted: true,
+        tokenAddress: token,
+        symbol: candidate?.symbol || null,
+        curve,
+        pairToken,
+        quoteUsdBasis: usdBasis?.source || "QUOTE_USD_BASIS_UNVERIFIED_V916",
+        rawOnlyV1160: true,
+        fromBlock: rawFromBlockV1160,
+        toBlock: rawToBlockV1160,
+        provider: rawRequestV1160.provider,
+        requestsUsed: 1,
+        status: rawRequestV1160.status || "PONS_RAW_CURVE_REQUEST_FAILED_V1160",
+        error: rawRequestV1160.error || null
+      };
+    }
+
+    const rawLogsV1160 = Array.isArray(rawRequestV1160?.result?.result)
+      ? rawRequestV1160.result.result
+      : [];
+
+    let rawBuysV1160 = 0;
+    let rawSellsV1160 = 0;
+    for (const rawLogV1160 of rawLogsV1160) {
+      const rawTopicV1160 = normalize(rawLogV1160?.topics?.[0]);
+      if (rawTopicV1160 === PONS_V2_CURVE_BUY_TOPIC_V916) rawBuysV1160++;
+      else if (rawTopicV1160 === PONS_V2_CURVE_SELL_TOPIC_V916) rawSellsV1160++;
+    }
+
+    state.ponsCurveRawActivityV1160 =
+      state.ponsCurveRawActivityV1160 && typeof state.ponsCurveRawActivityV1160 === "object"
+        ? state.ponsCurveRawActivityV1160
+        : { version: "V1160", entries: {} };
+    state.ponsCurveRawActivityV1160.entries =
+      state.ponsCurveRawActivityV1160.entries && typeof state.ponsCurveRawActivityV1160.entries === "object"
+        ? state.ponsCurveRawActivityV1160.entries
+        : {};
+
+    const previousRawV1160 = state.ponsCurveRawActivityV1160.entries[token] || {};
+    state.ponsCurveRawActivityV1160.entries[token] = {
+      version: "V1160",
+      verifiedRawOnChain: true,
+      rawOnlyNoUsd: true,
+      scoringEligible: false,
       tokenAddress: token,
-      symbol:
-        candidate?.symbol || null,
+      symbol: candidate?.symbol || null,
       curve,
       pairToken,
-      status:
-        "PONS_QUOTE_USD_BASIS_UNVERIFIED_V916"
+      fromBlock: rawFromBlockV1160,
+      toBlock: rawToBlockV1160,
+      logsReturned: rawLogsV1160.length,
+      buys: rawBuysV1160,
+      sells: rawSellsV1160,
+      scansCompleted: safeNumber(previousRawV1160?.scansCompleted) + 1,
+      totalLogsObserved: safeNumber(previousRawV1160?.totalLogsObserved) + rawLogsV1160.length,
+      totalBuysObserved: safeNumber(previousRawV1160?.totalBuysObserved) + rawBuysV1160,
+      totalSellsObserved: safeNumber(previousRawV1160?.totalSellsObserved) + rawSellsV1160,
+      quoteUsdBasis: usdBasis?.source || "QUOTE_USD_BASIS_UNVERIFIED_V916",
+      source: "DIRECT_RPC_PONS_V2_RAW_CURVE_EVENTS_V1160",
+      updatedAt: Date.now()
+    };
+
+    return {
+      ...base,
+      attempted: true,
+      tokenAddress: token,
+      symbol: candidate?.symbol || null,
+      curve,
+      pairToken,
+      quoteUsdBasis: usdBasis?.source || "QUOTE_USD_BASIS_UNVERIFIED_V916",
+      rawOnlyV1160: true,
+      rawScoringEligibleV1160: false,
+      fromBlock: rawFromBlockV1160,
+      toBlock: rawToBlockV1160,
+      logsReturned: rawLogsV1160.length,
+      rawBuysV1160,
+      rawSellsV1160,
+      provider: rawRequestV1160.provider,
+      requestsUsed: 1,
+      status: rawLogsV1160.length > 0
+        ? "VERIFIED_RAW_PONS_CURVE_ACTIVITY_USD_BASIS_PENDING_V1160"
+        : "PONS_RAW_CURVE_WINDOW_NO_EVENTS_V1160"
     };
   }
 
@@ -144488,6 +144622,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V922/V930/V931 freshness routing — <b>${escapeHtml(ponsDirectV916?.freshnessRoutingV922?.status || "NONE")}</b> · base eligible ${fmt(ponsDirectV916?.freshnessRoutingV922?.baseEligible)} · fresh recent-live ${fmt(ponsDirectV916?.freshnessRoutingV922?.recentLiveEligible)} · old bootstrap ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldUnverifiedBootstrapEligibleV930)} · queued bootstrap ${fmt(ponsDirectV916?.freshnessRoutingV922?.persistedBootstrapQueueEligibleV931)} · queue retained ${fmt(ponsDirectV916?.freshnessRoutingV922?.persistedBootstrapQueueRetainedV931)} · old background ${fmt(ponsDirectV916?.freshnessRoutingV922?.backgroundHistoryEligible)} · old live-due skipped ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldLiveRefreshDueSkipped)} · max fresh age ${fmt(ponsDirectV916?.freshnessRoutingV922?.freshLaunchMaxAgeBlocks)} blocks`,
       `V921 persisted Pons discovery — last status <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastStatus || "NONE")}</b> · last query ${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastQueryAt || "NONE")} · last launch block ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastLaunchBlock)} · retained ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedCount)} · retained blocks ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMinBlock)}→${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMaxBlock)}`,
       `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
+      `V1160 native raw-only: <b>${ponsDirectV916.rawOnlyV1160 ? "YES" : "NO"}</b> · scoring eligible <b>${ponsDirectV916.rawScoringEligibleV1160 === true ? "YES" : "NO"}</b> · buys/sells ${fmt(ponsDirectV916.rawBuysV1160)}/${fmt(ponsDirectV916.rawSellsV1160)}`,
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
       `Curve logs: ${fmt(ponsDirectV916.logsReturned)} · decoded ${fmt(ponsDirectV916.decodedTrades)} · verified USD ${fmt(ponsDirectV916.verifiedUsdTrades)} · persisted new ${fmt(ponsDirectV916.persistedNewTrades)}`,
       `Block timestamps: requested ${fmt(ponsDirectV916.timestampsRequested)} · verified ${fmt(ponsDirectV916.timestampsVerified)}`,
