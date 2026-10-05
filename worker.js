@@ -1,6 +1,7 @@
 /**
- * ChainVanta — V1163
+ * ChainVanta — V1164
 
+ * V1164 — post-directional released FLOW re-evaluation and targeted-only V888 retry.
  * V1163 — released FLOW -> same-target V888 first-chunk ownership handoff.
  * - V1162 live evidence produced RSTR: same V151/production target, valid ERC20,
  *   risk-acceptable, market-ready, verified exact PoolId, Gecko deferred by 429,
@@ -9855,7 +9856,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1163"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -109409,7 +109410,8 @@ async function enrichCandidateWithProductionV4V772(
   candidate,
   latestNumber,
   currentLiveVerifiedLaunchV780 = false,
-  backgroundExactPoolContinuationV926 = false
+  backgroundExactPoolContinuationV926 = false,
+  targetedExactPoolOnlyV1164 = false
 ) {
   const token = normalize(candidate?.address);
   const base = {
@@ -109465,7 +109467,10 @@ async function enrichCandidateWithProductionV4V772(
   };
 
   if (!isAddress(token)) return {...base, status:"INVALID_TOKEN_V772"};
-  const requiredHeadroomV926 = backgroundExactPoolContinuationV926 === true ? 1 : 3;
+  const requiredHeadroomV926 =
+    backgroundExactPoolContinuationV926 === true || targetedExactPoolOnlyV1164 === true
+      ? 1
+      : 3;
   if (!budgetAvailable(budget, "analysis", requiredHeadroomV926)) {
     return {
       ...base,
@@ -109482,10 +109487,11 @@ async function enrichCandidateWithProductionV4V772(
   base.fromBlock = from;
   base.toBlock = to;
   base.backgroundExactPoolContinuationV926 = backgroundExactPoolContinuationV926 === true;
+  base.targetedExactPoolOnlyV1164 = targetedExactPoolOnlyV1164 === true;
 
   let rows = [];
   let active = [];
-  if (backgroundExactPoolContinuationV926 !== true) {
+  if (backgroundExactPoolContinuationV926 !== true && targetedExactPoolOnlyV1164 !== true) {
     if (!consumeBudget(budget, "analysis", "RPC:V772_RECENT_POOLMANAGER_SWAPS", 1)) {
       return {...base, status:"V772_RPC_REQUEST_BLOCKED_BY_EXISTING_RESERVE"};
     }
@@ -110149,6 +110155,21 @@ async function enrichCandidateWithProductionV4V772(
         safeNumber(
           base?.exactPoolTargetedBackfillV888?.returnedSwapRows
         )
+    };
+  }
+
+  if (targetedExactPoolOnlyV1164 === true) {
+    return {
+      ...base,
+      attempted: base?.exactPoolTargetedBackfillV888?.attempted === true,
+      applied: false,
+      status: base?.exactPoolTargetedBackfillV888?.attempted === true
+        ? "V1164_POST_RELEASE_V888_TARGETED_RETRY_ATTEMPTED"
+        : "V1164_POST_RELEASE_V888_TARGETED_RETRY_NOT_ATTEMPTED",
+      targetedOnlyV1164: true,
+      scoringChangedV1164: false,
+      qualificationChangedV1164: false,
+      telegramChangedV1164: false
     };
   }
 
@@ -120278,6 +120299,108 @@ for (
         ? "V151_DIRECTIONAL_ATTEMPT_FINISHED_V822"
         : "V151_DIRECTIONAL_STAGE_NO_ATTEMPT_V822"
     );
+
+  /* =========================================================
+     V1164 POST-DIRECTIONAL RELEASE -> TARGETED V888 RETRY
+     =========================================================
+     V1163/RSTR proved FLOW is released after the first production-V4 pass.
+     Re-evaluate only after V822 releases it, then retry only the existing V888
+     exact-pool collector. Broad V772 discovery is not repeated.
+  */
+  let postReleaseExactPoolRetryV1164 = {
+    enabled:true, eligible:false, attempted:false, requestAttempted:false,
+    rpcOk:false, targetAddress:null, exactPoolId:null,
+    releasedFlow:Math.max(0, safeNumber(evidenceCompletionFlowReleaseV822?.released)),
+    rawRows:0, exactTopicRows:0, reason:"V1164_NOT_ELIGIBLE"
+  };
+
+  if (productionV4TargetV772) {
+    const tokenV1164 = normalize(productionV4TargetV772?.address || "");
+    const poolV1164 = normalize(
+      productionV4TargetV772?.onChainPoolIdentityV153?.poolId ||
+      productionV4TargetV772?.onChainPoolIdentityV153?.pairAddress ||
+      ""
+    );
+    const priorV888V1164 =
+      productionV4TargetV772?.productionV4EnrichmentV772?.exactPoolTargetedBackfillV888 || {};
+    const sameDirectionalV1164 =
+      isAddress(tokenV1164) &&
+      normalize(directionalTradeEnrichment?.address || "") === tokenV1164;
+    const riskOkV1164 =
+      productionV4TargetV772?.risk?.severeOverride !== true &&
+      String(productionV4TargetV772?.risk?.label || "").toUpperCase() !== "HIGH";
+    const exactOkV1164 =
+      productionV4TargetV772?.onChainPoolIdentityV153?.verified === true &&
+      /^0x[a-f0-9]{64}$/.test(String(poolV1164 || ""));
+    const geckoDeferredV1164 =
+      directionalTradeEnrichment?.attempted !== true &&
+      String(directionalTradeEnrichment?.status || "").includes("429_COOLDOWN");
+    const releasedV1164 = Math.max(0, safeNumber(evidenceCompletionFlowReleaseV822?.released));
+    const priorAttemptedV1164 = priorV888V1164?.attempted === true;
+
+    postReleaseExactPoolRetryV1164 = {
+      ...postReleaseExactPoolRetryV1164,
+      targetAddress:isAddress(tokenV1164) ? tokenV1164 : null,
+      exactPoolId:/^0x[a-f0-9]{64}$/.test(String(poolV1164 || "")) ? poolV1164 : null,
+      sameDirectionalTarget:sameDirectionalV1164,
+      riskAcceptable:riskOkV1164, exactPoolVerified:exactOkV1164,
+      geckoDeferred:geckoDeferredV1164, priorV888Attempted:priorAttemptedV1164
+    };
+
+    if (releasedV1164 > 0 && sameDirectionalV1164 && riskOkV1164 && exactOkV1164 && geckoDeferredV1164 && !priorAttemptedV1164) {
+      const rearmedV1163 = armV1163ReleasedFlowExactPoolSlot(
+        budget, productionV4TargetV772, state, preV891PriorityV908,
+        evidenceCompletionFlowReleaseV822
+      );
+      postReleaseExactPoolRetryV1164.eligible = rearmedV1163?.active === true;
+      postReleaseExactPoolRetryV1164.reason = rearmedV1163?.reason || "V1163_REARM_FAILED_V1164";
+
+      if (rearmedV1163?.active === true) {
+        const retryV1164 = await enrichCandidateWithProductionV4V772(
+          env, state, budget, productionV4TargetV772, latestNumber,
+          false, false, true
+        );
+        postReleaseExactPoolRetryV1164.attempted =
+          retryV1164?.exactPoolTargetedBackfillV888?.attempted === true;
+        postReleaseExactPoolRetryV1164.requestAttempted =
+          retryV1164?.targetedCollectorHandoffDiagnosticV895?.requestAttempted === true;
+        postReleaseExactPoolRetryV1164.rpcOk =
+          retryV1164?.targetedCollectorHandoffDiagnosticV895?.rpcOk === true;
+        postReleaseExactPoolRetryV1164.rawRows =
+          safeNumber(retryV1164?.targetedCollectorHandoffDiagnosticV895?.rawRpcRows);
+        postReleaseExactPoolRetryV1164.exactTopicRows =
+          safeNumber(retryV1164?.targetedCollectorHandoffDiagnosticV895?.exactTopicRows);
+        postReleaseExactPoolRetryV1164.retryStatus = retryV1164?.status || null;
+        postReleaseExactPoolRetryV1164.v888Status =
+          retryV1164?.exactPoolTargetedBackfillV888?.status || null;
+
+        productionV4TargetV772.productionV4EnrichmentV772 = {
+          ...(productionV4TargetV772.productionV4EnrichmentV772 || {}),
+          exactPoolTargetedBackfillV888:
+            retryV1164?.exactPoolTargetedBackfillV888 ||
+            productionV4TargetV772.productionV4EnrichmentV772?.exactPoolTargetedBackfillV888,
+          targetedCollectorHandoffDiagnosticV895:
+            retryV1164?.targetedCollectorHandoffDiagnosticV895 ||
+            productionV4TargetV772.productionV4EnrichmentV772?.targetedCollectorHandoffDiagnosticV895,
+          postReleaseExactPoolRetryV1164
+        };
+      }
+    } else {
+      postReleaseExactPoolRetryV1164.reason =
+        releasedV1164 < 1 ? "NO_RELEASED_FLOW_V1164" :
+        !sameDirectionalV1164 ? "PRODUCTION_DIRECTIONAL_TARGET_MISMATCH_V1164" :
+        !riskOkV1164 ? "RISK_NOT_ACCEPTABLE_V1164" :
+        !exactOkV1164 ? "VERIFIED_EXACT_POOL_REQUIRED_V1164" :
+        !geckoDeferredV1164 ? "DIRECTIONAL_NOT_GECKO_429_DEFERRED_V1164" :
+        priorAttemptedV1164 ? "V888_ALREADY_ATTEMPTED_THIS_SCAN_V1164" :
+        "V1164_NOT_ELIGIBLE";
+    }
+  }
+
+  state.postReleaseExactPoolRetryV1164 = {
+    ...postReleaseExactPoolRetryV1164,
+    recordedAt:new Date().toISOString(), runtimeVersion:VERSION
+  };
 
 
   /*
@@ -145158,6 +145281,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V923 priority exact-pool FOUNDATION: active <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.targetAddress || "NONE")}</code> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.armReason || "NONE")}</b>`,
       `V1162 current-live V777 exact-pool slot: active <b>${state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.targetAddress || "NONE")}</code> · PoolId <code>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.exactPoolId || "NONE")}</code> · V777 at arm/after ${fmt(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.v777RemainingAtArm)}/${fmt(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.v777RemainingAfterConsume)} · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.reason || "NONE")}</b>`,
       `V1163 released FLOW -> V888 slot: active <b>${state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.targetAddress || "NONE")}</code> · PoolId <code>${escapeHtml(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.exactPoolId || "NONE")}</code> · released FLOW at arm ${fmt(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.releasedFlowAtArm)} · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.releasedFlowExactPoolSlotV1163?.reason || "NONE")}</b>`,
+      `V1164 post-release targeted retry: eligible <b>${state?.postReleaseExactPoolRetryV1164?.eligible === true ? "YES" : "NO"}</b> · attempted <b>${state?.postReleaseExactPoolRetryV1164?.attempted === true ? "YES" : "NO"}</b> · request <b>${state?.postReleaseExactPoolRetryV1164?.requestAttempted === true ? "YES" : "NO"}</b> · RPC <b>${state?.postReleaseExactPoolRetryV1164?.rpcOk === true ? "OK" : "NO"}</b> · target <code>${escapeHtml(state?.postReleaseExactPoolRetryV1164?.targetAddress || "NONE")}</code> · PoolId <code>${escapeHtml(state?.postReleaseExactPoolRetryV1164?.exactPoolId || "NONE")}</code> · raw/exact ${fmt(state?.postReleaseExactPoolRetryV1164?.rawRows)}/${fmt(state?.postReleaseExactPoolRetryV1164?.exactTopicRows)} · reason <b>${escapeHtml(state?.postReleaseExactPoolRetryV1164?.reason || "NONE")}</b>`,
       `V908 pre-V891 target: <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.address || "NONE")}</code> · production target <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.productionSelectedAddress || "NONE")}</code> · same <b>${state?.preV891PriorityDiagnosticV908?.sameAsProductionSelected ? "YES" : "NO"}</b> · cooldown ${state?.preV891PriorityDiagnosticV908?.activeGecko429Cooldown ? "YES" : "NO"} · exact candidates ${fmt(state?.preV891PriorityDiagnosticV908?.exactPoolCandidates)}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
