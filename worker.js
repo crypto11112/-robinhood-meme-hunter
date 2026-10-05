@@ -1,6 +1,17 @@
 /**
- * ChainVanta — V1161
+ * ChainVanta — V1162
 
+ * V1162 — current-live exact-pool V777 first-chunk ownership fix.
+ * - Keeps direct RPC/on-chain as primary and Bitquery optional.
+ * - When the SAME selected current-live production-V4 target is valid ERC20,
+ *   risk-acceptable, has a verified exact PoolId, and has no existing V179 rows
+ *   for that token+PoolId, its FIRST V888 exact-pool chunk may consume ONE
+ *   already-existing V777 production-V4 handoff request.
+ * - This fixes the V1161-proven case where V923 had no V822 FOUNDATION slot
+ *   while V777 still had one protected handoff request remaining.
+ * - No request ceilings, provider quotas, scoring, qualification, risk,
+ *   Telegram thresholds, watch capacity, or Pons routing are changed.
+ *
  * V1161 — optional Automatic-OAuth Bitquery production auth.
  * - Direct RPC/on-chain remains primary and all existing non-Bitquery evidence paths are unchanged.
  * - When BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET are configured, production Bitquery branches obtain a short-lived OAuth bearer token and reuse it from an in-isolate cache until near expiry.
@@ -9828,7 +9839,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1161"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1162"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -21810,6 +21821,192 @@ function v258TimestampReserveDecisionV880(
   return null;
 }
 
+
+/* =========================================================
+   V1162 CURRENT-LIVE EXACT-POOL V777 FIRST-CHUNK HANDOFF
+   =========================================================
+   - Repairs a proven ownership gap only: the selected current-live production
+     target may already own a verified exact PoolId while V923 has no V822
+     FOUNDATION slot, even though one EXISTING V777 handoff request remains.
+   - One request maximum, first V888 chunk only, same selected token+PoolId only.
+   - Requires valid ERC20, acceptable risk, current-live membership, verified
+     exact PoolId, and zero existing V179 rows for that exact token+PoolId.
+   - Creates no capacity and never bypasses real analysis/global/Telegram limits.
+*/
+function ensureV1162CurrentLiveExactPoolV777Slot(budget) {
+  if (!budget?.analysis) return null;
+  if (
+    !budget.analysis.currentLiveExactPoolV777SlotV1162 ||
+    typeof budget.analysis.currentLiveExactPoolV777SlotV1162 !== "object"
+  ) {
+    budget.analysis.currentLiveExactPoolV777SlotV1162 = {
+      enabled: true,
+      active: false,
+      consumed: false,
+      targetAddress: null,
+      exactPoolId: null,
+      armedAt: null,
+      consumedAt: null,
+      consumedType: null,
+      reason: null,
+      v777RemainingAtArm: 0,
+      v777RemainingAfterConsume: 0,
+      hardRequestLimitRaised: false,
+      analysisLimitRaised: false,
+      scoringChanged: false,
+      qualificationChanged: false
+    };
+  }
+  return budget.analysis.currentLiveExactPoolV777SlotV1162;
+}
+
+function armV1162CurrentLiveExactPoolV777Slot(
+  budget,
+  candidate,
+  state,
+  currentLiveVerifiedLaunchTokensV621
+) {
+  const slot = ensureV1162CurrentLiveExactPoolV777Slot(budget);
+  if (!slot || slot.consumed === true) return slot;
+
+  const token = normalize(candidate?.address || "");
+  const exactPoolId = normalize(
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.onChainPoolIdentityV153?.pairAddress ||
+    ""
+  );
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const currentLive =
+    isAddress(token) &&
+    currentLiveVerifiedLaunchTokensV621?.has(token) === true;
+  const exactPoolVerified =
+    candidate?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""));
+  const ledger = isAddress(token)
+    ? onChainDirectionalStoreV179(state)?.[token]
+    : null;
+  const exactRows = Array.isArray(ledger?.records)
+    ? ledger.records.filter(row =>
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === exactPoolId
+      )
+    : [];
+  const reserve = budget?.analysis?.productionV4ReserveV776;
+  const v777Remaining =
+    reserve?.handoffActiveV777 === true
+      ? Math.max(0, safeNumber(reserve?.handoffRemainingV777))
+      : 0;
+
+  slot.active = false;
+  slot.targetAddress = isAddress(token) ? token : null;
+  slot.exactPoolId = /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""))
+    ? exactPoolId
+    : null;
+  slot.v777RemainingAtArm = v777Remaining;
+
+  if (!isAddress(token) || candidate?.validERC20 !== true) {
+    slot.reason = "INVALID_OR_UNVERIFIED_ERC20_V1162";
+    return slot;
+  }
+  if (sameRunTerminalReject(candidate)?.terminal === true) {
+    slot.reason = "SAME_RUN_TERMINAL_V1162";
+    return slot;
+  }
+  if (!riskAcceptable) {
+    slot.reason = "RISK_NOT_ACCEPTABLE_V1162";
+    return slot;
+  }
+  if (!currentLive) {
+    slot.reason = "SELECTED_TARGET_NOT_CURRENT_LIVE_V1162";
+    return slot;
+  }
+  if (!exactPoolVerified) {
+    slot.reason = "VERIFIED_EXACT_POOL_REQUIRED_V1162";
+    return slot;
+  }
+  if (exactRows.length > 0) {
+    slot.reason = "EXACT_POOL_V179_ROWS_ALREADY_PRESENT_V1162";
+    return slot;
+  }
+  if (v777Remaining < 1) {
+    slot.reason = "NO_EXISTING_V777_HANDOFF_SLOT_AVAILABLE_V1162";
+    return slot;
+  }
+
+  slot.active = true;
+  slot.armedAt = Date.now();
+  slot.reason = "CURRENT_LIVE_EXACT_POOL_V777_FIRST_CHUNK_ARMED_V1162";
+  return slot;
+}
+
+function consumeV1162CurrentLiveExactPoolV777Slot(
+  budget,
+  tokenAddress,
+  exactPoolId,
+  type = "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+) {
+  const slot = budget?.analysis?.currentLiveExactPoolV777SlotV1162;
+  const reserve = budget?.analysis?.productionV4ReserveV776;
+  const token = normalize(tokenAddress || "");
+  const poolId = normalize(exactPoolId || "");
+  const requestType = String(type || "");
+
+  if (
+    slot?.active !== true ||
+    slot?.consumed === true ||
+    requestType !== "RPC:V888_EXACT_POOL_TARGETED_SWAPS" ||
+    token !== normalize(slot?.targetAddress || "") ||
+    poolId !== normalize(slot?.exactPoolId || "")
+  ) {
+    return null;
+  }
+
+  if (
+    reserve?.handoffActiveV777 !== true ||
+    safeNumber(reserve?.handoffRemainingV777) < 1
+  ) {
+    slot.active = false;
+    slot.reason = "V777_HANDOFF_NO_LONGER_AVAILABLE_V1162";
+    return null;
+  }
+
+  if (!budgetAvailable(budget, "analysis", 1)) {
+    slot.reason = "REAL_BUDGET_BOUNDARY_BLOCKED_V1162";
+    return false;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+
+  reserve.handoffRemainingV777 = Math.max(
+    0,
+    safeNumber(reserve.handoffRemainingV777) - 1
+  );
+  reserve.consumedProtectedRequests =
+    safeNumber(reserve.consumedProtectedRequests) + 1;
+  reserve.lastHandoffConsumedTypeV777 = requestType;
+  reserve.lastHandoffConsumedAtV777 = Date.now();
+
+  if (reserve.handoffRemainingV777 <= 0) {
+    reserve.handoffActiveV777 = false;
+    reserve.releasedAt = Date.now();
+    reserve.releaseReason =
+      "V1162_CURRENT_LIVE_EXACT_POOL_CONSUMED_FINAL_V777_SLOT";
+  }
+
+  slot.active = false;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = requestType;
+  slot.v777RemainingAfterConsume = Math.max(
+    0,
+    safeNumber(reserve?.handoffRemainingV777)
+  );
+  slot.reason = "EXISTING_V777_HANDOFF_SLOT_CONSUMED_V1162";
+  return true;
+}
 
 /* =========================================================
    V923 PRIORITY EXACT-POOL FOUNDATION REALLOCATION
@@ -109424,8 +109621,19 @@ async function enrichCandidateWithProductionV4V772(
             )
           : null;
 
+      const currentLiveV777FundedV1162 =
+        indexV899 === 0 && priorityFoundationFundedV923 !== true
+          ? consumeV1162CurrentLiveExactPoolV777Slot(
+              budget,
+              token,
+              exactPoolIdV888,
+              "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+            )
+          : null;
+
       const exactPoolRequestFundedV923 =
         priorityFoundationFundedV923 === true ||
+        currentLiveV777FundedV1162 === true ||
         consumeBudget(
           budget,
           "analysis",
@@ -117947,6 +118155,16 @@ for (
       productionV4ReserveV776.releaseReason = "HANDED_TO_SELECTED_V772_TARGET_V777";
     }
 
+    /* V1162: after V777 ownership is established, arm one first-chunk-only
+     * permission for this SAME selected current-live exact-pool target. */
+    const currentLiveExactPoolV777SlotV1162 =
+      armV1162CurrentLiveExactPoolV777Slot(
+        budget,
+        productionV4TargetV772,
+        state,
+        currentLiveVerifiedLaunchTokensV621
+      );
+
     productionV4EnrichmentV772 =
       await enrichCandidateWithProductionV4V772(
         env,
@@ -118507,6 +118725,13 @@ for (
         budget?.analysis?.priorityExactPoolFoundationV923?.active === true,
       consumed:
         budget?.analysis?.priorityExactPoolFoundationV923?.consumed === true
+    },
+    currentLiveExactPoolV777SlotV1162: {
+      ...(budget?.analysis?.currentLiveExactPoolV777SlotV1162 || {}),
+      active:
+        budget?.analysis?.currentLiveExactPoolV777SlotV1162?.active === true,
+      consumed:
+        budget?.analysis?.currentLiveExactPoolV777SlotV1162?.consumed === true
     }
   };
 
@@ -144731,6 +144956,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V924 keyed continuation: source <b>${escapeHtml(collector895.progressSourceV924 || "NONE")}</b> · retained targets ${fmt(collector895.retainedProgressTargetsV924)} · key <code>${escapeHtml(collector895.progressKeyV924 || "NONE")}</code>`,
       `V901/V908 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
       `V923 priority exact-pool FOUNDATION: active <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.targetAddress || "NONE")}</code> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.armReason || "NONE")}</b>`,
+      `V1162 current-live V777 exact-pool slot: active <b>${state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.targetAddress || "NONE")}</code> · PoolId <code>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.exactPoolId || "NONE")}</code> · V777 at arm/after ${fmt(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.v777RemainingAtArm)}/${fmt(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.v777RemainingAfterConsume)} · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.currentLiveExactPoolV777SlotV1162?.reason || "NONE")}</b>`,
       `V908 pre-V891 target: <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.address || "NONE")}</code> · production target <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.productionSelectedAddress || "NONE")}</code> · same <b>${state?.preV891PriorityDiagnosticV908?.sameAsProductionSelected ? "YES" : "NO"}</b> · cooldown ${state?.preV891PriorityDiagnosticV908?.activeGecko429Cooldown ? "YES" : "NO"} · exact candidates ${fmt(state?.preV891PriorityDiagnosticV908?.exactPoolCandidates)}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
