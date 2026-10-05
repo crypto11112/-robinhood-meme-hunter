@@ -1,5 +1,5 @@
 /*
- * V1168 — AUTHORITATIVE PER-TOKEN TELEGRAM QUALIFICATION TRACE + WEB LINK
+ * V1169 — AUTHORITATIVE PER-TOKEN TELEGRAM QUALIFICATION TRACE + WEB LINK
  * - Builds directly from V1166 and preserves the V1166 current call-ready candidate priority fix.
  * - Live AI evidence proved V1164 could recover a real exact-pool swap through V888, but the
  *   verified row was not entering V179/V212 and therefore could not feed authoritative momentum.
@@ -83566,6 +83566,116 @@ function telegramWhyPlainTextV1168(d){
   return ["ChainVanta Telegram Qualification Why — V1168",`Token: ${d.symbol||"UNKNOWN"} ${d.address}`,`Source: ${d.source||"NONE"}`,`Recorded: ${d.recordedAt?new Date(d.recordedAt).toISOString():"UNVERIFIED"}`,"",`Opportunity: ${safeNumber(s.opportunity)} (min ${MIN_ALERT_SCORE})`,`Confidence: ${safeNumber(s.confidence)} (min ${MIN_CONFIDENCE_ALERT})`,`Momentum: ${s.momentum===null||s.momentum===undefined?"UNVERIFIED":safeNumber(s.momentum)}`,`Signals: ${safeNumber(s.signals)} (min 2)`,`Risk: ${g.riskVerified?`${safeNumber(g.riskScore)} VERIFIED`:"UNVERIFIED"} (max ${MAX_ALERT_RISK})`,`Market verified: ${g.marketVerified?"YES":"NO"}`,`Liquidity USD: ${g.liquidityUsd===null||g.liquidityUsd===undefined?"UNVERIFIED":safeNumber(g.liquidityUsd)}`,`Holder evidence: ${g.holderEvidenceVerified?"VERIFIED":"UNVERIFIED"}`,`Launch age: ${g.launchAgeVerified===null?"NOT RETAINED":g.launchAgeVerified?"VERIFIED":"UNVERIFIED"}`,`Verified flow: ${g.verifiedFlow?"YES":"NO"} (${safeNumber(g.verifiedFlowRecords)} records)`,`Authoritative PoolId: ${p.poolId||"UNVERIFIED"}`,`Pool verified: ${p.verified?"YES":"NO"}`,`Flow pool aligned: ${p.flowPoolAligned===null?"NOT PROVEN":p.flowPoolAligned?"YES":"NO"}`,"",`Telegram qualified: ${t.qualified?"YES":"NO"}`,`First blocker: ${t.firstBlocker||"NONE"}`,`All blockers: ${(Array.isArray(t.reasons)&&t.reasons.length)?t.reasons.join(" | "):"NONE"}`,"","Read-only. Autonomous retained qualification state only. Zero provider requests and zero scoring/threshold changes."].join("\n");
 }
 
+
+
+/* =========================================================
+   V1169 AUTHORITATIVE TELEGRAM SENDER DRY-RUN TRACE
+   Captured at the real pre-send boundary. READ ONLY diagnostics:
+   zero provider requests, zero Telegram sends, no scoring/threshold change.
+   ========================================================= */
+const TELEGRAM_SEND_WHY_TRACE_MAX_V1169 = 25;
+
+function captureTelegramSendWhyV1169(state, candidates, budget, env) {
+  if (!state || !Array.isArray(candidates)) return null;
+  const priorRows = Array.isArray(state?.telegramSendWhyV1169?.records)
+    ? state.telegramSendWhyV1169.records : [];
+  const byAddress = new Map(
+    priorRows.filter(row => isAddress(normalize(row?.address)))
+      .map(row => [normalize(row.address), row])
+  );
+  const recordedAt = Date.now();
+  const notificationRemaining = Math.max(
+    0,
+    safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used)
+  );
+  const destinationConfigured = Boolean(
+    String(env?.TELEGRAM_BOT_TOKEN || '').trim() &&
+    String(env?.TELEGRAM_PREMIUM_CHAT_ID || env?.TELEGRAM_CHAT_ID || '').trim()
+  );
+
+  for (const candidate of candidates) {
+    const address = normalize(candidate?.address);
+    if (!isAddress(address)) continue;
+    const qualified = qualifiesTelegram(candidate);
+    const previous = state?.alerts?.[address];
+    const previousTimestamp = typeof previous === 'object'
+      ? safeNumber(previous?.timestamp) : safeNumber(previous);
+    const previousScore = typeof previous === 'object'
+      ? safeNumber(previous?.score) : 0;
+    const cooldownExpired = !previousTimestamp || Date.now() - previousTimestamp >= ALERT_COOLDOWN;
+    const scoreImproved = safeNumber(candidate?.opportunity?.score) - previousScore >= 10;
+    const newAccumulation = candidate?.whaleFlow?.flow === 'NET_ACCUMULATION' && previous?.whaleFlow !== 'NET_ACCUMULATION';
+    const duplicateCooldownClear = cooldownExpired || scoreImproved || newAccumulation;
+    const notificationBudgetReady = budgetAvailable(budget, 'notification');
+    let rendered = '';
+    let renderError = null;
+    try { rendered = String(telegramMessage(candidate) || ''); }
+    catch (error) { renderError = errorString(error); }
+    const messageLength = rendered.length;
+    const textRenderValid = !renderError && messageLength > 0 && messageLength <= 4096;
+    const hasImage = Boolean(candidate?.market?.imageUrl);
+    const photoCaptionWithinLimit = !hasImage || messageLength <= 1024;
+    const fallbackCapacityReady = !hasImage || photoCaptionWithinLimit || notificationRemaining >= 2;
+    const wouldAttemptSend = qualified && duplicateCooldownClear && notificationBudgetReady;
+    const wouldSend = wouldAttemptSend && destinationConfigured && textRenderValid && fallbackCapacityReady;
+    let firstBlocker = null;
+    if (!qualified) firstBlocker = 'NOT_TELEGRAM_QUALIFIED_V1169';
+    else if (!duplicateCooldownClear) firstBlocker = 'ALERT_COOLDOWN_V1169';
+    else if (!notificationBudgetReady) firstBlocker = 'NOTIFICATION_BUDGET_EXHAUSTED_V1169';
+    else if (!destinationConfigured) firstBlocker = 'TELEGRAM_DESTINATION_NOT_CONFIGURED_V1169';
+    else if (renderError) firstBlocker = 'TELEGRAM_MESSAGE_RENDER_EXCEPTION_V1169';
+    else if (!textRenderValid) firstBlocker = 'TELEGRAM_TEXT_RENDER_INVALID_OR_TOO_LONG_V1169';
+    else if (!fallbackCapacityReady) firstBlocker = 'PHOTO_FALLBACK_NOTIFICATION_HEADROOM_INSUFFICIENT_V1169';
+
+    byAddress.set(address, {
+      version:'V1169', recordedAt, runtimeVersion:VERSION, address,
+      symbol:candidate?.symbol || null,
+      qualified,
+      opportunityScore:safeNumber(candidate?.opportunity?.score),
+      confidenceScore:safeNumber(candidate?.confidence?.score),
+      riskScore:candidate?.risk?.verified===true?safeNumber(candidate?.risk?.score):null,
+      duplicateCooldownClear, cooldownExpired, scoreImproved, newAccumulation,
+      priorAlertPresent:Boolean(previousTimestamp), priorAlertTimestamp:previousTimestamp || null,
+      priorAlertScore:previousTimestamp ? previousScore : null,
+      alertCooldownMs:ALERT_COOLDOWN,
+      notificationBudgetReady, notificationRemaining,
+      destinationConfigured,
+      destinationMode:String(env?.TELEGRAM_PREMIUM_CHAT_ID || '').trim() ? 'PREMIUM_CHAT' : (String(env?.TELEGRAM_CHAT_ID || '').trim() ? 'LEGACY_CHAT' : 'NONE'),
+      hasImage, messageLength, textRenderValid, photoCaptionWithinLimit, fallbackCapacityReady,
+      renderError,
+      wouldAttemptSend, wouldSend, firstBlocker,
+      productionSendFunction:'sendTelegram',
+      dryRunOnly:true, telegramRequestsAdded:0, providerRequestsAdded:0,
+      scoringChanged:false, qualificationChanged:false, thresholdsChanged:false
+    });
+  }
+  const records=[...byAddress.values()]
+    .sort((a,b)=>safeNumber(b?.recordedAt)-safeNumber(a?.recordedAt))
+    .slice(0,TELEGRAM_SEND_WHY_TRACE_MAX_V1169);
+  state.telegramSendWhyV1169={version:'V1169',recordedAt,records,dryRunOnly:true,telegramRequestsAdded:0,providerRequestsAdded:0};
+  return state.telegramSendWhyV1169;
+}
+
+function telegramSendWhySnapshotV1169(state, rawAddress) {
+  const address=normalize(rawAddress);
+  if(!isAddress(address)) return {ok:false,version:'V1169',status:'INVALID_TOKEN_ADDRESS_V1169',address:null};
+  const row=Array.isArray(state?.telegramSendWhyV1169?.records)
+    ? state.telegramSendWhyV1169.records.find(r=>normalize(r?.address)===address) : null;
+  if(!row) return {ok:false,version:'V1169',status:'TOKEN_NOT_IN_RETAINED_SENDER_TRACE_V1169',address,note:'Complete a live autonomous scan containing this token, then retry.'};
+  return {ok:true,version:'V1169',runtimeVersion:VERSION,status:row.wouldSend===true?'WOULD_SEND_V1169':row.wouldAttemptSend===true?'WOULD_ATTEMPT_BUT_DELIVERY_PREREQ_BLOCKED_V1169':'WOULD_NOT_ATTEMPT_SEND_V1169',...row,readOnly:true};
+}
+
+function telegramSendWhyMessageV1169(state, rawAddress) {
+  const d=telegramSendWhySnapshotV1169(state, rawAddress);
+  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1169</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
+  return ['📤 <b>Telegram Sender Dry Run — V1169</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Recorded: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 Duplicate/cooldown clear: <b>${d.duplicateCooldownClear?'YES':'NO'}</b> · expired ${d.cooldownExpired?'YES':'NO'} · +10 score ${d.scoreImproved?'YES':'NO'} · new accumulation ${d.newAccumulation?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'}`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send: <b>${d.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND: <b>${d.wouldSend?'YES':'NO'}</b>`,`🚧 First blocker: <b>${escapeHtml(d.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>Captured at the real pre-send boundary using production cooldown, budget, route and renderer checks. Dry-run only: no Telegram API call.</i>'].join('\n');
+}
+
+function telegramSendWhyPlainTextV1169(d) {
+  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1169\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
+  return ['ChainVanta Telegram Sender Dry Run — V1169',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Recorded: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`Duplicate/cooldown clear: ${d.duplicateCooldownClear?'YES':'NO'}`,`Cooldown expired: ${d.cooldownExpired?'YES':'NO'}`,`Score improved >=10: ${d.scoreImproved?'YES':'NO'}`,`New accumulation: ${d.newAccumulation?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send: ${d.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND: ${d.wouldSend?'YES':'NO'}`,`First blocker: ${d.firstBlocker||'NONE'}`,'','Read-only dry run. No Telegram API call and zero provider requests.'].join('\n');
+}
+
 function buildTelegramQualificationDiagnostics(
   candidates
 ) {
@@ -123884,6 +123994,11 @@ for (
   /* =======================================================
      TELEGRAM
      ======================================================= */
+
+  /* V1169: snapshot the exact production sender decision surface before any
+   * Telegram API call. This does not send, consume notification budget, or
+   * alter qualification; it only mirrors the existing checks below. */
+  captureTelegramSendWhyV1169(state, candidates, budget, env);
 
   const telegramResults =
     [];
@@ -176994,6 +177109,7 @@ function telegramHelpV271() {
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
     "<code>/telegramwhy 0xADDRESS</code> — exact autonomous Telegram blocker + authoritative pool (read-only; web link included)",
+    "<code>/sendwhy 0xADDRESS</code> — production sender dry-run: cooldown, budget, route, render + WOULD_SEND (read-only; web link included)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
@@ -179535,6 +179651,15 @@ async function telegramCommandReplyV271(
     if (diagnosticV273) {
       const whyV1168 = telegramWhySnapshotV1168(state, parsed.argument);
       diagnosticV273.telegramWhyV1168 = {scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,address:whyV1168?.address||null,status:whyV1168?.status||null,firstBlocker:whyV1168?.telegram?.firstBlocker||null,qualificationChanged:false};
+    }
+  } else if (
+    parsed.command === "/sendwhy" ||
+    parsed.command === "/wouldsend"
+  ) {
+    reply = telegramSendWhyMessageV1169(state, parsed.argument);
+    if (diagnosticV273) {
+      const sendWhyV1169 = telegramSendWhySnapshotV1169(state, parsed.argument);
+      diagnosticV273.telegramSendWhyV1169 = {scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,telegramRequests:0,address:sendWhyV1169?.address||null,status:sendWhyV1169?.status||null,wouldSend:sendWhyV1169?.wouldSend===true,firstBlocker:sendWhyV1169?.firstBlocker||null};
     }
   } else if (
     parsed.command === "/telegramaudit" ||
@@ -197931,6 +198056,13 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     const resultV1168 = telegramWhySnapshotV1168(loadedV1168?.state || newState(), url.searchParams.get("token") || "");
     if (String(url.searchParams.get("format") || "").toLowerCase() === "json") return jsonResponse(resultV1168, resultV1168?.ok === false ? 404 : 200);
     return new Response(telegramWhyPlainTextV1168(resultV1168), {status:resultV1168?.ok === false ? 404 : 200,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","access-control-allow-origin":"*"}});
+  }
+
+  if (path === "/sendwhy") {
+    const loadedV1169 = await readState(env);
+    const resultV1169 = telegramSendWhySnapshotV1169(loadedV1169?.state || newState(), url.searchParams.get("token") || "");
+    if (String(url.searchParams.get("format") || "").toLowerCase() === "json") return jsonResponse(resultV1169, resultV1169?.ok === false ? 404 : 200);
+    return new Response(telegramSendWhyPlainTextV1169(resultV1169), {status:resultV1169?.ok === false ? 404 : 200,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","access-control-allow-origin":"*"}});
   }
 
   if (path === "/scheduler-status-v673") {
