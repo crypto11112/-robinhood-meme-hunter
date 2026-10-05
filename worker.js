@@ -118370,13 +118370,16 @@ for (
     /* V1163: if directional FLOW was already released unused, earmark that
      * same existing slot for this SAME pre-V891 exact-pool target's first V888
      * chunk. This is ownership transfer only; no ceiling is increased. */
+    /* V1165: this first production-V4 pass occurs before V822 declares
+     * evidenceCompletionFlowReleaseV822. Do not read that later const here
+     * (TDZ); V1164 performs the real released-FLOW re-arm after V822. */
     const releasedFlowExactPoolSlotV1163 =
       armV1163ReleasedFlowExactPoolSlot(
         budget,
         productionV4TargetV772,
         state,
         preV891PriorityV908,
-        evidenceCompletionFlowReleaseV822
+        null
       );
 
     productionV4EnrichmentV772 =
