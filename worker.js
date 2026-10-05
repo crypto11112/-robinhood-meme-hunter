@@ -109470,6 +109470,10 @@ async function enrichCandidateWithProductionV4V772(
       decodedExactUsdRows: 0,
       v179LedgerRowsForTokenPool: 0,
       targetedRowsFedToV179CollectorInThisPath: false,
+      v1167RecentWindowRows: 0,
+      v1167InsertedRows: 0,
+      v1167DeduplicatedRows: 0,
+      v1167TimestampPolicy: "ONLY_RPC_ROWS_INSIDE_EXISTING_V772_RECENT_600_BLOCK_WINDOW_USE_LIVE_NOW",
       classification: "NOT_EVALUATED_V895"
     },
     externalRequestsUsed: 0,
@@ -110077,6 +110081,52 @@ async function enrichCandidateWithProductionV4V772(
         decodedCandidateMatchedV895;
       d895.decodedExactUsdRows = decodedExactUsdV895;
 
+      /* =========================================================
+         V1167 VERIFIED V888 -> V179 RECENT-WINDOW HANDOFF
+         =========================================================
+         V1164 proved the targeted collector can return a genuine, decoded,
+         exact-USD Swap for the same production/directional target, but V895
+         showed those rows were diagnostic-only and never reached V179/V212.
+
+         Reuse the existing V254 persistence writer with ZERO new requests,
+         but only for exact-pool rows whose verified block number is inside
+         the already-established V772 recent 600-block window. That keeps the
+         existing LIVE_NOW timestamp semantics honest and prevents an older
+         12k backfill row from being misrepresented as fresh momentum.
+      */
+      const recentExactPoolRowsV1167 =
+        exactPoolBackfillRowsV888.filter(rowV1167 => {
+          let blockV1167 = null;
+          try {
+            blockV1167 = Number(BigInt(String(rowV1167?.blockNumber || "0x0")));
+          } catch {
+            blockV1167 = null;
+          }
+          return Number.isFinite(blockV1167) &&
+            blockV1167 >= from &&
+            blockV1167 <= to;
+        });
+
+      d895.v1167RecentWindowRows = recentExactPoolRowsV1167.length;
+
+      let persistedV1167 = null;
+      if (recentExactPoolRowsV1167.length > 0 && decodedExactUsdV895 > 0) {
+        persistedV1167 = persistVerifiedUsdTradesV254(
+          state,
+          token,
+          recentExactPoolRowsV1167,
+          bestVerifiedWethUsdGReferenceV195(state),
+          "LIVE_NOW",
+          exactIdentityV888
+        );
+
+        d895.v1167InsertedRows = safeNumber(persistedV1167?.inserted);
+        d895.v1167DeduplicatedRows = safeNumber(persistedV1167?.deduplicated);
+        d895.targetedRowsFedToV179CollectorInThisPath =
+          safeNumber(persistedV1167?.inserted) > 0 ||
+          safeNumber(persistedV1167?.deduplicated) > 0;
+      }
+
       const ledgerAfterDecodeV895 =
         onChainDirectionalStoreV179(state)?.[token];
       d895.v179LedgerRowsForTokenPool =
@@ -110143,8 +110193,14 @@ async function enrichCandidateWithProductionV4V772(
           : decodedCandidateMatchedV895 === 0
             ? "RPC_RETURNED_EXACT_POOL_ROWS_BUT_DECODER_OR_IDENTITY_REJECTED_V895"
             : d895.v179LedgerRowsForTokenPool === 0
-              ? "REAL_EXACT_POOL_SWAPS_DECODED_BUT_NOT_PRESENT_IN_V179_V895"
-              : "EXACT_POOL_SWAPS_ALREADY_PRESENT_IN_V179_V895";
+              ? (
+                  d895.v1167RecentWindowRows > 0
+                    ? "V1167_RECENT_EXACT_POOL_ROWS_NOT_INSERTED_IN_V179"
+                    : "REAL_EXACT_POOL_SWAPS_DECODED_OUTSIDE_RECENT_V179_WINDOW_V1167"
+                )
+              : d895.v1167InsertedRows > 0
+                ? "EXACT_POOL_SWAPS_PERSISTED_TO_V179_V1167"
+                : "EXACT_POOL_SWAPS_ALREADY_PRESENT_IN_V179_V895";
     }
   }
 
@@ -145395,6 +145451,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
       `V179 rows for token+PoolId: <b>${fmt(collector895.v179LedgerRowsForTokenPool)}</b>`,
       `Targeted rows fed into V179 by V888 path: <b>${collector895.targetedRowsFedToV179CollectorInThisPath ? "YES" : "NO"}</b>`,
+      `V1167 recent-window V179 handoff: recent rows <b>${fmt(collector895.v1167RecentWindowRows)}</b> · inserted <b>${fmt(collector895.v1167InsertedRows)}</b> · deduplicated <b>${fmt(collector895.v1167DeduplicatedRows)}</b> · policy <b>${escapeHtml(collector895.v1167TimestampPolicy || "NONE")}</b>`,
       `Diagnosis: <b>${escapeHtml(collector895.classification || "UNVERIFIED")}</b>`
     );
     if (collector895.rpcError) {
