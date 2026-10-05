@@ -1,3 +1,16 @@
+/*
+ * V1166 — CURRENT CALL-READY CANDIDATE PRIORITY OVER BACKGROUND CONTINUATION
+ * - Builds directly from V1165 after live evidence showed Index was current, risk-acceptable,
+ *   market-ready, exact-pool verified and already Telegram-qualified, but V927 selected MERT
+ *   background keyed continuation instead.
+ * - V925 current keyed continuation remains highest priority.
+ * - Existing V929 Gecko-429 exact-pool arbitration remains unchanged.
+ * - When a distinct CURRENT normal production candidate is valid ERC20, risk acceptable,
+ *   market verified, exact PoolId verified, and already Telegram-qualified, it outranks V926/V927
+ *   background-only continuation. Background keyed progress remains persisted for later resumption.
+ * - Still one production V4 target and no increase to the 48-request cap, V777 handoff, provider
+ *   quotas, scoring, risk, qualification thresholds or Telegram production state.
+ */
 /**
  * ChainVanta — V1164
 
@@ -117935,9 +117948,64 @@ for (
       preV891AddressRoutingV929 !== backgroundAddressRoutingV929
     );
 
+  /*
+   * V1166: a background keyed continuation must never displace a distinct
+   * current candidate that is already call-ready under the EXISTING production
+   * rules. This is intentionally stricter than generic V772 eligibility:
+   * market proof, exact PoolId, acceptable risk and existing Telegram
+   * qualification are all required. No threshold is weakened and no extra
+   * request is created; this only arbitrates ownership of the existing lane.
+   */
+  const currentNormalAddressV1166 =
+    normalize(productionV4NormalTargetV813?.address || "");
+
+  const currentNormalIdentityV1166 =
+    productionV4NormalTargetV813?.onChainPoolIdentityV153 || null;
+
+  const currentNormalPoolIdV1166 =
+    normalize(
+      currentNormalIdentityV1166?.poolId ||
+      currentNormalIdentityV1166?.pairAddress ||
+      ""
+    );
+
+  const currentNormalMarketSideV1166 =
+    String(productionV4NormalTargetV813?.market?.targetTokenSide || "").toUpperCase();
+
+  const currentNormalRiskOkV1166 =
+    productionV4NormalTargetV813?.risk?.severeOverride !== true &&
+    String(productionV4NormalTargetV813?.risk?.label || "").toUpperCase() !== "HIGH";
+
+  const currentNormalMarketReadyV1166 =
+    productionV4NormalTargetV813?.market?.verified === true &&
+    Boolean(productionV4NormalTargetV813?.market?.pairAddress) &&
+    (currentNormalMarketSideV1166 === "BASE" || currentNormalMarketSideV1166 === "QUOTE");
+
+  const currentNormalExactPoolReadyV1166 =
+    currentNormalIdentityV1166?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(currentNormalPoolIdV1166 || ""));
+
+  const currentNormalTelegramQualifiedV1166 =
+    Boolean(productionV4NormalTargetV813 && qualifiesTelegram(productionV4NormalTargetV813));
+
+  const currentNormalCallReadyV1166 =
+    Boolean(
+      backgroundContinuationV927 &&
+      productionV4NormalTargetV813 &&
+      productionV4NormalTargetV813?.validERC20 === true &&
+      isAddress(currentNormalAddressV1166) &&
+      currentNormalRiskOkV1166 &&
+      currentNormalMarketReadyV1166 &&
+      currentNormalExactPoolReadyV1166 &&
+      currentNormalTelegramQualifiedV1166 &&
+      sameRunTerminalReject(productionV4NormalTargetV813)?.terminal !== true &&
+      currentNormalAddressV1166 !== backgroundAddressRoutingV929
+    );
+
   const productionV4TargetV772 =
     continuationPriorityV925?.candidate ||
     (preV891OverridesBackgroundV929 ? preV891TargetRoutingV929 : null) ||
+    (currentNormalCallReadyV1166 ? productionV4NormalTargetV813 : null) ||
     backgroundContinuationV927?.candidate ||
     defaultProductionV4TargetV925;
 
@@ -117957,9 +118025,11 @@ for (
       ? "INCOMPLETE_KEYED_EXACT_POOL_CONTINUATION_PRIORITY_V925"
       : preV891OverridesBackgroundV929
         ? "PRE_V891_EXACT_POOL_PRIORITY_OVER_BACKGROUND_V929"
-        : backgroundContinuationV927
-          ? "DETERMINISTIC_BACKGROUND_KEYED_CONTINUATION_QUEUE_V927"
-          : defaultProductionV4SelectionModeV925;
+        : currentNormalCallReadyV1166
+          ? "CURRENT_CALL_READY_OVER_BACKGROUND_V1166"
+          : backgroundContinuationV927
+            ? "DETERMINISTIC_BACKGROUND_KEYED_CONTINUATION_QUEUE_V927"
+            : defaultProductionV4SelectionModeV925;
 
   if (productionV4CollisionV818) {
     state.productionV4FairnessV821 = {
@@ -118078,6 +118148,41 @@ for (
           ? "CURRENT_PRE_V891_EXACT_POOL_TARGET_OUTRANKS_BACKGROUND_V929"
           : "NO_PRE_V891_BACKGROUND_COLLISION_V929",
         externalRequestsAdded: 0
+      },
+      currentCallReadyBackgroundArbitrationV1166: {
+        currentTarget: isAddress(currentNormalAddressV1166) ? currentNormalAddressV1166 : null,
+        poolId: /^0x[a-f0-9]{64}$/.test(String(currentNormalPoolIdV1166 || ""))
+          ? currentNormalPoolIdV1166
+          : null,
+        backgroundTarget: isAddress(backgroundAddressRoutingV929)
+          ? backgroundAddressRoutingV929
+          : null,
+        eligible: currentNormalCallReadyV1166,
+        marketReady: currentNormalMarketReadyV1166,
+        exactPoolReady: currentNormalExactPoolReadyV1166,
+        riskOk: currentNormalRiskOkV1166,
+        telegramQualified: currentNormalTelegramQualifiedV1166,
+        backgroundDisplaced: currentNormalCallReadyV1166,
+        reason: currentNormalCallReadyV1166
+          ? "CURRENT_CALL_READY_TARGET_OUTRANKS_BACKGROUND_V1166"
+          : (!backgroundContinuationV927
+              ? "NO_BACKGROUND_CONTINUATION_V1166"
+              : !productionV4NormalTargetV813
+                ? "NO_CURRENT_NORMAL_TARGET_V1166"
+                : currentNormalAddressV1166 === backgroundAddressRoutingV929
+                  ? "CURRENT_EQUALS_BACKGROUND_TARGET_V1166"
+                  : !currentNormalRiskOkV1166
+                    ? "CURRENT_RISK_NOT_ACCEPTABLE_V1166"
+                    : !currentNormalMarketReadyV1166
+                      ? "CURRENT_MARKET_NOT_READY_V1166"
+                      : !currentNormalExactPoolReadyV1166
+                        ? "CURRENT_EXACT_POOL_NOT_READY_V1166"
+                        : !currentNormalTelegramQualifiedV1166
+                          ? "CURRENT_NOT_TELEGRAM_QUALIFIED_V1166"
+                          : "CURRENT_NOT_ELIGIBLE_V1166"),
+        externalRequestsAdded: 0,
+        requestCeilingChanged: false,
+        thresholdsChanged: false
       },
       continuationPriorityV925: continuationPriorityV925
         ? {
@@ -145511,6 +145616,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V925 keyed continuation priority: <b>${routingV817?.continuationPriorityV925?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.continuationPriorityV925?.key || "NONE")}</code> · progress ${fmt(routingV817?.continuationPriorityV925?.completedChunks)}/${fmt(routingV817?.continuationPriorityV925?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.continuationPriorityV925?.reason || "NONE")}`,
       `V926 background keyed continuation: <b>${routingV817?.backgroundContinuationV926?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.backgroundContinuationV926?.key || "NONE")}</code> · progress ${fmt(routingV817?.backgroundContinuationV926?.completedChunks)}/${fmt(routingV817?.backgroundContinuationV926?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.backgroundContinuationV926?.reason || "NONE")}`,
       `V927 continuation queue: <b>${routingV817?.backgroundContinuationV927?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.backgroundContinuationV927?.key || "NONE")}</code> · progress ${fmt(routingV817?.backgroundContinuationV927?.completedChunks)}/${fmt(routingV817?.backgroundContinuationV927?.totalPlannedChunks)} · queue ${fmt(routingV817?.backgroundContinuationV927?.queueDepth)} · audit-safety ${fmt(routingV817?.backgroundContinuationV927?.safetyRecoveredFromAudit)} · source ${escapeHtml(routingV817?.backgroundContinuationV927?.safetySource || "NONE")} · reason ${escapeHtml(routingV817?.backgroundContinuationV927?.reason || "NONE")}`,
+      `V1166 current call-ready > background: <b>${routingV817?.currentCallReadyBackgroundArbitrationV1166?.eligible === true ? "ACTIVE" : "NO"}</b> · current <code>${escapeHtml(routingV817?.currentCallReadyBackgroundArbitrationV1166?.currentTarget || "NONE")}</code> · background <code>${escapeHtml(routingV817?.currentCallReadyBackgroundArbitrationV1166?.backgroundTarget || "NONE")}</code> · market/exact/risk/qualified ${routingV817?.currentCallReadyBackgroundArbitrationV1166?.marketReady ? "YES" : "NO"}/${routingV817?.currentCallReadyBackgroundArbitrationV1166?.exactPoolReady ? "YES" : "NO"}/${routingV817?.currentCallReadyBackgroundArbitrationV1166?.riskOk ? "YES" : "NO"}/${routingV817?.currentCallReadyBackgroundArbitrationV1166?.telegramQualified ? "YES" : "NO"} · reason ${escapeHtml(routingV817?.currentCallReadyBackgroundArbitrationV1166?.reason || "NONE")}`,
       `V928 high-progress handoff: <b>${state?.highProgressContinuationHandoffV928?.consumed === true ? "CONSUMED" : (state?.highProgressContinuationHandoffV928?.active === true ? "ARMED" : "NONE")}</b> · progress ${fmt(state?.highProgressContinuationHandoffV928?.completedChunks)}/${fmt(state?.highProgressContinuationHandoffV928?.totalPlannedChunks)} · key <code>${escapeHtml((state?.highProgressContinuationHandoffV928?.tokenAddress && state?.highProgressContinuationHandoffV928?.poolId) ? `${state.highProgressContinuationHandoffV928.tokenAddress}:${state.highProgressContinuationHandoffV928.poolId}` : "NONE")}</code> · reason ${escapeHtml(state?.highProgressContinuationHandoffV928?.reason || "NONE")} · V777 remaining ${fmt(state?.highProgressContinuationHandoffV928?.v777HandoffRemainingAfterProduction)} · cap ${fmt(state?.highProgressContinuationHandoffV928?.hardRequestCap)}`,
       `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
       `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
