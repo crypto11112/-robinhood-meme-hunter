@@ -1,4 +1,13 @@
 /**
+ * ChainVanta — V1161
+
+ * V1161 — optional Automatic-OAuth Bitquery production auth.
+ * - Direct RPC/on-chain remains primary and all existing non-Bitquery evidence paths are unchanged.
+ * - When BITQUERY_CLIENT_ID + BITQUERY_CLIENT_SECRET are configured, production Bitquery branches obtain a short-lived OAuth bearer token and reuse it from an in-isolate cache until near expiry.
+ * - Manual BITQUERY_ACCESS_TOKEN remains fallback only when Automatic credentials are absent.
+ * - If OAuth/auth fails, Bitquery fails open: ChainVanta continues through existing RPC/on-chain routes; no qualification/scoring threshold is relaxed and no Telegram call depends on Bitquery.
+ * - The OAuth exchange is bounded and only occurs when the optional Bitquery path is actually reached and no valid cached bearer exists. Existing scanner/request ceilings are not raised.
+ *
  * ChainVanta — V1160
 
  * V1160 — native Pons raw-curve continuity without Bitquery/USD guessing.
@@ -9819,7 +9828,7 @@
  *   budget or alert-threshold behaviour is changed.
  */
 const VERSION = "V1051";
-const CHAINVANTA_DISPLAY_VERSION = "V1160"; // display-only; legacy VERSION remains untouched for scanner compatibility
+const CHAINVANTA_DISPLAY_VERSION = "V1161"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
    V1148 — V958 FALLBACK BUDGET DECISION TRACE
@@ -32767,6 +32776,136 @@ function currencyOrderingVerifiedV622(
   );
 }
 
+/* ============================================================
+   V1161 — OPTIONAL BITQUERY AUTOMATIC-OAUTH BEARER RESOLVER
+   ============================================================
+   Direct RPC/on-chain remains authoritative. This helper only supplies
+   credentials to already-existing optional Bitquery branches. A failed
+   OAuth exchange never blocks the scanner or weakens qualification.
+*/
+let bitqueryOAuthBearerCacheV1161 = {
+  clientId: null,
+  token: null,
+  expiresAt: 0
+};
+
+async function resolveBitqueryBearerV1161(env) {
+  const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
+  const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
+  const manualToken = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
+  const nowMs = Date.now();
+
+  if (clientId && clientSecret) {
+    if (
+      bitqueryOAuthBearerCacheV1161.clientId === clientId &&
+      String(bitqueryOAuthBearerCacheV1161.token || "").trim() &&
+      safeNumber(bitqueryOAuthBearerCacheV1161.expiresAt) > nowMs + 60_000
+    ) {
+      return {
+        token: String(bitqueryOAuthBearerCacheV1161.token),
+        authMode: "AUTOMATIC_OAUTH_CACHE_V1161",
+        oauthAttempted: false,
+        oauthHttpStatus: null,
+        externalRequestsUsed: 0,
+        status: "BITQUERY_OAUTH_CACHE_HIT_V1161"
+      };
+    }
+
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId,
+      client_secret: clientSecret,
+      scope: "api"
+    });
+
+    const oauth = await bitqueryFetchWithTimeoutV1159(
+      "https://oauth2.bitquery.io/oauth2/token",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          accept: "application/json"
+        },
+        body: body.toString()
+      },
+      6500
+    );
+
+    if (!oauth?.ok || !oauth?.response) {
+      return {
+        token: null,
+        authMode: "AUTOMATIC_OAUTH_V1161",
+        oauthAttempted: true,
+        oauthHttpStatus: oauth?.status ?? null,
+        externalRequestsUsed: 1,
+        status: oauth?.timedOut ? "BITQUERY_OAUTH_TIMEOUT_V1161" : "BITQUERY_OAUTH_FETCH_FAILED_V1161",
+        error: oauth?.error || null
+      };
+    }
+
+    let payload = null;
+    try { payload = oauth.text ? JSON.parse(oauth.text) : null; } catch (_) { payload = null; }
+    const bearer = String(payload?.access_token || "").trim();
+    const expiresInSeconds = Math.max(0, safeNumber(payload?.expires_in));
+
+    if (!oauth.response.ok || !bearer) {
+      return {
+        token: null,
+        authMode: "AUTOMATIC_OAUTH_V1161",
+        oauthAttempted: true,
+        oauthHttpStatus: oauth.response.status,
+        externalRequestsUsed: 1,
+        status: `BITQUERY_OAUTH_HTTP_${oauth.response.status}_V1161`,
+        error: payload?.error_description || payload?.error || null
+      };
+    }
+
+    bitqueryOAuthBearerCacheV1161 = {
+      clientId,
+      token: bearer,
+      expiresAt: nowMs + Math.max(60_000, (expiresInSeconds || 3600) * 1000)
+    };
+
+    return {
+      token: bearer,
+      authMode: "AUTOMATIC_OAUTH_V1161",
+      oauthAttempted: true,
+      oauthHttpStatus: oauth.response.status,
+      expiresInSeconds,
+      externalRequestsUsed: 1,
+      status: "BITQUERY_OAUTH_TOKEN_READY_V1161"
+    };
+  }
+
+  if (manualToken) {
+    return {
+      token: manualToken,
+      authMode: "MANUAL_ACCESS_TOKEN_V1161",
+      oauthAttempted: false,
+      oauthHttpStatus: null,
+      externalRequestsUsed: 0,
+      status: "BITQUERY_MANUAL_TOKEN_READY_V1161"
+    };
+  }
+
+  return {
+    token: null,
+    authMode: "NONE",
+    oauthAttempted: false,
+    oauthHttpStatus: null,
+    externalRequestsUsed: 0,
+    status: "BITQUERY_NOT_CONFIGURED_V1161"
+  };
+}
+
+function bitqueryConfiguredV1161(env) {
+  return Boolean(
+    (String(env?.BITQUERY_CLIENT_ID || "").trim() && String(env?.BITQUERY_CLIENT_SECRET || "").trim()) ||
+    String(env?.BITQUERY_ACCESS_TOKEN || "").trim()
+  );
+}
+
+
 async function getPoolIdentityBitqueryDexPoolEventsV199(
   env,
   state,
@@ -32800,16 +32939,20 @@ async function getPoolIdentityBitqueryDexPoolEventsV199(
     error: null
   };
 
-  const token =
-    String(
-      env.BITQUERY_ACCESS_TOKEN ||
-      ""
-    ).trim();
+  const bitqueryAuthV1161 = await resolveBitqueryBearerV1161(env);
+  const token = String(bitqueryAuthV1161?.token || "").trim();
 
   if (!token) {
     return {
       ...base,
-      status: "NOT_CONFIGURED"
+      status: bitqueryAuthV1161?.status || "NOT_CONFIGURED",
+      bitqueryAuthV1161: {
+        authMode: bitqueryAuthV1161?.authMode || "NONE",
+        oauthAttempted: bitqueryAuthV1161?.oauthAttempted === true,
+        oauthHttpStatus: bitqueryAuthV1161?.oauthHttpStatus ?? null,
+        externalRequestsUsed: safeNumber(bitqueryAuthV1161?.externalRequestsUsed),
+        error: bitqueryAuthV1161?.error || null
+      }
     };
   }
 
@@ -33234,17 +33377,20 @@ async function getInitializeForPoolBitqueryV190(
   const normalizedPoolId =
     normalize(poolId);
 
-  const token =
-    String(
-      env.BITQUERY_ACCESS_TOKEN ||
-      ""
-    ).trim();
+  const bitqueryAuthV1161 = await resolveBitqueryBearerV1161(env);
+  const token = String(bitqueryAuthV1161?.token || "").trim();
 
   if (!token) {
     return {
       ...base,
-      status:
-        "NOT_CONFIGURED"
+      status: bitqueryAuthV1161?.status || "NOT_CONFIGURED",
+      bitqueryAuthV1161: {
+        authMode: bitqueryAuthV1161?.authMode || "NONE",
+        oauthAttempted: bitqueryAuthV1161?.oauthAttempted === true,
+        oauthHttpStatus: bitqueryAuthV1161?.oauthHttpStatus ?? null,
+        externalRequestsUsed: safeNumber(bitqueryAuthV1161?.externalRequestsUsed),
+        error: bitqueryAuthV1161?.error || null
+      }
     };
   }
 
@@ -35671,13 +35817,7 @@ async function resolvePersistentUnknownPools(
    * V190: the first available resolver slot belongs to Bitquery when its
    * access token is configured. This does not raise any request ceiling.
    */
-  const bitqueryConfiguredV190 =
-    Boolean(
-      String(
-        env.BITQUERY_ACCESS_TOKEN ||
-        ""
-      ).trim()
-    );
+  const bitqueryConfiguredV190 = bitqueryConfiguredV1161(env);
 
   /*
    * V648: Bitquery HTTP 402 is an account/quota state, not a reason to keep
@@ -50347,13 +50487,7 @@ async function getBitqueryWethUsdGReferenceV194(
 
   const base = {
     attempted: false,
-    configured:
-      Boolean(
-        String(
-          env.BITQUERY_ACCESS_TOKEN ||
-          ""
-        ).trim()
-      ),
+    configured: bitqueryConfiguredV1161(env),
     poolIdsKnown:
       poolIds.length,
     selectedPoolId:
@@ -50370,16 +50504,20 @@ async function getBitqueryWethUsdGReferenceV194(
     error: null
   };
 
-  const token =
-    String(
-      env.BITQUERY_ACCESS_TOKEN ||
-      ""
-    ).trim();
+  const bitqueryAuthV1161 = await resolveBitqueryBearerV1161(env);
+  const token = String(bitqueryAuthV1161?.token || "").trim();
 
   if (!token) {
     return {
       ...base,
-      status: "NOT_CONFIGURED"
+      status: bitqueryAuthV1161?.status || "NOT_CONFIGURED",
+      bitqueryAuthV1161: {
+        authMode: bitqueryAuthV1161?.authMode || "NONE",
+        oauthAttempted: bitqueryAuthV1161?.oauthAttempted === true,
+        oauthHttpStatus: bitqueryAuthV1161?.oauthHttpStatus ?? null,
+        externalRequestsUsed: safeNumber(bitqueryAuthV1161?.externalRequestsUsed),
+        error: bitqueryAuthV1161?.error || null
+      }
     };
   }
 
@@ -53844,7 +53982,7 @@ async function discoverVerifiedBagsLaunchesV210(
       sharedRequestContentTypeV229: null,
       sharedRequestErrorClassV229: null,
       sharedRequestErrorPreviewV229: null,
-      bearerHeaderConfiguredV229: Boolean(String(env.BITQUERY_ACCESS_TOKEN || "").trim()),
+      bearerHeaderConfiguredV229: bitqueryConfiguredV1161(env),
       endpointV229: BITQUERY_GRAPHQL_V2
     },
     bitqueryMarketEvidenceV233: {
@@ -53923,13 +54061,20 @@ async function discoverVerifiedBagsLaunchesV210(
     error: null
   };
 
-  const token =
-    String(env.BITQUERY_ACCESS_TOKEN || "").trim();
+  const bitqueryAuthV1161 = await resolveBitqueryBearerV1161(env);
+  const token = String(bitqueryAuthV1161?.token || "").trim();
 
   if (!token) {
     return {
       ...base,
-      status: "NOT_CONFIGURED"
+      status: bitqueryAuthV1161?.status || "NOT_CONFIGURED",
+      bitqueryAuthV1161: {
+        authMode: bitqueryAuthV1161?.authMode || "NONE",
+        oauthAttempted: bitqueryAuthV1161?.oauthAttempted === true,
+        oauthHttpStatus: bitqueryAuthV1161?.oauthHttpStatus ?? null,
+        externalRequestsUsed: safeNumber(bitqueryAuthV1161?.externalRequestsUsed),
+        error: bitqueryAuthV1161?.error || null
+      }
     };
   }
 
