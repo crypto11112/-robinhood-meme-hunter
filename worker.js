@@ -1,4 +1,12 @@
 /*
+ * ChainVanta V1170 — PRODUCTION TELEGRAM COMPACT CALL RENDERER
+ * - Keeps the full telegramMessage(candidate) formatter for manual /analyse and diagnostics.
+ * - Production alerts use a separate bounded customer-facing renderer designed to fit a Telegram photo caption.
+ * - V1169 sender dry-run evaluates the exact same production renderer used by sendTelegram.
+ * - No scoring, qualification, risk, provider, request-budget, cooldown, routing or Telegram-enable changes.
+ */
+
+/*
  * V1169 — AUTHORITATIVE PER-TOKEN TELEGRAM QUALIFICATION TRACE + WEB LINK
  * - Builds directly from V1166 and preserves the V1166 current call-ready candidate priority fix.
  * - Live AI evidence proved V1164 could recover a real exact-pool swap through V888, but the
@@ -16435,6 +16443,85 @@ function refreshOnChainMarketFoundationV973(
     rows
   };
 }
+
+/* =========================================================
+   V1170 PRODUCTION TELEGRAM COMPACT CALL RENDERER
+   Customer-facing production alerts must remain inside Telegram's 1024-char
+   photo-caption envelope. The full telegramMessage() remains untouched for
+   /analyse and deep diagnostics.
+   ========================================================= */
+function telegramProductionMessageV1170(candidate) {
+  const alertClass = telegramAlertClass(candidate);
+  const market = candidate?.market || {};
+  const holders = candidate?.holders || {};
+  const whale = holders?.whale || {};
+  const riskText = candidate?.risk?.verified === true && candidate?.risk?.score !== null
+    ? `${safeNumber(candidate.risk.score)}/100 ${String(candidate.risk.label || "")}`.trim()
+    : "UNVERIFIED";
+  const marketMoney = value => value !== null && value !== undefined && Number.isFinite(Number(value))
+    ? `$${formatNumber(Number(value))}` : "UNVERIFIED";
+  const top1 = holders?.concentrationVerified === true && whale?.verified === true && whale?.top1Percent !== null && whale?.top1Percent !== undefined
+    ? percentDisplay(whale.top1Percent) : "UNVERIFIED";
+  const top10 = holders?.concentrationVerified === true && whale?.verified === true && whale?.top10Percent !== null && whale?.top10Percent !== undefined
+    ? percentDisplay(whale.top10Percent) : "UNVERIFIED";
+  const holderCount = holders?.countersVerified === true && holders?.holderCount !== null && holders?.holderCount !== undefined
+    ? formatHolderCountV261(holders.holderCount) : "UNVERIFIED";
+  const flow = candidate?.onChainVerifiedFlowV212;
+  const flowWindow = flow?.windows?.m15?.verified === true
+    ? { label:"15m", row:flow.windows.m15 }
+    : flow?.windows?.h1?.verified === true
+      ? { label:"1h", row:flow.windows.h1 }
+      : null;
+  const flowLine = flowWindow
+    ? `💵 ${flowWindow.label} flow: <b>${safeNumber(flowWindow.row.buys)}B/${safeNumber(flowWindow.row.sells)}S</b> · net <b>${marketMoney(flowWindow.row.netFlowUsd)}</b> · buy pressure <b>${flowWindow.row.buyPressureUsd===null||flowWindow.row.buyPressureUsd===undefined?"UNVERIFIED":percentDisplay(flowWindow.row.buyPressureUsd)}</b>`
+    : "💵 Verified flow: <b>UNVERIFIED</b>";
+  const exactPool = normalize(
+    candidate?.onChainVerifiedFlowV212?.exactPoolId ||
+    candidate?.exactPoolId ||
+    candidate?.poolId ||
+    ""
+  );
+  const poolLine = /^0x[0-9a-f]{64}$/.test(exactPool)
+    ? `🧬 Pool: <code>${escapeHtml(exactPool.slice(0,10))}…${escapeHtml(exactPool.slice(-8))}</code>`
+    : null;
+  const rawName = String(candidate?.name || "Unknown Token").slice(0,48);
+  const rawSymbol = String(candidate?.symbol || "UNKNOWN").slice(0,18);
+
+  let lines = [
+    `🚨 <b>ChainVanta Call</b> · ${escapeHtml(alertClass.title || "QUALIFIED")}`,
+    `🪙 <b>${escapeHtml(rawName)} (${escapeHtml(rawSymbol)})</b>`,
+    `<code>${escapeHtml(candidate?.address || "UNVERIFIED")}</code>`,
+    "",
+    `🎯 Opportunity <b>${safeNumber(candidate?.opportunity?.score)}/100</b> · Confidence <b>${safeNumber(candidate?.confidence?.score)}/100</b>`,
+    `🚀 Momentum <b>${safeNumber(candidate?.momentum?.score)}/100 ${escapeHtml(candidate?.momentum?.label || "")}</b> · Risk <b>${escapeHtml(riskText)}</b>`,
+    `💰 MC <b>${market?.verified===true?marketMoney(market.marketCap):"UNVERIFIED"}</b> · Liquidity <b>${market?.verified===true?marketMoney(market.liquidityUsd):"UNVERIFIED"}</b>`,
+    `📊 24h Vol <b>${market?.verified===true?marketMoney(market?.volume?.h24):"UNVERIFIED"}</b> · Signals <b>${safeNumber(candidate?.signalCount || candidate?.signals?.length || candidate?.confidence?.signals || 0)}</b>`,
+    flowLine,
+    `👥 Holders <b>${escapeHtml(holderCount)}</b> · Top1 <b>${escapeHtml(top1)}</b> · Top10 <b>${escapeHtml(top10)}</b>`,
+    `🐋 Whale flow <b>${escapeHtml(candidate?.whaleFlow?.flow || "UNVERIFIED")}</b>`,
+    poolLine,
+    "",
+    `⚠️ <i>${escapeHtml(alertClass.footer || "Risk-check before trading.")}</i>`
+  ].filter(Boolean);
+
+  let rendered = lines.join("\n");
+  if (rendered.length <= 950) return rendered;
+
+  /* Hard bounded fallback: preserve the decision-critical customer fields. */
+  lines = [
+    `🚨 <b>ChainVanta Call</b>`,
+    `🪙 <b>${escapeHtml(rawName)} (${escapeHtml(rawSymbol)})</b>`,
+    `<code>${escapeHtml(candidate?.address || "UNVERIFIED")}</code>`,
+    `🎯 Opp <b>${safeNumber(candidate?.opportunity?.score)}</b> · Conf <b>${safeNumber(candidate?.confidence?.score)}</b> · Mom <b>${safeNumber(candidate?.momentum?.score)}</b> · Risk <b>${candidate?.risk?.verified===true?safeNumber(candidate?.risk?.score):"UNVERIFIED"}</b>`,
+    `💰 MC <b>${market?.verified===true?marketMoney(market.marketCap):"UNVERIFIED"}</b> · Liq <b>${market?.verified===true?marketMoney(market.liquidityUsd):"UNVERIFIED"}</b>`,
+    flowLine,
+    `👥 Holders <b>${escapeHtml(holderCount)}</b> · Top1 <b>${escapeHtml(top1)}</b> · Top10 <b>${escapeHtml(top10)}</b>`,
+    `⚠️ <i>Verified-data scanner call. Manage risk independently.</i>`
+  ];
+  rendered = lines.join("\n");
+  return rendered.length <= 950 ? rendered : rendered.slice(0, 940);
+}
+
 /* =========================================================
    TOKEN ANALYSIS
    ========================================================= */
@@ -83609,7 +83696,7 @@ function captureTelegramSendWhyV1169(state, candidates, budget, env) {
     const notificationBudgetReady = budgetAvailable(budget, 'notification');
     let rendered = '';
     let renderError = null;
-    try { rendered = String(telegramMessage(candidate) || ''); }
+    try { rendered = String(telegramProductionMessageV1170(candidate) || ''); }
     catch (error) { renderError = errorString(error); }
     const messageLength = rendered.length;
     const textRenderValid = !renderError && messageLength > 0 && messageLength <= 4096;
@@ -83642,6 +83729,7 @@ function captureTelegramSendWhyV1169(state, candidates, budget, env) {
       destinationConfigured,
       destinationMode:String(env?.TELEGRAM_PREMIUM_CHAT_ID || '').trim() ? 'PREMIUM_CHAT' : (String(env?.TELEGRAM_CHAT_ID || '').trim() ? 'LEGACY_CHAT' : 'NONE'),
       hasImage, messageLength, textRenderValid, photoCaptionWithinLimit, fallbackCapacityReady,
+      renderPolicyV1170:'PRODUCTION_COMPACT_PHOTO_CAPTION_MAX_950_V1170',
       renderError,
       wouldAttemptSend, wouldSend, firstBlocker,
       productionSendFunction:'sendTelegram',
@@ -83667,13 +83755,13 @@ function telegramSendWhySnapshotV1169(state, rawAddress) {
 
 function telegramSendWhyMessageV1169(state, rawAddress) {
   const d=telegramSendWhySnapshotV1169(state, rawAddress);
-  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1169</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
-  return ['📤 <b>Telegram Sender Dry Run — V1169</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Recorded: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 Duplicate/cooldown clear: <b>${d.duplicateCooldownClear?'YES':'NO'}</b> · expired ${d.cooldownExpired?'YES':'NO'} · +10 score ${d.scoreImproved?'YES':'NO'} · new accumulation ${d.newAccumulation?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'}`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send: <b>${d.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND: <b>${d.wouldSend?'YES':'NO'}</b>`,`🚧 First blocker: <b>${escapeHtml(d.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>Captured at the real pre-send boundary using production cooldown, budget, route and renderer checks. Dry-run only: no Telegram API call.</i>'].join('\n');
+  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1170</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
+  return ['📤 <b>Telegram Sender Dry Run — V1170</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Recorded: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 Duplicate/cooldown clear: <b>${d.duplicateCooldownClear?'YES':'NO'}</b> · expired ${d.cooldownExpired?'YES':'NO'} · +10 score ${d.scoreImproved?'YES':'NO'} · new accumulation ${d.newAccumulation?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'} · compact V1170`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send: <b>${d.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND: <b>${d.wouldSend?'YES':'NO'}</b>`,`🚧 First blocker: <b>${escapeHtml(d.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>Captured at the real pre-send boundary using production cooldown, budget, route and renderer checks. Dry-run only: no Telegram API call.</i>'].join('\n');
 }
 
 function telegramSendWhyPlainTextV1169(d) {
-  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1169\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
-  return ['ChainVanta Telegram Sender Dry Run — V1169',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Recorded: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`Duplicate/cooldown clear: ${d.duplicateCooldownClear?'YES':'NO'}`,`Cooldown expired: ${d.cooldownExpired?'YES':'NO'}`,`Score improved >=10: ${d.scoreImproved?'YES':'NO'}`,`New accumulation: ${d.newAccumulation?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send: ${d.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND: ${d.wouldSend?'YES':'NO'}`,`First blocker: ${d.firstBlocker||'NONE'}`,'','Read-only dry run. No Telegram API call and zero provider requests.'].join('\n');
+  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1170\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
+  return ['ChainVanta Telegram Sender Dry Run — V1170',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Recorded: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`Duplicate/cooldown clear: ${d.duplicateCooldownClear?'YES':'NO'}`,`Cooldown expired: ${d.cooldownExpired?'YES':'NO'}`,`Score improved >=10: ${d.scoreImproved?'YES':'NO'}`,`New accumulation: ${d.newAccumulation?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send: ${d.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND: ${d.wouldSend?'YES':'NO'}`,`First blocker: ${d.firstBlocker||'NONE'}`,'','Read-only dry run. No Telegram API call and zero provider requests.'].join('\n');
 }
 
 function buildTelegramQualificationDiagnostics(
@@ -124104,12 +124192,13 @@ for (
       continue;
     }
 
+    const productionTelegramMessageV1170 =
+      telegramProductionMessageV1170(candidate);
+
     const result =
       await sendTelegram(
         env,
-        telegramMessage(
-          candidate
-        ),
+        productionTelegramMessageV1170,
         budget,
         candidate.market?.imageUrl || null,
         env.TELEGRAM_PREMIUM_CHAT_ID || env.TELEGRAM_CHAT_ID
@@ -124137,7 +124226,7 @@ for (
           enqueueFreeCallV1028(
             state,
             candidate,
-            telegramMessage(candidate),
+            productionTelegramMessageV1170,
             result,
             candidate.market?.imageUrl || null
           );
