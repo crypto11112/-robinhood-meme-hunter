@@ -1,15 +1,13 @@
 /*
- * V1166 — CURRENT CALL-READY CANDIDATE PRIORITY OVER BACKGROUND CONTINUATION
- * - Builds directly from V1165 after live evidence showed Index was current, risk-acceptable,
- *   market-ready, exact-pool verified and already Telegram-qualified, but V927 selected MERT
- *   background keyed continuation instead.
- * - V925 current keyed continuation remains highest priority.
- * - Existing V929 Gecko-429 exact-pool arbitration remains unchanged.
- * - When a distinct CURRENT normal production candidate is valid ERC20, risk acceptable,
- *   market verified, exact PoolId verified, and already Telegram-qualified, it outranks V926/V927
- *   background-only continuation. Background keyed progress remains persisted for later resumption.
- * - Still one production V4 target and no increase to the 48-request cap, V777 handoff, provider
- *   quotas, scoring, risk, qualification thresholds or Telegram production state.
+ * V1167 — VERIFIED V888 -> V179 RECENT-WINDOW HANDOFF
+ * - Builds directly from V1166 and preserves the V1166 current call-ready candidate priority fix.
+ * - Live AI evidence proved V1164 could recover a real exact-pool swap through V888, but the
+ *   verified row was not entering V179/V212 and therefore could not feed authoritative momentum.
+ * - V1167 hands verified V888 rows inside the existing recent V772 window into the trusted
+ *   V254 -> V179 persistence path with ZERO additional provider requests.
+ * - Older 12k backfill rows stay historical only and are not promoted as fresh momentum.
+ * - No request ceilings, provider quotas, scoring, risk, qualification thresholds, Telegram
+ *   production state, watch capacity, Pons routing, or Bitquery dependency are changed.
  */
 /**
  * ChainVanta — V1164
