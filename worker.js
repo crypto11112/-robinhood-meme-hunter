@@ -1,4 +1,17 @@
 /*
+ * ChainVanta V1171 — V254 VERIFIED CANDIDATE POOL-ID HANDOFF
+ * - DTF proved V801 could report exactPoolAvailable YES from candidate.onChainPoolIdentityV153 while
+ *   verifiedUsdCompletionPassV254 immediately returned NO_CANDIDATE_POOL_ID because
+ *   v254PoolIdsForCandidate() enumerated only watched.pools.
+ * - V1171 admits that same already-VERIFIED candidate exact PoolId into the existing V254 local
+ *   candidate-pool set when the PoolId is exact bytes32 and the attached identity belongs to the
+ *   same candidate. Existing V257/V808/V814 identity proof, quote eligibility and USD decoding
+ *   remain mandatory before any flow can be persisted.
+ * - Zero new provider/RPC requests. No request-ceiling, scoring, risk, qualification, V726,
+ *   Telegram, watch-capacity, provider-priority or threshold changes.
+ */
+
+/*
  * ChainVanta V1170 — PRODUCTION TELEGRAM COMPACT CALL RENDERER
  * - Keeps the full telegramMessage(candidate) formatter for manual /analyse and diagnostics.
  * - Production alerts use a separate bounded customer-facing renderer designed to fit a Telegram photo caption.
@@ -87959,28 +87972,70 @@ function v254PoolIdsForCandidate(
     };
   }
 
+  /*
+   * V1171: V801 already treats candidate.onChainPoolIdentityV153 as valid exact-pool
+   * availability, but the V254 selector below historically enumerated watched.pools
+   * only. DTF proved that ordering mismatch can produce exactPoolAvailable:YES followed
+   * by NO_CANDIDATE_POOL_ID in the same pass. Bridge only the already-verified exact
+   * PoolId attached to this same candidate into the local selection set. This is an
+   * identity handoff only: V257/V808/V814 still must prove the selected pool identity
+   * and the existing quote/USD rules still apply before persistence.
+   */
+  const candidateIdentityV1171 =
+    candidate?.onChainPoolIdentityV153 || null;
+
+  const candidatePoolIdV1171 =
+    normalize(
+      candidateIdentityV1171?.poolId ||
+      candidateIdentityV1171?.pairAddress ||
+      ""
+    );
+
+  const identityCandidateV1171 =
+    normalize(
+      candidateIdentityV1171?.candidateAddress ||
+      ""
+    );
+
+  const candidateExactPoolIdV1171 =
+    candidateIdentityV1171?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      String(candidatePoolIdV1171 || "")
+    ) &&
+    (
+      !identityCandidateV1171 ||
+      identityCandidateV1171 === token
+    )
+      ? candidatePoolIdV1171
+      : null;
+
   const poolIds =
     Array.from(
       new Set(
-        (
-          Array.isArray(
-            watched?.pools
+        [
+          ...(
+            Array.isArray(
+              watched?.pools
+            )
+              ? watched.pools
+              : []
           )
-            ? watched.pools
-            : []
-        )
-          .map(
-            pool =>
-              normalize(
-                pool?.poolId
-              )
-          )
-          .filter(
-            poolId =>
-              /^0x[a-f0-9]{64}$/.test(
-                String(poolId || "")
-              )
-          )
+            .map(
+              pool =>
+                normalize(
+                  pool?.poolId
+                )
+            )
+            .filter(
+              poolId =>
+                /^0x[a-f0-9]{64}$/.test(
+                  String(poolId || "")
+                )
+            ),
+          ...(candidateExactPoolIdV1171
+            ? [candidateExactPoolIdV1171]
+            : [])
+        ]
       )
     );
 
