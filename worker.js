@@ -1,3 +1,4 @@
+// V1213 — scan relay authentication hardening only. Scheduled relay requires a dedicated secret; manual /scan requires WebDiag.
 // V1212 — internal API surface lockdown. Customer/webhook/WebDiag bootstrap routes remain public as required.
 // V1211 — operational/provider-control route access hardening only. Scanner/scoring/provider policy/OutcomeIntel unchanged.
 // V1210 — legacy diagnostic/control route access hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
@@ -10021,7 +10022,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1212";
+const VERSION = "V1213";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -197972,7 +197973,8 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/v4swapamounts",
   "/v4swapdirection",
   "/weakening",
-  "/weakening-status"
+  "/weakening-status",
+  "/scan"
 ]);
 
 function webDiagControlV1179(state){
@@ -198490,17 +198492,34 @@ async function handleRequest(
       ) ||
     "/";
 
-  // V671: resolve the dedicated scheduled relay before the global GET-only guard.
-  // This is intentionally limited to the existing V670 marker on /scan.
+  // V1213: the historical query marker alone is not authentication.
+  // Scheduled service-to-service scans require a dedicated shared secret.
+  const scanRelaySecretV1213 = String(env?.SCAN_RELAY_SECRET || "").trim();
+  const scanRelayPresentedV1213 = String(
+    request.headers.get("x-chainvanta-scan-relay-secret") || ""
+  ).trim();
   const scheduledRelayV671 =
-    path ===
-      "/scan" &&
-    request.method ===
-      "POST" &&
-    url.searchParams.get(
-      "v670ScheduledRelay"
-    ) ===
-      "1";
+    path === "/scan" &&
+    request.method === "POST" &&
+    url.searchParams.get("v670ScheduledRelay") === "1" &&
+    Boolean(scanRelaySecretV1213) &&
+    scanRelayPresentedV1213 === scanRelaySecretV1213;
+
+  const scheduledRelayAttemptV1213 =
+    path === "/scan" &&
+    request.method === "POST" &&
+    url.searchParams.get("v670ScheduledRelay") === "1";
+
+  if (scheduledRelayAttemptV1213 && !scheduledRelayV671) {
+    return jsonResponse({
+      ok:false,
+      version:VERSION,
+      status: scanRelaySecretV1213
+        ? "SCAN_RELAY_UNAUTHORIZED_V1213"
+        : "SCAN_RELAY_SECRET_NOT_CONFIGURED_V1213",
+      timestamp:now()
+    }, scanRelaySecretV1213 ? 401 : 503);
+  }
 
   if (
     request.method ===
@@ -200517,6 +200536,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     });
     headersLogoutV1189.append("set-cookie",`${WEB_DIAG_COOKIE_V1179}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
     return new Response(null,{status:303,headers:headersLogoutV1189});
+  }
+
+  // V1213: authenticated scheduler relay executes before interactive WebDiag.
+  if (scheduledRelayV671) {
+    const relayModeV914 = String(url.searchParams.get("v914RelayMode") || "");
+    if (relayModeV914 === "scheduled") {
+      const resultV914 = await scheduledScan(env);
+      return jsonResponse(compactHeavyScanRelayResultV914(resultV914,"scheduled"));
+    }
+    if (relayModeV914 === "qualification-followup") {
+      const resultV914 = await scan(env,{scheduled:true,qualificationFollowUpV723:true});
+      return jsonResponse(compactHeavyScanRelayResultV914(resultV914,"qualification-followup"));
+    }
+    if (relayModeV914 === "manual") {
+      const resultV914 = await scan(env,{scheduled:false});
+      return jsonResponse(compactHeavyScanRelayResultV914(resultV914,"manual"));
+    }
+    return jsonResponse(await scheduledScan(env));
   }
 
   // V1179: protect every exposed diagnostic route before route-specific rendering.
