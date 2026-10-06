@@ -1,4 +1,14 @@
 /*
+ * ChainVanta V1173 — SCHEDULED HEAVY-SCAN RELAY 503 RECOVERY
+ * - Builds directly from deployed V1172 and preserves V1171/V1172 behavior.
+ * - Two real scheduler snapshots proved repeated V914_HEAVY_SCAN_RELAY_HTTP_503:NO_JSON_BODY failures while the Durable Object alarm itself re-armed correctly.
+ * - V1173 performs at most ONE sequential retry only for HTTP 503 + no JSON body from the V914 normal-worker heavy-scan relay.
+ * - The retry begins only after the first relay request has fully returned, so no overlapping duplicate heavy scans are created by V1173.
+ * - Healthy scans add zero requests. The existing per-scan provider/RPC ceilings, scoring, risk, qualification, V726, market rules, Telegram routing/sending, watch capacity and thresholds are unchanged.
+ * - Scheduler status now exposes v1173RelayRecovery so recovery can be proven from the existing /scheduler-status-v673 endpoint.
+ */
+
+/*
  * ChainVanta V1172 — TOKEN-SPECIFIC MARKET / LIQUIDITY WHY TRACE
  * - Builds directly from deployed V1171 and preserves the V254 verified candidate PoolId handoff.
  * - Adds /marketwhy <contract> plus matching /marketwhy?token= web output from the same retained diagnostic state.
@@ -203268,50 +203278,124 @@ async function relayHeavyScanOutsideSchedulerV914(
       ? mode
       : "scheduled";
 
-  const relayUrl =
+  const baseRelayUrl =
     `${V670_SELF_SCAN_URL}&v914RelayMode=${encodeURIComponent(relayMode)}`;
 
-  const response =
-    await fetch(
-      relayUrl,
-      {
-        method: "POST",
-        headers: {
-          "x-robinhood-meme-hunter-cron-relay":
-            "V914",
-          "x-robinhood-meme-hunter-memory-isolation":
-            "V914"
+  /*
+   * V1173: retry only the exact failure proven in production: Cloudflare
+   * returning HTTP 503 with no JSON body from the isolated V914 heavy-scan
+   * worker. The second attempt is strictly sequential: fetch #2 is not issued
+   * until fetch #1 has fully returned, so this change never creates an
+   * overlapping heavy scan. Every other HTTP/body failure keeps V914's
+   * previous fail-closed behavior.
+   */
+  const relayAttemptV1173 = async (attempt) => {
+    const relayUrl =
+      attempt === 1
+        ? baseRelayUrl
+        : `${baseRelayUrl}&v1173Retry=1`;
+
+    const response =
+      await fetch(
+        relayUrl,
+        {
+          method: "POST",
+          headers: {
+            "x-robinhood-meme-hunter-cron-relay":
+              "V914",
+            "x-robinhood-meme-hunter-memory-isolation":
+              "V914",
+            "x-chainvanta-v1173-relay-attempt":
+              String(attempt)
+          }
         }
-      }
-    );
+      );
 
-  let body = null;
+    let body = null;
 
-  try {
-    body =
-      await response.json();
-  } catch (_) {
-    body = null;
+    try {
+      body =
+        await response.json();
+    } catch (_) {
+      body = null;
+    }
+
+    return {
+      response,
+      body
+    };
+  };
+
+  const first =
+    await relayAttemptV1173(1);
+
+  if (first.response.ok) {
+    if (!first.body || typeof first.body !== "object") {
+      throw new Error(
+        "V914_HEAVY_SCAN_RELAY_INVALID_BODY"
+      );
+    }
+
+    first.body.v1173RelayRecovery = {
+      enabled: true,
+      retryUsed: false,
+      firstStatus: first.response.status,
+      firstJsonBody: true,
+      recovered: false,
+      policy:
+        "ONE_SEQUENTIAL_RETRY_ONLY_HTTP_503_NO_JSON_BODY_V1173"
+    };
+
+    return first.body;
   }
 
-  if (!response.ok) {
+  const retryEligibleV1173 =
+    first.response.status === 503 &&
+    (!first.body || typeof first.body !== "object");
+
+  if (!retryEligibleV1173) {
     throw new Error(
-      `V914_HEAVY_SCAN_RELAY_HTTP_${response.status}:` +
+      `V914_HEAVY_SCAN_RELAY_HTTP_${first.response.status}:` +
       String(
-        body?.error ||
-        body?.status ||
+        first.body?.error ||
+        first.body?.status ||
         "NO_JSON_BODY"
       ).slice(0, 180)
     );
   }
 
-  if (!body || typeof body !== "object") {
+  const second =
+    await relayAttemptV1173(2);
+
+  if (!second.response.ok) {
     throw new Error(
-      "V914_HEAVY_SCAN_RELAY_INVALID_BODY"
+      `V1173_HEAVY_SCAN_RELAY_RETRY_FAILED:first=503:NO_JSON_BODY;second=${second.response.status}:` +
+      String(
+        second.body?.error ||
+        second.body?.status ||
+        "NO_JSON_BODY"
+      ).slice(0, 180)
     );
   }
 
-  return body;
+  if (!second.body || typeof second.body !== "object") {
+    throw new Error(
+      "V1173_HEAVY_SCAN_RELAY_RETRY_INVALID_BODY"
+    );
+  }
+
+  second.body.v1173RelayRecovery = {
+    enabled: true,
+    retryUsed: true,
+    firstStatus: 503,
+    firstJsonBody: false,
+    secondStatus: second.response.status,
+    recovered: true,
+    policy:
+      "ONE_SEQUENTIAL_RETRY_ONLY_HTTP_503_NO_JSON_BODY_V1173"
+  };
+
+  return second.body;
 }
 
 export class ScanSchedulerV673 {
@@ -203642,7 +203726,23 @@ export class ScanSchedulerV673 {
           qualificationFollowUpV723
             ? "qualification-followup"
             : "scheduled"
-      }
+      },
+      v1173RelayRecovery:
+        result?.v1173RelayRecovery ||
+        (failure
+          ? {
+              enabled: true,
+              retryUsed:
+                String(failure).includes(
+                  "V1173_HEAVY_SCAN_RELAY_RETRY"
+                ),
+              recovered: false,
+              failure:
+                String(failure).slice(0, 220),
+              policy:
+                "ONE_SEQUENTIAL_RETRY_ONLY_HTTP_503_NO_JSON_BODY_V1173"
+            }
+          : null)
     };
 
     /*
