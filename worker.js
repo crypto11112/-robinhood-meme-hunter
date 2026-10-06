@@ -179857,7 +179857,7 @@ async function telegramCommandReplyV271(
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
       const savedV1179 = await writeState(env,stateV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1188</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1189</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
       const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
@@ -179881,7 +179881,7 @@ async function telegramCommandReplyV271(
           ]]
         };
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1188</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1189</b>","",
           `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>"
@@ -197385,6 +197385,8 @@ function webDiagStillEnabledV1179(control,at=Date.now()){
 
 /* =========================================================
    V1188 ROUTE-BOUND TELEGRAM HANDOFF + MULTI-BROWSER SESSIONS
+   V1189 keeps this authentication baseline frozen and adds only
+   dashboard UX + current-browser logout/revocation.
    ========================================================= */
 function webDiagSafeTargetV1188(value){
   try{
@@ -197468,6 +197470,61 @@ async function webDiagSessionValidV1188(env,control,hash){
   const enabledAt=Number(control?.enabledAt||0);
   const rows=await webDiagAuxReadV1188(env,WEB_DIAG_SESSIONS_KEY_V1188);
   return rows.some(r=>String(r?.hash||"")===String(hash) && Number(r?.enabledAt||0)===enabledAt && Number(r?.expiresAt||0)>nowMs);
+}
+
+/* =========================================================
+   V1189 DIAGNOSTIC DASHBOARD + PER-BROWSER LOGOUT
+   ========================================================= */
+async function webDiagRevokeCurrentSessionV1189(env,control,session){
+  if(!session) return {revoked:false,reason:"NO_SESSION_V1189"};
+  const hash=await webDiagSha256V1179(session);
+  const rows=await webDiagAuxReadV1188(env,WEB_DIAG_SESSIONS_KEY_V1188);
+  const before=rows.length;
+  const kept=rows.filter(r=>String(r?.hash||"")!==String(hash));
+  const saved=await webDiagAuxWriteV1188(env,WEB_DIAG_SESSIONS_KEY_V1188,kept);
+  return {revoked:saved && kept.length<before,saved,reason:saved?"CURRENT_BROWSER_SESSION_REVOKED_V1189":"CURRENT_BROWSER_SESSION_REVOKE_SAVE_FAILED_V1189"};
+}
+
+function webDiagFormatExpiryV1189(value){
+  const n=Number(value||0);
+  if(!n) return "Until manually disabled";
+  try{
+    return new Intl.DateTimeFormat("en-GB",{dateStyle:"medium",timeStyle:"short",timeZone:"Europe/London"}).format(new Date(n));
+  }catch(_){ return new Date(n).toISOString(); }
+}
+
+function webDiagHomeHtmlV1189(auth){
+  const control=auth?.control||{};
+  const access=auth?.access||{};
+  const expiry=webDiagHtmlEscapeV1184(webDiagFormatExpiryV1189(control?.expiresAt));
+  const cfState=access?.required===true ? "Cloudflare Access verified" : "Cloudflare Access ready (not enforced yet)";
+  const groups=[
+    ["Telegram & Delivery",[
+      ["/telegramaudit","Telegram audit","Qualification and Telegram delivery decisions"],
+      ["/scorehandoff","Score handoff","Scoring handoff and qualification state"],
+      ["/rescoreaudit","Rescore audit","Post-recovery rescore behaviour"]
+    ]],
+    ["Evidence & Risk",[
+      ["/evidenceaudit","Evidence audit","Evidence completion and verification"],
+      ["/riskaudit","Risk audit","Risk completion and overrides"],
+      ["/holderaudit","Holder audit","Holder evidence and recovery"],
+      ["/marketaudit","Market audit","Market and exact-pool evidence"]
+    ]],
+    ["Performance",[
+      ["/performance?period=24h","Performance — 24h","Recent performance window"],
+      ["/performance?period=7d","Performance — 7d","Seven-day performance"],
+      ["/performance?period=30d","Performance — 30d","Thirty-day performance"],
+      ["/performance?period=all","Performance — all","Full retained performance history"]
+    ]],
+    ["System",[
+      ["/scheduler-status-v673","Scheduler status","Current scheduler state"]
+    ]]
+  ];
+  const cards=groups.map(([title,items])=>`<section class="group"><h2>${webDiagHtmlEscapeV1184(title)}</h2><div class="grid">${items.map(([href,label,desc])=>`<a class="tool" href="${href}"><span class="tool-title">${webDiagHtmlEscapeV1184(label)}</span><span class="tool-desc">${webDiagHtmlEscapeV1184(desc)}</span><span class="arrow">›</span></a>`).join("")}</div></section>`).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ChainVanta Admin Diagnostics</title>
+<style>
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1040px;margin:0 auto;padding:18px 16px 40px}.top{background:#101828;color:#fff;border-radius:18px;padding:20px;margin-bottom:16px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#98a2b3}.top h1{font-size:26px;margin:7px 0 8px}.top p{margin:0;color:#d0d5dd;line-height:1.5}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px}.status{background:#1d2939;border-radius:12px;padding:12px}.status b{display:block;color:#fff;font-size:14px}.status span{display:block;color:#98a2b3;font-size:12px;margin-top:4px;line-height:1.35}.group{background:#fff;border:1px solid #e4e7ec;border-radius:16px;padding:16px;margin-top:14px}.group h2{font-size:17px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tool{position:relative;display:block;text-decoration:none;color:#101828;border:1px solid #e4e7ec;border-radius:13px;padding:14px 38px 14px 14px;min-height:78px;background:#fff}.tool:active{background:#f9fafb}.tool-title{display:block;font-size:15px;font-weight:750}.tool-desc{display:block;font-size:12px;color:#667085;line-height:1.4;margin-top:5px}.arrow{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:24px;color:#98a2b3}.utility{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.utility a,.utility button{width:100%;appearance:none;border-radius:12px;padding:13px 14px;font:inherit;font-weight:750;cursor:pointer;text-align:center}.secondary{border:1px solid #d0d5dd;background:#fff;color:#101828;text-decoration:none}.danger{border:1px solid #fda29b;background:#fff5f4;color:#b42318}.note{font-size:12px;color:#667085;line-height:1.5;margin-top:14px;padding:0 2px}.token-note{background:#fff;border:1px dashed #d0d5dd;border-radius:14px;padding:14px;margin-top:14px;font-size:13px;color:#475467;line-height:1.55}code{word-break:break-all}@media(max-width:680px){.status-grid{grid-template-columns:1fr}.grid,.utility{grid-template-columns:1fr}.top h1{font-size:23px}.wrap{padding:12px 12px 32px}}
+</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>Outer identity security layer</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<div class="token-note"><b>Token-specific diagnostics</b><br>Use the normal Telegram token diagnostic commands; their protected web links will authorise this browser when required and return you to the selected report.</div><div class="utility"><a class="secondary" href="/performance?period=all">Open full performance</a><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
 }
 
 function webDiagRouteCookieValueV1188(request){
@@ -197934,7 +197991,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       "GET" &&
     !scheduledRelayV671 &&
     path !== "/webdiag-access" &&
-    path !== "/webdiag-open"
+    path !== "/webdiag-open" &&
+    path !== "/webdiag-logout"
   ) {
     return jsonResponse(
       {
@@ -199800,6 +199858,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     return new Response(null,{status:303,headers:headersV1188});
   }
 
+  // V1189: revoke only the current browser session without disabling diagnostics globally.
+  if (path === "/webdiag-logout" && request.method === "POST") {
+    const loadedLogoutV1189 = await readState(env);
+    const stateLogoutV1189 = loadedLogoutV1189?.state || newState();
+    const controlLogoutV1189 = webDiagControlV1179(stateLogoutV1189);
+    const sessionLogoutV1189 = webDiagCookieValueV1179(request);
+    await webDiagRevokeCurrentSessionV1189(env,controlLogoutV1189,sessionLogoutV1189);
+    const headersLogoutV1189 = new Headers({
+      "location":"/webdiag-home",
+      "cache-control":"no-store, max-age=0",
+      "pragma":"no-cache",
+      "referrer-policy":"no-referrer",
+      "x-content-type-options":"nosniff"
+    });
+    headersLogoutV1189.append("set-cookie",`${WEB_DIAG_COOKIE_V1179}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
+    return new Response(null,{status:303,headers:headersLogoutV1189});
+  }
+
   // V1179: protect every exposed diagnostic route before route-specific rendering.
   if (WEB_DIAG_PROTECTED_PATHS_V1179.has(path)) {
     const loadedAuthV1179 = await readState(env);
@@ -199808,13 +199884,13 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     if (!authV1179.ok) return webDiagDeniedResponseV1179(authV1179);
 
     if (path === "/webdiag-home") {
-      return new Response(webDiagHomeHtmlV1184(),{status:200,headers:{
+      return new Response(webDiagHomeHtmlV1189(authV1179),{status:200,headers:{
         "content-type":"text/html; charset=utf-8",
         "cache-control":"no-store, max-age=0",
         "pragma":"no-cache",
         "x-content-type-options":"nosniff",
         "referrer-policy":"no-referrer",
-        "content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
+        "content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
       }});
     }
 
