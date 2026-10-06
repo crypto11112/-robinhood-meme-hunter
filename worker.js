@@ -179857,7 +179857,7 @@ async function telegramCommandReplyV271(
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
       const savedV1179 = await writeState(env,stateV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1187</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1188</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
       const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
@@ -179881,7 +179881,7 @@ async function telegramCommandReplyV271(
           ]]
         };
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1187</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1188</b>","",
           `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>"
@@ -179909,7 +179909,10 @@ async function telegramCommandReplyV271(
       }),
       v979LatestScanDecision: stateV968?.state?.marketPairDecisionAuditV979 || null
     };
-    const replyV968 = marketCompletionAuditTelegramV968(resultV968) + `\n\n🌐 <b>Full web copy:</b> <a href="${WEB_DIAG_BASE_V1179}/marketaudit">Open full web diagnostic</a>\n<i>Requires Admin /webdiag browser login.</i>`;
+    const controlLinkV1188 = webDiagControlV1179(stateV968?.state || newState());
+    const secureMarketLinkV1188 = chatRoleV1025 === "ADMIN" ? await webDiagIssueRouteGrantV1188(env,controlLinkV1188,"/marketaudit") : null;
+    const marketHrefV1188 = secureMarketLinkV1188 || `${WEB_DIAG_BASE_V1179}/marketaudit`;
+    const replyV968 = marketCompletionAuditTelegramV968(resultV968) + `\n\n🌐 <b>Full web copy:</b> <a href="${marketHrefV1188}">Open full web diagnostic</a>`;
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV968 = await sendTelegram(env, replyV968, null, null);
     if (diagnosticV273) {
@@ -181499,7 +181502,10 @@ async function telegramCommandReplyV271(
   // V1179: append one clean protected browser-copy URL to long diagnostics.
   const webRouteV1179 = webDiagRouteForCommandV1179(parsed.command);
   if (webRouteV1179 && typeof reply === "string") {
-    reply += `\n\n🌐 <b>Full web copy:</b> <a href="${WEB_DIAG_BASE_V1179}${webRouteV1179}">Open full web diagnostic</a>\n<i>Requires Admin /webdiag browser login.</i>`;
+    const controlLinkV1188 = webDiagControlV1179(state);
+    const secureLinkV1188 = chatRoleV1025 === "ADMIN" ? await webDiagIssueRouteGrantV1188(env,controlLinkV1188,webRouteV1179) : null;
+    const hrefV1188 = secureLinkV1188 || `${WEB_DIAG_BASE_V1179}${webRouteV1179}`;
+    reply += `\n\n🌐 <b>Full web copy:</b> <a href="${hrefV1188}">Open full web diagnostic</a>`;
   }
 
   // V759: preserve the existing chunked delivery and also route
@@ -197324,6 +197330,9 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
    ========================================================= */
 const WEB_DIAG_COOKIE_V1179 = "cv_diag_v1179";
 const WEB_DIAG_BOOTSTRAP_COOKIE_V1186 = "cv_diag_boot_v1186";
+const WEB_DIAG_ROUTE_COOKIE_V1188 = "cv_diag_route_v1188";
+const WEB_DIAG_ROUTE_GRANTS_KEY_V1188 = "cv_webdiag_route_grants_v1188";
+const WEB_DIAG_SESSIONS_KEY_V1188 = "cv_webdiag_sessions_v1188";
 const WEB_DIAG_BASE_V1179 = "https://robinhood-meme-hunter.johnd1987.workers.dev";
 const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramwhy","/marketwhy","/sendwhy",
@@ -197372,6 +197381,102 @@ function webDiagStillEnabledV1179(control,at=Date.now()){
   if(control?.enabled!==true) return false;
   const exp=Number(control?.expiresAt||0);
   return !(exp>0 && at>=exp);
+}
+
+/* =========================================================
+   V1188 ROUTE-BOUND TELEGRAM HANDOFF + MULTI-BROWSER SESSIONS
+   ========================================================= */
+function webDiagSafeTargetV1188(value){
+  try{
+    const u=new URL(String(value||""),WEB_DIAG_BASE_V1179);
+    if(u.origin!==new URL(WEB_DIAG_BASE_V1179).origin) return null;
+    if(!WEB_DIAG_PROTECTED_PATHS_V1179.has(u.pathname)) return null;
+    return u.pathname + (u.search||"");
+  }catch(_){ return null; }
+}
+
+async function webDiagAuxReadV1188(env,key){
+  const {kv}=getKV(env);
+  if(!kv) return [];
+  try{
+    const raw=await kv.get(key);
+    const parsed=raw?JSON.parse(raw):[];
+    return Array.isArray(parsed)?parsed:[];
+  }catch(_){ return []; }
+}
+
+async function webDiagAuxWriteV1188(env,key,rows){
+  const {kv}=getKV(env);
+  if(!kv || typeof kv.put!=="function") return false;
+  try{
+    await kv.put(key,JSON.stringify(Array.isArray(rows)?rows:[]),{expirationTtl:86400});
+    return true;
+  }catch(_){ return false; }
+}
+
+async function webDiagIssueRouteGrantV1188(env,control,target){
+  const safeTarget=webDiagSafeTargetV1188(target);
+  if(!safeTarget || !webDiagStillEnabledV1179(control)) return null;
+  const nowMs=Date.now();
+  const enabledAt=Number(control?.enabledAt||0);
+  if(!enabledAt) return null;
+  const hardExp=Number(control?.expiresAt||0);
+  const expiresAt=hardExp>0?Math.min(hardExp,nowMs+10*60*1000):nowMs+10*60*1000;
+  if(expiresAt<=nowMs) return null;
+  const secret=webDiagRandomSecretV1179(32);
+  const hash=await webDiagSha256V1179(secret);
+  const existing=await webDiagAuxReadV1188(env,WEB_DIAG_ROUTE_GRANTS_KEY_V1188);
+  const kept=existing.filter(r=>Number(r?.expiresAt||0)>nowMs && Number(r?.enabledAt||0)===enabledAt).slice(-23);
+  kept.push({hash,target:safeTarget,enabledAt,expiresAt,issuedAt:nowMs});
+  if(!await webDiagAuxWriteV1188(env,WEB_DIAG_ROUTE_GRANTS_KEY_V1188,kept)) return null;
+  return `${WEB_DIAG_BASE_V1179}/webdiag-open?g=${encodeURIComponent(secret)}&next=${encodeURIComponent(safeTarget)}`;
+}
+
+async function webDiagRouteGrantV1188(env,control,secret,target,consume=false){
+  const safeTarget=webDiagSafeTargetV1188(target);
+  if(!safeTarget || !secret || !webDiagStillEnabledV1179(control)) return {ok:false,reason:"WEB_DIAG_ROUTE_GRANT_INVALID_V1188"};
+  const nowMs=Date.now();
+  const enabledAt=Number(control?.enabledAt||0);
+  const hash=await webDiagSha256V1179(secret);
+  const rows=await webDiagAuxReadV1188(env,WEB_DIAG_ROUTE_GRANTS_KEY_V1188);
+  const index=rows.findIndex(r=>String(r?.hash||"")===hash && String(r?.target||"")===safeTarget && Number(r?.enabledAt||0)===enabledAt && Number(r?.expiresAt||0)>nowMs);
+  if(index<0) return {ok:false,reason:"WEB_DIAG_ROUTE_GRANT_EXPIRED_OR_USED_V1188"};
+  if(consume){
+    const remaining=rows.filter((_,i)=>i!==index).filter(r=>Number(r?.expiresAt||0)>nowMs && Number(r?.enabledAt||0)===enabledAt).slice(-24);
+    if(!await webDiagAuxWriteV1188(env,WEB_DIAG_ROUTE_GRANTS_KEY_V1188,remaining)) return {ok:false,reason:"WEB_DIAG_ROUTE_GRANT_CONSUME_FAILED_V1188"};
+  }
+  return {ok:true,target:safeTarget,expiresAt:Number(rows[index]?.expiresAt||0)};
+}
+
+async function webDiagRegisterSessionV1188(env,control,session){
+  if(!session || !webDiagStillEnabledV1179(control)) return false;
+  const nowMs=Date.now();
+  const enabledAt=Number(control?.enabledAt||0);
+  if(!enabledAt) return false;
+  const hardExp=Number(control?.expiresAt||0);
+  const expiresAt=hardExp>0?hardExp:nowMs+24*60*60*1000;
+  const hash=await webDiagSha256V1179(session);
+  const rows=await webDiagAuxReadV1188(env,WEB_DIAG_SESSIONS_KEY_V1188);
+  const kept=rows.filter(r=>Number(r?.expiresAt||0)>nowMs && Number(r?.enabledAt||0)===enabledAt && String(r?.hash||"")!==hash).slice(-7);
+  kept.push({hash,enabledAt,expiresAt,createdAt:nowMs});
+  return await webDiagAuxWriteV1188(env,WEB_DIAG_SESSIONS_KEY_V1188,kept);
+}
+
+async function webDiagSessionValidV1188(env,control,hash){
+  if(!hash || !webDiagStillEnabledV1179(control)) return false;
+  const nowMs=Date.now();
+  const enabledAt=Number(control?.enabledAt||0);
+  const rows=await webDiagAuxReadV1188(env,WEB_DIAG_SESSIONS_KEY_V1188);
+  return rows.some(r=>String(r?.hash||"")===String(hash) && Number(r?.enabledAt||0)===enabledAt && Number(r?.expiresAt||0)>nowMs);
+}
+
+function webDiagRouteCookieValueV1188(request){
+  const cookie=String(request?.headers?.get("cookie")||"");
+  for(const part of cookie.split(";")){
+    const [k,...rest]=part.trim().split("=");
+    if(k===WEB_DIAG_ROUTE_COOKIE_V1188) return decodeURIComponent(rest.join("="));
+  }
+  return "";
 }
 
 /* =========================================================
@@ -197458,10 +197563,11 @@ async function webDiagAuthorizedV1179(request,state,env){
   const control=webDiagControlV1179(state);
   if(!webDiagStillEnabledV1179(control)) return {ok:false,reason:control?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179",access,control};
   const session=webDiagCookieValueV1179(request);
-  if(!session || !control.sessionHash) return {ok:false,reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179",access,control};
+  if(!session) return {ok:false,reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179",access,control};
   const hash=await webDiagSha256V1179(session);
-  if(hash!==String(control.sessionHash)) return {ok:false,reason:"WEB_DIAGNOSTICS_SESSION_INVALID_V1179",access,control};
-  return {ok:true,reason:"AUTHORIZED_V1185",access,control};
+  if(control.sessionHash && hash===String(control.sessionHash)) return {ok:true,reason:"AUTHORIZED_LEGACY_SESSION_V1188",access,control};
+  if(await webDiagSessionValidV1188(env,control,hash)) return {ok:true,reason:"AUTHORIZED_MULTI_BROWSER_SESSION_V1188",access,control};
+  return {ok:false,reason:"WEB_DIAGNOSTICS_SESSION_INVALID_V1179",access,control};
 }
 
 function webDiagDeniedResponseV1179(auth){
@@ -197615,7 +197721,7 @@ function webDiagHomeHtmlV1184(){
   const rows = links.map(([href,label])=>`<li><a href="${href}">${webDiagHtmlEscapeV1184(label)}</a></li>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChainVanta Protected Diagnostics</title>
 <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:0 auto;padding:22px;color:#111}h1{font-size:22px}li{margin:12px 0}a{color:#0645ad}.ok{padding:12px;border-radius:10px;background:#eef8ef}.small{color:#5b6470;font-size:13px}</style></head><body>
-<h1>ChainVanta Protected Diagnostics — V1185</h1>
+<h1>ChainVanta Protected Diagnostics — V1188</h1>
 <p class="ok"><b>Access: AUTHORIZED</b><br>Cloudflare identity (when enabled) + ChainVanta browser session established successfully.</p>
 <p>Open any protected diagnostic below. Long reports include <b>Copy full diagnostic</b> and a cross-platform <b>Download .txt</b> attachment.</p>
 <ul>${rows}</ul>
@@ -197827,7 +197933,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     request.method !==
       "GET" &&
     !scheduledRelayV671 &&
-    path !== "/webdiag-access"
+    path !== "/webdiag-access" &&
+    path !== "/webdiag-open"
   ) {
     return jsonResponse(
       {
@@ -199635,6 +199742,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     if (savedV1179?.saved !== true) {
       return new Response("Unable to establish diagnostic session.",{status:503,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
     }
+    await webDiagRegisterSessionV1188(env,stateV1179.webDiagControlV1179,sessionV1179);
 
     const maxAgeV1179 = Number(controlV1179.expiresAt||0)>0 ? Math.max(1,Math.floor((Number(controlV1179.expiresAt)-Date.now())/1000)) : 21600;
     const headersV1187 = new Headers({
@@ -199647,6 +199755,49 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     headersV1187.append("set-cookie",`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1179)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeV1179}`);
     headersV1187.append("set-cookie",`${WEB_DIAG_BOOTSTRAP_COOKIE_V1186}=; Path=/webdiag-access; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
     return new Response(null,{status:303,headers:headersV1187});
+  }
+
+  // V1188: short-lived route-bound handoff for protected Telegram web links.
+  if (path === "/webdiag-open" && (request.method === "GET" || request.method === "POST")) {
+    const accessV1188 = await webDiagVerifyAccessJwtV1185(request,env);
+    if (!accessV1188.ok) return webDiagDeniedResponseV1179({reason:accessV1188.reason,access:accessV1188});
+    const loadedV1188 = await readState(env);
+    const stateV1188 = loadedV1188?.state || newState();
+    const controlV1188 = webDiagControlV1179(stateV1188);
+    if (!webDiagStillEnabledV1179(controlV1188)) return webDiagDeniedResponseV1179({reason:controlV1188?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
+    const requestedTargetV1188 = webDiagSafeTargetV1188(url.searchParams.get("next") || "");
+    if (!requestedTargetV1188) return new Response("Invalid diagnostic destination.",{status:400,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
+
+    const existingAuthV1188 = await webDiagAuthorizedV1179(request,stateV1188,env);
+    if (existingAuthV1188.ok) return new Response(null,{status:303,headers:{"location":requestedTargetV1188,"cache-control":"no-store","referrer-policy":"no-referrer"}});
+
+    if (request.method === "GET") {
+      const grantSecretV1188 = String(url.searchParams.get("g") || "");
+      if (grantSecretV1188) {
+        const grantV1188 = await webDiagRouteGrantV1188(env,controlV1188,grantSecretV1188,requestedTargetV1188,false);
+        if (!grantV1188.ok) return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
+        const remainingSecV1188 = Math.max(1,Math.min(600,Math.floor((grantV1188.expiresAt-Date.now())/1000)));
+        const headersV1188 = new Headers({"location":`/webdiag-open?next=${encodeURIComponent(requestedTargetV1188)}`,"cache-control":"no-store, max-age=0","pragma":"no-cache","referrer-policy":"no-referrer","x-content-type-options":"nosniff"});
+        headersV1188.append("set-cookie",`${WEB_DIAG_ROUTE_COOKIE_V1188}=${encodeURIComponent(grantSecretV1188)}; Path=/webdiag-open; HttpOnly; Secure; SameSite=Strict; Max-Age=${remainingSecV1188}`);
+        return new Response(null,{status:303,headers:headersV1188});
+      }
+      const cookieGrantV1188 = webDiagRouteCookieValueV1188(request);
+      const grantV1188 = await webDiagRouteGrantV1188(env,controlV1188,cookieGrantV1188,requestedTargetV1188,false);
+      if (!grantV1188.ok) return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
+      const confirmV1188 = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChainVanta Admin Diagnostics</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:620px;margin:0 auto;padding:28px;color:#111;background:#fff}.card{border:1px solid #e4e7eb;border-radius:16px;padding:22px}.lock{font-size:34px}.btn{appearance:none;border:0;border-radius:12px;background:#111;color:#fff;font-size:17px;font-weight:700;padding:14px 18px;width:100%;margin-top:18px}.small{font-size:13px;line-height:1.45;color:#667085;margin-top:16px}</style></head><body><div class="card"><div class="lock">🔐</div><h1>ChainVanta Admin Diagnostics</h1><p>This browser needs temporary administrator access before opening the requested diagnostic.</p><form method="post" action="/webdiag-open?next=${encodeURIComponent(requestedTargetV1188)}"><button class="btn" type="submit">Authorise this browser</button></form><p class="small">This handoff is one-time and bound to the diagnostic link you selected.</p></div></body></html>`;
+      return new Response(confirmV1188,{status:200,headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store, max-age=0","pragma":"no-cache","referrer-policy":"no-referrer","x-content-type-options":"nosniff","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"}});
+    }
+
+    const cookieGrantV1188 = webDiagRouteCookieValueV1188(request);
+    const consumedV1188 = await webDiagRouteGrantV1188(env,controlV1188,cookieGrantV1188,requestedTargetV1188,true);
+    if (!consumedV1188.ok) return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
+    const sessionV1188 = webDiagRandomSecretV1179(32);
+    if (!await webDiagRegisterSessionV1188(env,controlV1188,sessionV1188)) return new Response("Unable to establish diagnostic session.",{status:503,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
+    const maxAgeV1188 = Number(controlV1188.expiresAt||0)>0?Math.max(1,Math.floor((Number(controlV1188.expiresAt)-Date.now())/1000)):21600;
+    const headersV1188 = new Headers({"location":requestedTargetV1188,"cache-control":"no-store, max-age=0","pragma":"no-cache","referrer-policy":"no-referrer","x-content-type-options":"nosniff"});
+    headersV1188.append("set-cookie",`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1188)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeV1188}`);
+    headersV1188.append("set-cookie",`${WEB_DIAG_ROUTE_COOKIE_V1188}=; Path=/webdiag-open; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
+    return new Response(null,{status:303,headers:headersV1188});
   }
 
   // V1179: protect every exposed diagnostic route before route-specific rendering.
