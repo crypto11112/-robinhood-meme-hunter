@@ -1,3 +1,4 @@
+// V1200 — read-only Outcome Intelligence cooldown/backlog telemetry; no budget/scoring/provider-policy changes.
 // V1199 — authoritative forward-audit schema migration in the V1120 observer path; no hindsight backfill.
 // V1198 — Forward-only horizon repair: safely initializes missing future horizons, marks elapsed missing horizons non-backfillable, and re-arms overdue observer work.
 // V1197 — Read-only Outcome Intelligence visibility: historical + forward V1117/V1120 audit in one Telegram command.
@@ -10008,7 +10009,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1199";
+const VERSION = "V1200";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144736,9 +144737,27 @@ function performanceCallContextV1181(record) {
 }
 
 
+function outcomeCooldownTimeV1200(value) {
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0) return null;
+  try {
+    const iso=new Date(n).toISOString();
+    const remainingMs=Math.max(0,n-Date.now());
+    const totalMinutes=Math.ceil(remainingMs/60000);
+    const days=Math.floor(totalMinutes/1440);
+    const hours=Math.floor((totalMinutes%1440)/60);
+    const minutes=totalMinutes%60;
+    const parts=[];
+    if(days) parts.push(`${days}d`);
+    if(hours) parts.push(`${hours}h`);
+    if(minutes||!parts.length) parts.push(`${minutes}m`);
+    return {iso,remaining:parts.join(" ")};
+  } catch { return null; }
+}
+
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1199</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1200</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144778,17 +144797,25 @@ async function outcomeIntelMessageV1197(state, env) {
     }
     const obsWrap=snap?.outcomeObserverV1120||null;
     const obs=obsWrap?.status && typeof obsWrap.status==="object" ? obsWrap.status : obsWrap;
-    if(obsWrap) lines.push("",`Observer: <b>${escapeHtml(String(obs?.status||"AVAILABLE"))}</b>` +
-      ` · enabled ${obsWrap?.enabled===true?"YES":"NO"}` +
-      (Number.isFinite(Number(obs?.pendingHorizons))?` · pending ${Number(obs.pendingHorizons)}`:"") +
-      (Number.isFinite(Number(obs?.dueHorizons))?` · due ${Number(obs.dueHorizons)}`:"") +
-      (Number.isFinite(Number(obs?.futureHorizons))?` · future ${Number(obs.futureHorizons)}`:"") +
-      (obs?.providerCooldownUntil?` · cooldown until ${escapeHtml(String(obs.providerCooldownUntil))}`:"") +
-      (obs?.error?` · error ${escapeHtml(String(obs.error))}`:""));
+    if(obsWrap) {
+      const cooldownV1200=outcomeCooldownTimeV1200(obs?.providerCooldownUntil);
+      const pendingV1200=Number.isFinite(Number(obs?.pendingHorizons))?Number(obs.pendingHorizons):null;
+      const dueV1200=Number.isFinite(Number(obs?.dueHorizons))?Number(obs.dueHorizons):null;
+      const futureV1200=Number.isFinite(Number(obs?.futureHorizons))?Number(obs.futureHorizons):null;
+      lines.push("",`Observer: <b>${escapeHtml(String(obs?.status||"AVAILABLE"))}</b>` +
+        ` · enabled ${obsWrap?.enabled===true?"YES":"NO"}` +
+        (pendingV1200!==null?` · pending ${pendingV1200}`:"") +
+        (dueV1200!==null?` · due ${dueV1200}`:"") +
+        (futureV1200!==null?` · future ${futureV1200}`:"") +
+        (obs?.error?` · error ${escapeHtml(String(obs.error))}`:""));
+      if(cooldownV1200) lines.push(`Cooldown: until <b>${escapeHtml(cooldownV1200.iso)}</b> · remaining ${escapeHtml(cooldownV1200.remaining)}`);
+      if(pendingV1200!==null) lines.push(`Backlog: ${dueV1200||0} due now · ${futureV1200||0} scheduled future · ${pendingV1200} total pending`);
+      lines.push(`Backlog state: ${String(obs?.status||"").includes("PROVIDER_COOLDOWN")?"Provider governor/cooldown is currently holding external outcome observation. V1200 does not bypass or raise that budget.":"No provider-cooldown hold is reported by the current observer status."}`);
+    }
     const mig=obs?.migrationV1199||null;
     if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1199 repair visibility: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1200 telemetry only: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
