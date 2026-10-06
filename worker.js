@@ -179643,7 +179643,7 @@ async function telegramCommandReplyV271(
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
       const savedV1179 = await writeState(env,stateV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1179</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1180</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
       const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
@@ -179659,14 +179659,15 @@ async function telegramCommandReplyV271(
           enabledAt:Date.now(), enabledBy:`ADMIN_CHAT:${chatId}`, disabledAt:null, lastLoginAt:null
         };
         const savedV1179 = await writeState(env,stateV1179);
+        // V1180: render the one-time login as an explicit Telegram HTML anchor so it is tappable.
         const loginUrlV1179 = `${WEB_DIAG_BASE_V1179}/webdiag-access?key=${encodeURIComponent(bootstrapV1179)}`;
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1179</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1180</b>","",
           `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>","",
           "Open this private one-time login link in the browser you will use for diagnostics:",
-          `<code>${escapeHtml(loginUrlV1179)}</code>`,"",
+          `<a href="${escapeHtml(loginUrlV1179)}">🔐 Open secure diagnostic login</a>`,"",
           "After login, diagnostic commands can use clean web URLs without secrets in the link.",
           "The raw login secret is not stored; only its SHA-256 hash is persisted."
         ].join("\n");
@@ -179691,7 +179692,7 @@ async function telegramCommandReplyV271(
       }),
       v979LatestScanDecision: stateV968?.state?.marketPairDecisionAuditV979 || null
     };
-    const replyV968 = marketCompletionAuditTelegramV968(resultV968) + `\n\n🌐 <b>Full web copy:</b> <code>${WEB_DIAG_BASE_V1179}/marketaudit</code>\n<i>Requires Admin /webdiag browser login.</i>`;
+    const replyV968 = marketCompletionAuditTelegramV968(resultV968) + `\n\n🌐 <b>Full web copy:</b> <a href="${WEB_DIAG_BASE_V1179}/marketaudit">Open full web diagnostic</a>\n<i>Requires Admin /webdiag browser login.</i>`;
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV968 = await sendTelegram(env, replyV968, null, null);
     if (diagnosticV273) {
@@ -181281,7 +181282,7 @@ async function telegramCommandReplyV271(
   // V1179: append one clean protected browser-copy URL to long diagnostics.
   const webRouteV1179 = webDiagRouteForCommandV1179(parsed.command);
   if (webRouteV1179 && typeof reply === "string") {
-    reply += `\n\n🌐 <b>Full web copy:</b> <code>${WEB_DIAG_BASE_V1179}${webRouteV1179}</code>\n<i>Requires Admin /webdiag browser login.</i>`;
+    reply += `\n\n🌐 <b>Full web copy:</b> <a href="${WEB_DIAG_BASE_V1179}${webRouteV1179}">Open full web diagnostic</a>\n<i>Requires Admin /webdiag browser login.</i>`;
   }
 
   // V759: preserve the existing chunked delivery and also route
@@ -197212,7 +197213,7 @@ function webDiagStatusMessageV1179(state){
   const active=webDiagStillEnabledV1179(c);
   const exp=Number(c?.expiresAt||0);
   return [
-    "🔐 <b>ChainVanta Web Diagnostics — V1179</b>","",
+    "🔐 <b>ChainVanta Web Diagnostics — V1180</b>","",
     `Status: <b>${active?"ENABLED":"DISABLED"}</b>`,
     `Mode: <b>${escapeHtml(String(c?.mode||"OFF"))}</b>`,
     `Expires: <b>${exp>0?escapeHtml(new Date(exp).toISOString()):active?"MANUAL OFF":"N/A"}</b>`,
