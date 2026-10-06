@@ -1,3 +1,4 @@
+// V1196 — Final WebDiag window wiring: 30m/1h/6h/24h; /webdiag on defaults to 1h; current status/help labels.
 // V1195 — Production WebDiag security controls: 30m/1h/6h/24h, 1h default; retains V1194 KV diagnostics.
 // V1194 — WebDiag persistence diagnostic only. Reports exact binding/write/readback failure; no scanner/scoring/provider/payment changes.
 // V1193 — Web Diagnostics dedicated state persistence repair.
@@ -10004,7 +10005,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1195";
+const VERSION = "V1196";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179939,18 +179940,19 @@ async function telegramCommandReplyV271(
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
       const savedV1179 = await webDiagControlWriteV1193(env,stateV1179.webDiagControlV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1193</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1196</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
-      const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
+      const allowedDurationsV1179 = {"30m":1800000,"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
-        replyV1179 = "⚠️ <b>Usage:</b> <code>/webdiag on</code>, <code>/webdiag on 1h</code>, <code>/webdiag on 6h</code>, <code>/webdiag on 24h</code>, <code>/webdiag off</code>, or <code>/webdiag status</code>.";
+        replyV1179 = "⚠️ <b>Usage:</b> <code>/webdiag on</code> (defaults to 1h), <code>/webdiag on 30m</code>, <code>/webdiag on 1h</code>, <code>/webdiag on 6h</code>, <code>/webdiag on 24h</code>, <code>/webdiag off</code>, or <code>/webdiag status</code>.";
       } else {
         const bootstrapV1179 = webDiagRandomSecretV1179(32);
         const bootstrapHashV1179 = await webDiagSha256V1179(bootstrapV1179);
-        const ttlV1179 = durationV1179 ? allowedDurationsV1179[durationV1179] : 0;
-        const expiresAtV1179 = ttlV1179 ? Date.now()+ttlV1179 : null;
+        const effectiveDurationV1179 = durationV1179 || "1h";
+        const ttlV1179 = allowedDurationsV1179[effectiveDurationV1179];
+        const expiresAtV1179 = Date.now()+ttlV1179;
         stateV1179.webDiagControlV1179 = {
-          enabled:true, mode:durationV1179?durationV1179.toUpperCase():"MANUAL",
+          enabled:true, mode:effectiveDurationV1179.toUpperCase(),
           expiresAt:expiresAtV1179, bootstrapHash:bootstrapHashV1179, sessionHash:null,
           enabledAt:Date.now(), enabledBy:`ADMIN_CHAT:${chatId}`, disabledAt:null, lastLoginAt:null
         };
@@ -179961,20 +179963,20 @@ async function telegramCommandReplyV271(
           replyMarkupV1186 = {inline_keyboard:[[{ text:"🔐 Open secure diagnostic login", url:loginUrlV1179 }]]};
         }
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1195</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1196</b>","",
           `Status: <b>${savedV1179?.saved===true&&savedV1179?.verified===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
-          `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
+          `Mode: <b>${effectiveDurationV1179.toUpperCase()}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>",
           `KV binding: <b>${escapeHtml(String(savedV1179?.binding||"NONE"))}</b>`,
           `KV put completed: <b>${savedV1179?.putCompleted===true?"YES":"NO"}</b>`,
           `Immediate read-back present: <b>${savedV1179?.readbackPresent===true?"YES":"NO"}</b>`,
           `Save diagnostic: <code>${escapeHtml(String(savedV1179?.error||"NONE").slice(0,300))}</code>`,
           "",
-          "<i>V1194 diagnostic only. No provider/RPC requests and no production scoring/alert changes.</i>"
+          "<i>V1196 WebDiag security controls. No provider/RPC requests and no production scoring/alert changes.</i>"
         ].join("\n");
       }
     } else {
-      replyV1179 = "⚠️ <b>Usage:</b> <code>/webdiag on</code>, <code>/webdiag on 1h</code>, <code>/webdiag on 6h</code>, <code>/webdiag on 24h</code>, <code>/webdiag off</code>, or <code>/webdiag status</code>.";
+      replyV1179 = "⚠️ <b>Usage:</b> <code>/webdiag on</code> (defaults to 1h), <code>/webdiag on 30m</code>, <code>/webdiag on 1h</code>, <code>/webdiag on 6h</code>, <code>/webdiag on 24h</code>, <code>/webdiag off</code>, or <code>/webdiag status</code>.";
     }
 
     const sentV1179 = replyMarkupV1186
@@ -197987,7 +197989,7 @@ function webDiagStatusMessageV1179(state){
   const active=webDiagStillEnabledV1179(c);
   const exp=Number(c?.expiresAt||0);
   return [
-    "🔐 <b>ChainVanta Web Diagnostics — V1185</b>","",
+    "🔐 <b>ChainVanta Web Diagnostics — V1196</b>","",
     `Status: <b>${active?"ENABLED":"DISABLED"}</b>`,
     `Mode: <b>${escapeHtml(String(c?.mode||"OFF"))}</b>`,
     `Expires: <b>${exp>0?escapeHtml(new Date(exp).toISOString()):active?"MANUAL OFF":"N/A"}</b>`,
