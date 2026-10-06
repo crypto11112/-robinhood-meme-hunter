@@ -1,3 +1,4 @@
+// V1204 — professional Outcome Intelligence access hardening + exact provenance display alignment. Diagnostic-only.
 // V1203 — restores /outcomeintel Telegram delivery and adds it to protected WebDiag with copy/download.
 // V1202 — Telegram-safe /outcomeintel delivery; no collector/scoring/provider/security changes.
 // V1201 — read-only frozen-outcome provenance/timing audit; no collector, scoring, budget, or security changes.
@@ -10012,7 +10013,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1203";
+const VERSION = "V1204";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144760,7 +144761,7 @@ function outcomeCooldownTimeV1200(value) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1203</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1204</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144839,9 +144840,9 @@ async function outcomeIntelMessageV1197(state, env) {
         }
         if(h?.forwardOnly===true) forwardFlag++;
         if(h?.hindsightBackfillAllowed===false) noBackfillFlag++;
-        const grade=String(h?.timingGradeV1122||h?.timingGrade||"").toUpperCase();
+        const grade=String(h?.timingGradeV1122||"").toUpperCase();
         if(grade==="STALE") stale++;
-        if(h?.learningEligibleV1122===true||h?.learningEligible===true||h?.freezeEligible===true) eligible++;
+        if(h?.performanceEligibleV1122===true) eligible++;
         const source=String(h?.source||h?.priceSource||h?.observationSource||h?.evidenceSource||"UNSPECIFIED");
         sources[source]=(sources[source]||0)+1;
       }
@@ -144851,13 +144852,13 @@ async function outcomeIntelMessageV1197(state, env) {
       }
     }
     if(provenanceRowsV1201.length){
-      lines.push("","🧬 <b>V1201 frozen-evidence provenance audit</b>",...provenanceRowsV1201,
+      lines.push("","🧬 <b>V1204 frozen-evidence provenance audit</b>",...provenanceRowsV1201,
         "<i>Read-only classification of already-frozen evidence. It does not reclassify, backfill, unfreeze or alter learning eligibility.</i>");
     }
     const mig=obs?.migrationV1199||null;
     if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1203 protected-delivery telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1204 protected-delivery telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
@@ -180043,6 +180044,12 @@ async function telegramCommandReplyV271(
   // V1179: Admin-channel-only control for protected browser diagnostics.
   // V1191 read-only outcome intelligence. Existing Admin Telegram authorization applies.
   if (parsed.command === "/outcomeintel") {
+    // V1204 defense-in-depth: this internal diagnostic is explicitly ADMIN-only,
+    // in addition to the global V1025 member-command interception above.
+    if (chatRoleV1025 !== "ADMIN") {
+      const deniedV1204 = await sendTelegram(env,"🔒 <b>Admin-only diagnostic.</b>",null,null,chatId);
+      return {success:deniedV1204?.success===true,ignored:false,command:"/outcomeintel",reason:"ADMIN_ONLY_V1204",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    }
     const loadedV1191 = await readState(env);
     const stateV1191 = loadedV1191?.state || newState();
     const replyV1191 = await outcomeIntelMessageV1197(stateV1191, env);
