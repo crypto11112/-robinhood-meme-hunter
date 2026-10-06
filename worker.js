@@ -16595,6 +16595,56 @@ function telegramProductionMessageV1170(candidate) {
 
 
 /* =========================================================
+   V1178 — VERIFIED LAUNCH AGE + CAUTIOUS NARRATIVE LABELS
+   Presentation-only enrichment. No discovery, scoring, provider, RPC,
+   qualification, risk or Premium->Free delivery logic changes.
+   Name-only narrative clues are INDICATIVE, never VERIFIED. Unrecognized
+   tokens remain UNVERIFIED rather than being called meme tokens by default.
+   ========================================================= */
+function customerLaunchAgeV1178(candidate, capturedAt = Date.now()) {
+  const proof = candidate?.verifiedLaunchAgeV223;
+  const ts = Number(proof?.launchTimestampMs);
+  const at = Number(capturedAt);
+  if (proof?.verified !== true || !Number.isFinite(ts) || !Number.isFinite(at) ||
+      ts <= 0 || ts > at || at - ts > 20 * 365 * 24 * 3600 * 1000) {
+    return {verified:false, display:"UNVERIFIED", launchedAt:null, source:null};
+  }
+  const minutes = Math.floor((at - ts) / 60000);
+  const display = minutes < 60 ? `${minutes}m` :
+    minutes < 1440 ? `${Math.floor(minutes/60)}h ${minutes%60}m` :
+    minutes < 43200 ? `${Math.floor(minutes/1440)}d` :
+    minutes < 525600 ? `${Math.floor(minutes/43200)}mo` :
+    `${Math.floor(minutes/525600)}y`;
+  return {verified:true, display, launchedAt:ts,
+    source:String(proof?.source || "VERIFIED_LAUNCH_TIMESTAMP_V223").slice(0,100)};
+}
+
+function customerNarrativeV1178(candidate) {
+  // These are explicitly *unverified*, naming-only clues. Never use in
+  // opportunity scoring, safety screening, launch coverage or promotion.
+  // Avoid bare ticker matches (e.g. AI, RWA, GAME) that cause false labels.
+  const name = String(candidate?.name || "").toLowerCase().replace(/[_-]+/g," ").slice(0,100);
+  const labels = [];
+  const rules = [
+    ["AI Agent", /\b(ai agents?|autonomous agents?|agentic ai)\b/i],
+    ["AI", /\b(artificial intelligence|machine learning|generative ai)\b/i],
+    ["Gaming", /\b(gaming|gamefi|play to earn|gaming ecosystem)\b/i],
+    ["DeFi", /\b(decentralized finance|defi)\b/i],
+    ["RWA", /\b(real world assets?|tokenized real assets?|rwa)\b/i],
+    ["SocialFi", /\b(socialfi|social finance)\b/i],
+    ["Infrastructure / DePIN", /\b(depin|decentralized physical infrastructure)\b/i],
+    ["Meme / Culture", /\b(meme coin|memecoin|meme culture|culture coin)\b/i]
+  ];
+  for (const [label, pattern] of rules) {
+    if (pattern.test(name) && !labels.includes(label)) labels.push(label);
+  }
+  if (labels.includes("AI Agent") && !labels.includes("AI")) labels.unshift("AI");
+  return {labels:labels.slice(0,3), display:labels.length ? labels.slice(0,3).join(" + ") : "UNVERIFIED",
+    verified:false, evidenceLevel:labels.length ? "INDICATIVE_NAME_ONLY" : "UNVERIFIED",
+    source:labels.length ? "TOKEN_NAME_HEURISTIC_V1178" : null};
+}
+
+/* =========================================================
    V1175 VERIFIED CUSTOMER CALL BASELINE + PRODUCTION RENDERER
    Presentation/persistence only. Zero external requests and no qualification,
    scoring, risk, threshold or provider-budget changes.
@@ -16663,6 +16713,8 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
   const callType = previousTimestamp > 0
     ? "Re-Alert"
     : String(alertClass?.title || "Qualified Call").replace(/\s+Alert$/i, "");
+  const customerLaunchV1178 = customerLaunchAgeV1178(candidate, capturedAt);
+  const customerNarrativeLabelV1178 = customerNarrativeV1178(candidate);
 
   return {
     version:"V1175",
@@ -16670,6 +16722,16 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
     address:normalize(candidate?.address),
     symbol:candidate?.symbol || null,
     callType,
+    customerEnrichmentVersion:"V1178",
+    launchAgeVerifiedV1178:customerLaunchV1178.verified,
+    launchAgeDisplayV1178:customerLaunchV1178.display,
+    verifiedLaunchTimestampV1178:customerLaunchV1178.launchedAt,
+    launchAgeEvidenceSourceV1178:customerLaunchV1178.source,
+    narrativeTagsV1178:customerNarrativeLabelV1178.labels,
+    narrativeDisplayV1178:customerNarrativeLabelV1178.display,
+    narrativeVerifiedV1178:false,
+    narrativeEvidenceLevelV1178:customerNarrativeLabelV1178.evidenceLevel,
+    narrativeSourceV1178:customerNarrativeLabelV1178.source,
     firstCall:!(previousTimestamp > 0),
     reAlert:previousTimestamp > 0,
     priorSuccessfulAlertAt:previousTimestamp > 0 ? previousTimestamp : null,
@@ -16746,6 +16808,8 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
     "",
     `🎯 Opportunity <b>${safeNumber(candidate?.opportunity?.score)}/100</b> · Confidence <b>${safeNumber(candidate?.confidence?.score)}/100</b>`,
     `🚀 Momentum <b>${safeNumber(candidate?.momentum?.score)}/100 ${escapeHtml(candidate?.momentum?.label || "")}</b> · Risk <b>${escapeHtml(riskText)}</b>`,
+    `🕒 Launch age: <b>${escapeHtml(call?.launchAgeDisplayV1178 || "UNVERIFIED")}</b>${call?.launchAgeVerifiedV1178===true?" · VERIFIED":""}`,
+    `🧩 Narrative: <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${call?.narrativeEvidenceLevelV1178==="INDICATIVE_NAME_ONLY"?" · indicative":""}`,
     `💵 Entry <b>${escapeHtml(entryText)}</b> · ${entryProof}`,
     `💰 MC <b>${market?.verified===true?money(market.marketCap):"UNVERIFIED"}</b> · Liquidity <b>${market?.verified===true?money(market.liquidityUsd):"UNVERIFIED"}</b>`,
     `📊 24h Vol <b>${market?.verified===true?money(market?.volume?.h24):"UNVERIFIED"}</b>`,
@@ -16767,6 +16831,7 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
     `🪙 <b>${escapeHtml(rawName)} (${escapeHtml(rawSymbol)})</b>`,
     `<code>${escapeHtml(candidate?.address || "UNVERIFIED")}</code>`,
     `🎯 Opp <b>${safeNumber(candidate?.opportunity?.score)}</b> · Conf <b>${safeNumber(candidate?.confidence?.score)}</b> · Mom <b>${safeNumber(candidate?.momentum?.score)}</b> · Risk <b>${candidate?.risk?.verified===true?safeNumber(candidate?.risk?.score):"UNVERIFIED"}</b>`,
+    `🕒 Age <b>${escapeHtml(call?.launchAgeDisplayV1178 || "UNVERIFIED")}</b> · Narrative <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${call?.narrativeEvidenceLevelV1178==="INDICATIVE_NAME_ONLY"?" (indicative)":""}`,
     `💵 Entry <b>${escapeHtml(entryText)}</b> · ${entryProof}`,
     `💰 MC <b>${market?.verified===true?money(market.marketCap):"UNVERIFIED"}</b> · Liq <b>${market?.verified===true?money(market.liquidityUsd):"UNVERIFIED"}</b>`,
     `🧭 ${escapeHtml(call?.triggerReason || "Qualified score + verified safety gates")}`,
@@ -125011,7 +125076,11 @@ for (
         customerEntryPriceUsdV1175:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.entryPriceUsd ?? null,
         customerEntryPoolIdV1175:
-          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.exactPoolId || null
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.exactPoolId || null,
+        customerNarrativeEvidenceV1178:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeEvidenceLevelV1178 || "UNVERIFIED",
+        customerLaunchAgeVerifiedV1178:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.launchAgeVerifiedV1178 === true
       };
 
       const sameRunVerifiedUsdCompletionV264 =
