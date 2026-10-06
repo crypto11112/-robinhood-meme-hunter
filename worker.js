@@ -1,3 +1,4 @@
+// V1209 — Stripe event-ordering hardening. Payment-state only; scanner/scoring/providers/OutcomeIntel unchanged.
 // V1208 — Premium entitlement validation. Payment-only hardening; scanner/scoring/providers/OutcomeIntel unchanged.
 // V1207 — Stripe webhook idempotency hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
 // V1206 — adds protected WebDiag route-grant link to Admin /outcomeintel response only. Evidence/collector logic unchanged.
@@ -10017,7 +10018,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1208";
+const VERSION = "V1209";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -189031,6 +189032,74 @@ async function grantPremiumInviteV1032(env, telegramUserId) {
 /* V1037 — Stripe cancellation/access-expiry diagnostic only.
    Records subscription lifecycle fields in the existing subscribers table.
    It NEVER calls Telegram ban/kick/revoke methods. */
+
+async function stripeOrderingEnsureV1209(env){
+  if(!env?.CHAINVANTA_DB) return {ok:false,reason:"CHAINVANTA_DB_NOT_BOUND_V1209"};
+  try{
+    await env.CHAINVANTA_DB.prepare(`
+      CREATE TABLE IF NOT EXISTS stripe_event_order_v1209 (
+        stream_key TEXT PRIMARY KEY,
+        event_created INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `).run();
+    return {ok:true};
+  }catch(error){
+    return {ok:false,reason:"STRIPE_ORDER_TABLE_FAILED_V1209",error:errorString(error)};
+  }
+}
+
+async function stripeOrderingCheckV1209(env,event,streamKey){
+  const ready=await stripeOrderingEnsureV1209(env);
+  if(!ready.ok) return ready;
+  const created=Number(event?.created);
+  const eventId=String(event?.id||"").trim();
+  if(!Number.isFinite(created) || created<=0 || !eventId)
+    return {ok:false,reason:"STRIPE_EVENT_ORDER_METADATA_INVALID_V1209"};
+  try{
+    const row=await env.CHAINVANTA_DB.prepare(
+      `SELECT event_created,event_id FROM stripe_event_order_v1209 WHERE stream_key=? LIMIT 1`
+    ).bind(String(streamKey)).first();
+    if(row){
+      const previous=Number(row.event_created);
+      // Older events must never overwrite newer state. Equal timestamps are
+      // allowed because Stripe timestamps are second-resolution; event-id
+      // idempotency still prevents exact duplicate execution.
+      if(Number.isFinite(previous) && created<previous)
+        return {ok:true,stale:true,created,previous,eventId};
+    }
+    return {ok:true,stale:false,created,eventId};
+  }catch(error){
+    return {ok:false,reason:"STRIPE_ORDER_READ_FAILED_V1209",error:errorString(error)};
+  }
+}
+
+async function stripeOrderingCommitV1209(env,event,streamKey){
+  const created=Number(event?.created);
+  const eventId=String(event?.id||"").trim();
+  const eventType=String(event?.type||"").trim();
+  const ts=Math.floor(Date.now()/1000);
+  if(!Number.isFinite(created)||created<=0||!eventId)
+    return {ok:false,reason:"STRIPE_EVENT_ORDER_METADATA_INVALID_V1209"};
+  try{
+    await env.CHAINVANTA_DB.prepare(`
+      INSERT INTO stripe_event_order_v1209(stream_key,event_created,event_id,event_type,updated_at)
+      VALUES(?,?,?,?,?)
+      ON CONFLICT(stream_key) DO UPDATE SET
+        event_created=excluded.event_created,
+        event_id=excluded.event_id,
+        event_type=excluded.event_type,
+        updated_at=excluded.updated_at
+      WHERE excluded.event_created >= stripe_event_order_v1209.event_created
+    `).bind(String(streamKey),Math.trunc(created),eventId,eventType,ts).run();
+    return {ok:true};
+  }catch(error){
+    return {ok:false,reason:"STRIPE_ORDER_WRITE_FAILED_V1209",error:errorString(error)};
+  }
+}
+
 async function recordStripeLifecycleV1036(env, event) {
   if (!env?.CHAINVANTA_DB) return {ok:false,reason:"CHAINVANTA_DB_NOT_BOUND_V1036"};
   const type=String(event?.type||"");
@@ -189042,6 +189111,11 @@ async function recordStripeLifecycleV1036(env, event) {
   const customerId=String(typeof obj?.customer==="string" ? obj.customer : (obj?.customer?.id||"")).trim();
 
   if (!subscriptionId && !customerId) return {ok:false,reason:"STRIPE_SUBSCRIPTION_OR_CUSTOMER_MISSING_V1036"};
+
+  const orderingKeyV1209=`subscription:${subscriptionId || customerId}`;
+  const orderingV1209=await stripeOrderingCheckV1209(env,event,orderingKeyV1209);
+  if(!orderingV1209.ok) return orderingV1209;
+  if(orderingV1209.stale) return {ok:true,action:"STALE_STRIPE_EVENT_IGNORED_V1209",eventId:String(event?.id||""),eventCreated:orderingV1209.created,latestCreated:orderingV1209.previous};
 
   const stripeStatus=String(obj?.status||"").toLowerCase();
   const cancelAtRaw =
@@ -189108,6 +189182,8 @@ async function recordStripeLifecycleV1036(env, event) {
        SET status=?, current_period_end=?, cancel_at_period_end=?, updated_at=?
        WHERE telegram_user_id=?`
     ).bind(nextStatus,effectiveEnd,cancelAtPeriodEnd,ts,String(row.telegram_user_id)).run();
+    const orderCommitV1209=await stripeOrderingCommitV1209(env,event,orderingKeyV1209);
+    if(!orderCommitV1209.ok) return orderCommitV1209;
 
     // V1038: compact persisted trace in KV (if available), so Admin can inspect
     // exactly what the latest Stripe subscription lifecycle event contained.
@@ -189874,6 +189950,11 @@ async function recordInvoicePaymentLifecycleV1046(env, event) {
   const nowSec=Math.floor(Date.now()/1000);
   if(!invoiceId) return {ok:false,reason:"INVOICE_ID_MISSING_V1046"};
 
+  const orderingKeyV1209=`invoice:${invoiceId}`;
+  const orderingV1209=await stripeOrderingCheckV1209(env,event,orderingKeyV1209);
+  if(!orderingV1209.ok) return orderingV1209;
+  if(orderingV1209.stale) return {ok:true,action:"STALE_STRIPE_EVENT_IGNORED_V1209",invoiceId,eventId:String(event?.id||""),eventCreated:orderingV1209.created,latestCreated:orderingV1209.previous};
+
   await env.CHAINVANTA_DB.prepare(`
     CREATE TABLE IF NOT EXISTS failed_payment_grace_v1046 (
       invoice_id TEXT PRIMARY KEY,
@@ -189931,6 +190012,8 @@ async function recordInvoicePaymentLifecycleV1046(env, event) {
       ).bind(graceUntil,nowSec,uid).run();
     }
 
+    const orderCommitV1209=await stripeOrderingCommitV1209(env,event,orderingKeyV1209);
+    if(!orderCommitV1209.ok) return orderCommitV1209;
     return {
       ok:true,action:existing?"GRACE_RETRY_NO_EXTENSION":"GRACE_STARTED",
       invoiceId,telegramUserId:uid,graceStartedAt:graceStarted,graceUntil,
@@ -189955,6 +190038,8 @@ async function recordInvoicePaymentLifecycleV1046(env, event) {
         `UPDATE subscribers SET status='ACTIVE',grace_until=NULL,updated_at=? WHERE telegram_user_id=?`
       ).bind(nowSec,uid).run();
     }
+    const orderCommitV1209=await stripeOrderingCommitV1209(env,event,orderingKeyV1209);
+    if(!orderCommitV1209.ok) return orderCommitV1209;
     return {ok:true,action:grace?"GRACE_RESOLVED_PAID":"PAID_NO_OPEN_GRACE",invoiceId,telegramUserId:uid};
   }
 
