@@ -1,3 +1,4 @@
+// V1214 — propagate V1213 scan-relay secret from the Durable Object relay to /scan. Security-only fix.
 // V1213 — scan relay authentication hardening only. Scheduled relay requires a dedicated secret; manual /scan requires WebDiag.
 // V1212 — internal API surface lockdown. Customer/webhook/WebDiag bootstrap routes remain public as required.
 // V1211 — operational/provider-control route access hardening only. Scanner/scoring/provider policy/OutcomeIntel unchanged.
@@ -10022,7 +10023,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1213";
+const VERSION = "V1214";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -205498,6 +205499,7 @@ function compactHeavyScanRelayResultV914(
 }
 
 async function relayHeavyScanOutsideSchedulerV914(
+  env,
   mode = "scheduled"
 ) {
   const allowedModes =
@@ -205540,7 +205542,9 @@ async function relayHeavyScanOutsideSchedulerV914(
             "x-robinhood-meme-hunter-memory-isolation":
               "V914",
             "x-chainvanta-v1173-relay-attempt":
-              String(attempt)
+              String(attempt),
+            "x-chainvanta-scan-relay-secret":
+              String(env?.SCAN_RELAY_SECRET || "")
           }
         }
       );
@@ -205854,7 +205858,8 @@ export class ScanSchedulerV673 {
     try {
       result =
         await relayHeavyScanOutsideSchedulerV914(
-          qualificationFollowUpV723
+          this.env,
+           qualificationFollowUpV723
             ? "qualification-followup"
             : "scheduled"
         );
