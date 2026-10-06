@@ -1,3 +1,4 @@
+// V1210 — legacy diagnostic/control route access hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
 // V1209 — Stripe event-ordering hardening. Payment-state only; scanner/scoring/providers/OutcomeIntel unchanged.
 // V1208 — Premium entitlement validation. Payment-only hardening; scanner/scoring/providers/OutcomeIntel unchanged.
 // V1207 — Stripe webhook idempotency hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
@@ -10018,7 +10019,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1209";
+const VERSION = "V1210";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -197888,7 +197889,23 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/scheduler-status-v673","/scheduler-start-v673",
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
-  "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel"
+  "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel",
+
+  // V1210: legacy/internal diagnostic and operational inspection routes must
+  // pass the same closed-by-default WebDiag authorization before their
+  // existing handlers can execute.
+  "/health","/diagnostics","/diagnostics-read","/test-telegram",
+  "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
+  "/market-history","/market-history-status","/call-performance",
+  "/v4completeaudit","/v4manualflowaudit","/goldrush-market-test",
+  "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
+  "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
+  "/v3websocket-diagnostic","/v3multipool-diagnostic","/v3aggregation-diagnostic",
+  "/v3route-aggregation-diagnostic","/v3tx-diagnostic","/v3reconcile-diagnostic",
+  "/v3multipool-plan","/v3multipool-shadow-start","/v3multipool-shadow-status",
+  "/v3live-start","/v3live-status","/v3live-windows","/v3live-stop",
+  "/rpc-test","/compact-directional-v698","/state-size-v697","/state-size-v696",
+  "/state-size-v695","/compact-state-v693"
 ]);
 
 function webDiagControlV1179(state){
