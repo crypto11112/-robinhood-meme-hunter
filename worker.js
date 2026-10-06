@@ -1,3 +1,4 @@
+// V1206 — adds protected WebDiag route-grant link to Admin /outcomeintel response only. Evidence/collector logic unchanged.
 // V1205 — Outcome Intelligence presentation + provenance alignment only. No collector/scoring/provider changes.
 // V1204 — professional Outcome Intelligence access hardening + exact provenance display alignment. Diagnostic-only.
 // V1203 — restores /outcomeintel Telegram delivery and adds it to protected WebDiag with copy/download.
@@ -10014,7 +10015,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1205";
+const VERSION = "V1206";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144762,7 +144763,7 @@ function outcomeCooldownTimeV1200(value) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1205</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1206</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144859,7 +144860,7 @@ async function outcomeIntelMessageV1197(state, env) {
     const mig=obs?.migrationV1199||null;
     if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1205 protected-delivery telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1206 protected-delivery telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
@@ -180054,7 +180055,20 @@ async function telegramCommandReplyV271(
     const loadedV1191 = await readState(env);
     const stateV1191 = loadedV1191?.state || newState();
     const replyRawV1205 = await outcomeIntelMessageV1197(stateV1191, env);
-    const replyV1191 = String(replyRawV1205).replace(/\\n/g,"\n");
+    const outcomeControlV1206 = webDiagControlV1179(stateV1191);
+    const secureOutcomeLinkV1206 = await webDiagIssueRouteGrantV1188(
+      env,
+      outcomeControlV1206,
+      "/webdiag-outcomeintel"
+    );
+    const outcomeLinkV1206 = secureOutcomeLinkV1206 || `${WEB_DIAG_BASE_V1179}/webdiag-outcomeintel`;
+    const secureFooterV1206 = [
+      "",
+      "🔐 <b>Protected web diagnostic</b>",
+      `<a href="${escapeHtml(outcomeLinkV1206)}">Open Outcome Intelligence</a>`,
+      "<i>WebDiag must be enabled and authenticated. Full page includes Copy full diagnostic and Download .txt.</i>"
+    ].join("\n");
+    const replyV1191 = String(replyRawV1205).replace(/\\n/g,"\n") + secureFooterV1206;
     const chunksV1203 = telegramChunksV292(replyV1191);
     let sentOkV1203=true, sendErrorV1203=null;
     for(let iV1203=0;iV1203<chunksV1203.length;iV1203++){
