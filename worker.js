@@ -1,3 +1,4 @@
+// V1211 — operational/provider-control route access hardening only. Scanner/scoring/provider policy/OutcomeIntel unchanged.
 // V1210 — legacy diagnostic/control route access hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
 // V1209 — Stripe event-ordering hardening. Payment-state only; scanner/scoring/providers/OutcomeIntel unchanged.
 // V1208 — Premium entitlement validation. Payment-only hardening; scanner/scoring/providers/OutcomeIntel unchanged.
@@ -10019,7 +10020,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1210";
+const VERSION = "V1211";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -197905,7 +197906,18 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/v3multipool-plan","/v3multipool-shadow-start","/v3multipool-shadow-status",
   "/v3live-start","/v3live-status","/v3live-windows","/v3live-stop",
   "/rpc-test","/compact-directional-v698","/state-size-v697","/state-size-v696",
-  "/state-size-v695","/compact-state-v693"
+  "/state-size-v695","/compact-state-v693",
+
+  // V1211: remaining operational/provider-test routes capable of triggering
+  // external requests, state mutation, collector control, budget control or
+  // internal telemetry are admin diagnostics, never public API.
+  "/bitquery-oauth-test","/bitquery-http-test","/bitquery-http-result",
+  "/goldrush-swap-test","/goldrush-test","/goldrush-usage",
+  "/uniswaptest","/uniswapv4test","/v4poolcompare","/v4poollivecompare",
+  "/live-decision-observer-start","/live-budget-status","/live-budget-pause","/live-budget-resume",
+  "/live-priority-lane-test","/live-priority-rpc-test","/live-priority-status","/live-priority-lane-status",
+  "/live-decision-audit-status","/live-exact-pool-flow-collection-status",
+  "/last-alert-scan","/alert-history","/usage","/durable-usage-v404"
 ]);
 
 function webDiagControlV1179(state){
