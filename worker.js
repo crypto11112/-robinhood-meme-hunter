@@ -1,3 +1,4 @@
+// V1198 — Forward-only horizon repair: safely initializes missing future horizons, marks elapsed missing horizons non-backfillable, and re-arms overdue observer work.
 // V1197 — Read-only Outcome Intelligence visibility: historical + forward V1117/V1120 audit in one Telegram command.
 // V1196 — Final WebDiag window wiring: 30m/1h/6h/24h; /webdiag on defaults to 1h; current status/help labels.
 // V1195 — Production WebDiag security controls: 30m/1h/6h/24h, 1h default; retains V1194 KV diagnostics.
@@ -10006,7 +10007,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1197";
+const VERSION = "V1198";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144736,7 +144737,7 @@ function performanceCallContextV1181(record) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1197</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1198</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144752,7 +144753,7 @@ async function outcomeIntelMessageV1197(state, env) {
   } else {
     lines.push(`Decision records: <b>${records.length}</b>`);
     for (const [label,key] of ordered) {
-      let frozen=0,pending=0,due=0,future=0,eligible=0,exact=0,near=0,acceptable=0,stale=0;
+      let frozen=0,pending=0,missed=0,due=0,future=0,eligible=0,exact=0,near=0,acceptable=0,stale=0;
       for (const rec of records) {
         const h = rec?.horizons?.[key];
         if (!h) continue;
@@ -144767,17 +144768,23 @@ async function outcomeIntelMessageV1197(state, env) {
         } else if (h.status === "PENDING") {
           pending++;
           if (h.targetPassed === true) due++; else future++;
+        } else if (h.status === "MISSED_NOT_BACKFILLED") {
+          missed++;
         }
       }
-      lines.push(`• ${label}: <b>${frozen} frozen</b> · pending ${pending} (due ${due} / future ${future}) · eligible ${eligible}` +
+      lines.push(`• ${label}: <b>${frozen} frozen</b> · pending ${pending} (due ${due} / future ${future}) · missed/no-backfill ${missed} · eligible ${eligible}` +
         ((exact+near+acceptable+stale)>0 ? ` · timing E${exact}/N${near}/A${acceptable}/S${stale}` : ""));
     }
-    const obs=snap?.outcomeObserverV1120||null;
-    if(obs) lines.push("",`Observer: <b>${escapeHtml(String(obs?.status||"AVAILABLE"))}</b>` +
+    const obsWrap=snap?.outcomeObserverV1120||null;
+    const obs=obsWrap?.status && typeof obsWrap.status==="object" ? obsWrap.status : obsWrap;
+    if(obsWrap) lines.push("",`Observer: <b>${escapeHtml(String(obs?.status||"AVAILABLE"))}</b>` +
+      ` · enabled ${obsWrap?.enabled===true?"YES":"NO"}` +
       (Number.isFinite(Number(obs?.pendingHorizons))?` · pending ${Number(obs.pendingHorizons)}`:"") +
-      (Number.isFinite(Number(obs?.dueHorizons))?` · due ${Number(obs.dueHorizons)}`:""));
+      (Number.isFinite(Number(obs?.dueHorizons))?` · due ${Number(obs.dueHorizons)}`:"") +
+      (Number.isFinite(Number(obs?.futureHorizons))?` · future ${Number(obs.futureHorizons)}`:"") +
+      (obs?.error?` · error ${escapeHtml(String(obs.error))}`:""));
   }
-  lines.push("", "<i>V1197 visibility only: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1198 repair visibility: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
@@ -202115,7 +202122,7 @@ function priorityDecisionObserverPendingV1120(audit, nowMs=Date.now()){
     const decisionAt=safeNumber(rec?.decisionAt);
     if(!(decisionAt>0) || nowMs-decisionAt>PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117) continue;
     for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
-      const h=rec?.horizons?.[key]; if(!h || h?.status==="FROZEN") continue;
+      const h=rec?.horizons?.[key]; if(!h || h?.status==="FROZEN" || h?.status==="MISSED_NOT_BACKFILLED") continue;
       const targetAt=safeNumber(h?.targetAt||decisionAt+ms);
       const item={recordId:rec?.id||null,address:normalize(rec?.address||""),symbol:rec?.symbol||null,key,targetAt,decisionAt};
       if(nowMs>=targetAt) due.push(item); else future.push(item);
@@ -202271,9 +202278,23 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
       }
     }
   }
+  let missingFutureHorizonsInitializedV1198=0,missingElapsedHorizonsMarkedV1198=0;
   for(const rec of records){
     const row=rowMap.get(normalize(rec?.address||""));
     const baseline=rec?.baseline;
+    if(!rec.horizons || typeof rec.horizons!=="object") rec.horizons={};
+    for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
+      if(rec.horizons[key]) continue;
+      const targetAt=safeNumber(rec?.decisionAt)+ms;
+      if(targetAt>nowMs){
+        rec.horizons[key]={status:"PENDING",targetAt,targetPassed:false,freezeEligible:false,pendingReason:"V1198_MISSING_HORIZON_INITIALIZED_FORWARD_ONLY",evaluatorProcessedAtV1119:nowMs,forwardOnly:true,hindsightBackfillAllowed:false};
+        missingFutureHorizonsInitializedV1198++;
+      }else{
+        rec.horizons[key]={status:"MISSED_NOT_BACKFILLED",targetAt,targetPassed:true,freezeEligible:false,pendingReason:"V1198_HORIZON_ELAPSED_BEFORE_INITIALIZATION_NO_HINDSIGHT_BACKFILL",evaluatorProcessedAtV1119:nowMs,forwardOnly:true,hindsightBackfillAllowed:false};
+        missingElapsedHorizonsMarkedV1198++;
+      }
+      changed=true;
+    }
     for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
       const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN") continue;
       const targetAt=safeNumber(h.targetAt||rec.decisionAt+ms);
@@ -202305,7 +202326,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
     }
   }
   if(records.length>PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117){ records=records.slice(-PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117); changed=true; }
-  return {audit:{version:"V1122",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1119",outcomeObserverV1120:true,outcomeQualityGuardV1121:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated};
+  return {audit:{version:"V1198",forwardOnly:true,hindsightBackfillAllowed:false,records,lastUpdatedAt:nowMs,evaluatorVersion:"V1198",outcomeObserverV1120:true,outcomeQualityGuardV1121:true},changed,newRecords,outcomesFrozen,pendingDiagnosticsUpdated,missingFutureHorizonsInitializedV1198,missingElapsedHorizonsMarkedV1198};
 }
 
 // V1119: read-time audit projection. This is deliberately read-only: it never
@@ -206684,9 +206705,14 @@ export class V3LiveCollectorV363 {
     const decisionAuditUpdateV1117=priorityDecisionAuditUpdateV1117(priorDecisionAuditV1117,liveRows,Date.now());
     if(decisionAuditUpdateV1117.changed){
       await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,decisionAuditUpdateV1117.audit);
-      if(decisionAuditUpdateV1117.newRecords>0){
+      if(decisionAuditUpdateV1117.newRecords>0 || decisionAuditUpdateV1117.missingFutureHorizonsInitializedV1198>0){
         await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,true);
       }
+    }
+    const pendingDecisionOutcomesV1198=priorityDecisionObserverPendingV1120(decisionAuditUpdateV1117.audit,Date.now());
+    if(pendingDecisionOutcomesV1198.pendingCount>0){
+      const observerEnabledV1198=await this.state.storage.get(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120);
+      if(observerEnabledV1198!==true) await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,true);
     }
 
     await this.doPutV404(PRIORITY_LIVE_ENTRIES_KEY_V1109,entries);
