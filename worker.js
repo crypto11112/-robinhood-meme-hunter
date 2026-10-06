@@ -1,3 +1,4 @@
+// V1199 — authoritative forward-audit schema migration in the V1120 observer path; no hindsight backfill.
 // V1198 — Forward-only horizon repair: safely initializes missing future horizons, marks elapsed missing horizons non-backfillable, and re-arms overdue observer work.
 // V1197 — Read-only Outcome Intelligence visibility: historical + forward V1117/V1120 audit in one Telegram command.
 // V1196 — Final WebDiag window wiring: 30m/1h/6h/24h; /webdiag on defaults to 1h; current status/help labels.
@@ -10007,7 +10008,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1198";
+const VERSION = "V1199";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144737,7 +144738,7 @@ function performanceCallContextV1181(record) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1198</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1199</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144782,9 +144783,12 @@ async function outcomeIntelMessageV1197(state, env) {
       (Number.isFinite(Number(obs?.pendingHorizons))?` · pending ${Number(obs.pendingHorizons)}`:"") +
       (Number.isFinite(Number(obs?.dueHorizons))?` · due ${Number(obs.dueHorizons)}`:"") +
       (Number.isFinite(Number(obs?.futureHorizons))?` · future ${Number(obs.futureHorizons)}`:"") +
+      (obs?.providerCooldownUntil?` · cooldown until ${escapeHtml(String(obs.providerCooldownUntil))}`:"") +
       (obs?.error?` · error ${escapeHtml(String(obs.error))}`:""));
+    const mig=obs?.migrationV1199||null;
+    if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1198 repair visibility: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1199 repair visibility: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
@@ -202115,6 +202119,35 @@ const PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120 = "v1120:decisionOutcomeObserv
 const PRIORITY_DECISION_OBSERVER_MAX_BATCH_TOKENS_V1120 = 30;
 const PRIORITY_DECISION_OBSERVER_RETRY_MS_V1120 = 2 * 60 * 1000;
 
+function priorityDecisionAuditMigrateV1199(audit, nowMs=Date.now()){
+  const state=(audit&&typeof audit==="object"&&!Array.isArray(audit))?audit:{};
+  const records=Array.isArray(state.records)?state.records:[];
+  let changed=false,initializedFuture=0,markedMissed=0,recordsTouched=0;
+  for(const rec of records){
+    const decisionAt=safeNumber(rec?.decisionAt);
+    if(!(decisionAt>0)) continue;
+    if(!rec.horizons || typeof rec.horizons!=="object"){ rec.horizons={}; changed=true; }
+    let touched=false;
+    for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
+      if(rec.horizons[key]) continue;
+      const targetAt=decisionAt+ms;
+      if(targetAt>nowMs){
+        rec.horizons[key]={status:"PENDING",targetAt,targetPassed:false,freezeEligible:false,pendingReason:"V1199_MISSING_HORIZON_INITIALIZED_FORWARD_ONLY",evaluatorProcessedAtV1119:nowMs,forwardOnly:true,hindsightBackfillAllowed:false};
+        initializedFuture++;
+      }else{
+        rec.horizons[key]={status:"MISSED_NOT_BACKFILLED",targetAt,targetPassed:true,freezeEligible:false,pendingReason:"V1199_HORIZON_ELAPSED_BEFORE_INITIALIZATION_NO_HINDSIGHT_BACKFILL",evaluatorProcessedAtV1119:nowMs,forwardOnly:true,hindsightBackfillAllowed:false};
+        markedMissed++;
+      }
+      changed=true; touched=true;
+    }
+    if(touched) recordsTouched++;
+  }
+  return {
+    audit:changed?{...state,version:"V1199",records,lastUpdatedAt:nowMs,evaluatorVersion:"V1199",forwardOnly:true,hindsightBackfillAllowed:false}:state,
+    changed,initializedFuture,markedMissed,recordsTouched,migratedAt:changed?nowMs:null
+  };
+}
+
 function priorityDecisionObserverPendingV1120(audit, nowMs=Date.now()){
   const records=Array.isArray(audit?.records)?audit.records:[];
   const due=[]; const future=[];
@@ -202296,7 +202329,7 @@ function priorityDecisionAuditUpdateV1117(audit, liveRows, nowMs=Date.now()){
       changed=true;
     }
     for(const [key,ms] of Object.entries(PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117)){
-      const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN") continue;
+      const h=rec?.horizons?.[key]; if(!h||h.status==="FROZEN"||h.status==="MISSED_NOT_BACKFILLED") continue;
       const targetAt=safeNumber(h.targetAt||rec.decisionAt+ms);
       const targetPassed=nowMs>=targetAt;
       if(!targetPassed){
@@ -206221,6 +206254,11 @@ export class V3LiveCollectorV363 {
   async priorityDecisionOutcomeObserverV1120(){
     const nowMs=Date.now();
     let audit=await this.state.storage.get(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117)||{version:"V1117",forwardOnly:true,hindsightBackfillAllowed:false,records:[]};
+    const migrationV1199=priorityDecisionAuditMigrateV1199(audit,nowMs);
+    if(migrationV1199.changed){
+      audit=migrationV1199.audit;
+      await this.doPutV404(PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117,audit);
+    }
     let pending=priorityDecisionObserverPendingV1120(audit,nowMs);
     if(!pending.pendingCount){
       await this.doPutV404(PRIORITY_DECISION_OBSERVER_ENABLED_KEY_V1120,false);
@@ -206243,7 +206281,7 @@ export class V3LiveCollectorV363 {
     }
     if(budget.providerCooldownActive===true){
       const nextWakeAt=Math.max(nowMs+1000,safeNumber(budget.providerCooldownUntil));
-      const status={version:"V1120",enabled:true,active:true,status:"OUTCOME_OBSERVER_PROVIDER_COOLDOWN_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt,providerCooldownUntil:budget.providerCooldownUntil};
+      const status={version:"V1199",enabled:true,active:true,status:"OUTCOME_OBSERVER_PROVIDER_COOLDOWN_V1120",pendingHorizons:pending.pendingCount,dueHorizons:pending.due.length,futureHorizons:pending.future.length,externalRequestsUsed:0,outcomesFrozen:0,lastPollAt:nowMs,nextWakeAt,providerCooldownUntil:budget.providerCooldownUntil,migrationV1199:{changed:migrationV1199.changed,recordsTouched:migrationV1199.recordsTouched,initializedFuture:migrationV1199.initializedFuture,markedMissed:migrationV1199.markedMissed,migratedAt:migrationV1199.migratedAt}};
       await this.doPutV404(PRIORITY_DECISION_OBSERVER_STATUS_KEY_V1120,status);
       return status;
     }
