@@ -1,3 +1,10 @@
+// V1192 — forward outcome collector expansion (measurement-only).
+// Extends the existing V1117/V1120 decision audit to genuine forward horizons:
+// 5s, 10s, 30s, 1m, 2m, 5m, 10m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 24h, 48h, 7d.
+// Reuses already-collected live evidence first; V1120 observer remains budget-governed/batched fallback.
+// No scoring, qualification, risk, Telegram alert, payment, provider-routing or production-call changes.
+// No hindsight backfill: legacy records do not gain invented historical short/long outcomes.
+
 /**
  * V1191 SAFE — Outcome Intelligence diagnostic; built from known-good V1190.
  * - Adds read-only /outcomeintel; no production scanner/provider/payment/alert changes.
@@ -9990,7 +9997,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1191";
+const VERSION = "V1192";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144740,7 +144747,7 @@ function outcomeIntelMessageV1191(state) {
     if(Number.isFinite(growthPct))return 1+growthPct/100;
     return null;
   }
-  const lines=["🧠 <b>Outcome Intelligence — V1191</b>","",`Historical call records: <b>${records.length}</b>`,`Mode: <b>READ-ONLY / FORWARD-ONLY</b>`,""];
+  const lines=["🧠 <b>Outcome Intelligence — V1192</b>","",`Historical call records: <b>${records.length}</b>`,`Mode: <b>READ-ONLY / FORWARD-ONLY</b>`,""];
   for(const [label,key] of targets){
     if(!key){lines.push(`• ${label}: <b>NOT_CAPTURED</b>`);continue;}
     const captured=[];
@@ -144750,7 +144757,7 @@ function outcomeIntelMessageV1191(state) {
     const doubled=valid.filter(x=>x>=2).length;
     lines.push(`• ${label}: <b>${captured.length}</b> captured${valid.length?` · positive ${positive}/${valid.length} · ≥2x ${doubled}/${valid.length}`:""}`);
   }
-  lines.push("","Existing evidence used: V1096 1m + V620/V317 frozen outcomes.","New short/long horizons are deliberately NOT_CAPTURED until genuine forward observations exist.","","<i>Zero provider/RPC requests · zero state writes · no production scoring or alert changes.</i>");
+  lines.push("","Existing historical-call evidence used: V1096 1m + V620/V317 frozen outcomes.","V1192 now collects missing horizons FORWARD-ONLY in the separate V1117/V1120 decision audit; this historical view never invents/backfills them.","","<i>This command: zero provider/RPC requests · zero state writes · no production scoring or alert changes.</i>");
   return lines.join("\\n");
 }
 
@@ -201973,10 +201980,13 @@ const PRIORITY_LIVE_BLOCKSCOUT_MAX_SEED_WALLETS_V1115 = 10;
 // It reuses already-collected observations and deliberately adds ZERO network requests.
 const PRIORITY_LIVE_DECISION_AUDIT_KEY_V1117 = "v1117:priorityLiveDecisionAudit";
 const PRIORITY_LIVE_DECISION_AUDIT_MAX_RECORDS_V1117 = 100;
-const PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117 = 7 * 24 * 60 * 60 * 1000;
+const PRIORITY_LIVE_DECISION_AUDIT_MAX_AGE_MS_V1117 = 8 * 24 * 60 * 60 * 1000;
 const PRIORITY_LIVE_DECISION_AUDIT_STATES_V1117 = new Set(["ENTRY_FORMING","ENTRY_READY","HOLD","CAUTION","EXIT_RISK"]);
 const PRIORITY_LIVE_DECISION_OUTCOME_WINDOWS_V1117 = Object.freeze({
-  m1:60*1000,m5:5*60*1000,m15:15*60*1000,m30:30*60*1000,h1:60*60*1000,h2:2*60*60*1000,h4:4*60*60*1000
+  s5:5*1000,s10:10*1000,s30:30*1000,
+  m1:60*1000,m2:2*60*1000,m5:5*60*1000,m10:10*60*1000,m15:15*60*1000,m30:30*60*1000,
+  h1:60*60*1000,h2:2*60*60*1000,h4:4*60*60*1000,h6:6*60*60*1000,h12:12*60*60*1000,h24:24*60*60*1000,
+  h48:48*60*60*1000,d7:7*24*60*60*1000
 });
 
 // V1120: lightweight post-lane decision outcome observer. It is separate from
@@ -202064,8 +202074,10 @@ function pctOutcomeV1117(before,after){
 // V1121: performance-quality guard. Frozen evidence remains historically immutable,
 // but only sufficiently timely observations may contribute to performance calibration.
 const PRIORITY_OUTCOME_MAX_LAG_MS_V1121 = Object.freeze({
-  m1:2*60*1000, m5:3*60*1000, m15:5*60*1000, m30:10*60*1000,
-  h1:15*60*1000, h2:20*60*1000, h4:30*60*1000
+  s5:2*60*1000, s10:2*60*1000, s30:2*60*1000,
+  m1:2*60*1000, m2:2*60*1000, m5:3*60*1000, m10:4*60*1000, m15:5*60*1000, m30:10*60*1000,
+  h1:15*60*1000, h2:20*60*1000, h4:30*60*1000, h6:45*60*1000, h12:60*60*1000, h24:2*60*60*1000,
+  h48:3*60*60*1000, d7:6*60*60*1000
 });
 // V1122: precision timing grades. "EXACT" is reserved for observations no more than 3s after target.
 // 3-10s is NEAR_EXACT; >10s but within the horizon-specific V1121 allowance is ACCEPTABLE_LAG.
