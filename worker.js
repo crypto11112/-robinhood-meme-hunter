@@ -1,3 +1,10 @@
+/**
+ * V1181 — Expanded verified call performance reporting.
+ * - Keeps existing aggregate /performance statistics and adds median ATH/current-position coverage.
+ * - Telegram /performance shows six latest per-call summaries with exact frozen entry when V1175 verified it, current x/% from stored verified MC, ATH, V407 forward-only low, and frozen 1h/6h/24h outcomes.
+ * - Protected web /performance provides full per-call copy with ?period=24h|7d|30d|all, plus V1178 narrative/launch-age context when frozen at entry.
+ * - Read-only reporting only: zero provider requests, zero writes, no scoring/risk/qualification/sender/budget/scheduler changes.
+ */
 /* V1179 ADMIN-PROTECTED WEB DIAGNOSTICS
  * - Adds ADMIN-chat-only /webdiag on|off|status with optional 1h/6h/24h timed access.
  * - Web diagnostics are closed by default and require a short-lived bootstrap login followed by an HttpOnly Secure SameSite=Strict session cookie.
@@ -144481,138 +144488,192 @@ function bestCallsMessageV271(
   return lines.join("\n");
 }
 
-function performanceSummaryV271(
-  state
-) {
-  const entries =
-    callPerformanceEntriesV271(
-      state
-    );
+function performancePeriodMsV1181(period) {
+  const p = String(period || "all").trim().toLowerCase();
+  if (p === "24h") return 24 * 60 * 60 * 1000;
+  if (p === "7d") return 7 * 24 * 60 * 60 * 1000;
+  if (p === "30d") return 30 * 24 * 60 * 60 * 1000;
+  return null;
+}
 
-  const verifiedAth =
-    entries.filter(
-      record =>
-        Number.isFinite(
-          Number(
-            record?.athMultipleByMarketCap
-          )
-        ) &&
-        Number(
-          record?.athMultipleByMarketCap
-        ) > 0
-    );
+function performancePeriodLabelV1181(period) {
+  const p = String(period || "all").trim().toLowerCase();
+  return ["24h","7d","30d"].includes(p) ? p : "all";
+}
+
+function performanceSignedPctV1181(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "UNVERIFIED";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
+}
+
+function performanceCurrentV1181(record) {
+  const x = Number(record?.currentMultipleByMarketCap);
+  if (record?.currentMarketVerified !== true || !Number.isFinite(x) || x <= 0) {
+    return { verified:false, multiple:null, pct:null };
+  }
+  return { verified:true, multiple:x, pct:(x - 1) * 100 };
+}
+
+function performanceLowV1181(record) {
+  const x = Number(record?.drawdownTrackerV407?.lowestMultipleByMarketCap);
+  if (!Number.isFinite(x) || x <= 0) return { verified:false, multiple:null, pct:null };
+  return { verified:true, multiple:x, pct:(x - 1) * 100 };
+}
+
+function performanceHorizonMultipleV1181(record, key) {
+  const legacy = record?.fixedHorizonOutcomesV317?.outcomes?.[key] || null;
+  const x = Number(legacy?.multipleByMarketCap);
+  if (legacy?.verified === true && legacy?.frozen === true && Number.isFinite(x) && x > 0) return x;
+  return null;
+}
+
+function performanceEntryPriceV1181(record) {
+  const baseline = record?.entryCustomerCallBaselineV1175 || null;
+  const p = Number(baseline?.entryPriceUsd);
+  if (baseline?.entryPriceVerified === true && Number.isFinite(p) && p > 0) {
+    return { verified:true, price:p, source:baseline?.entryPriceSource || "EXACT_POOL_VERIFIED" };
+  }
+  return { verified:false, price:null, source:null };
+}
+
+function performanceCallContextV1181(record) {
+  const baseline = record?.entryCustomerCallBaselineV1175 || null;
+  return {
+    callType: baseline?.callType || "LEGACY/UNVERIFIED",
+    narrative: baseline?.narrativeDisplayV1178 || "UNVERIFIED",
+    narrativeEvidence: baseline?.narrativeEvidenceLevelV1178 || "UNVERIFIED",
+    launchAge: baseline?.launchAgeDisplayV1178 || "UNVERIFIED",
+    launchAgeVerified: baseline?.launchAgeVerifiedV1178 === true,
+    firstCall: baseline?.firstCall === true,
+    reAlert: baseline?.reAlert === true
+  };
+}
+
+function performanceSummaryV271(state, options = {}) {
+  const period = performancePeriodLabelV1181(options?.period || "all");
+  const detail = options?.detail === true;
+  const periodMs = performancePeriodMsV1181(period);
+  const nowMs = Date.now();
+
+  const allEntries = callPerformanceEntriesV271(state);
+  const entries = allEntries
+    .filter(record => {
+      if (periodMs === null) return true;
+      const entryAt = Number(record?.entryTimestamp);
+      return Number.isFinite(entryAt) && entryAt > 0 && (nowMs - entryAt) <= periodMs;
+    })
+    .sort((a,b)=>safeNumber(b?.entryTimestamp)-safeNumber(a?.entryTimestamp));
+
+  const verifiedAth = entries.filter(record => {
+    const x = Number(record?.athMultipleByMarketCap);
+    return Number.isFinite(x) && x > 0;
+  });
 
   if (!entries.length) {
-    return (
-      "📊 <b>Performance Summary</b>\n\n" +
-      "No exact V270+ call baselines have been stored yet."
-    );
+    return [
+      "📊 <b>Bot Call Performance — V1181</b>",
+      "",
+      `Period: <b>${escapeHtml(period)}</b>`,
+      "No tracked call baselines exist in this period."
+    ].join("\n");
   }
 
-  const multiples =
-    verifiedAth.map(
-      record =>
-        Number(
-          record?.athMultipleByMarketCap
-        )
-    );
-
-  const averageAthX =
-    multiples.length
-      ? multiples.reduce(
-          (sum, value) =>
-            sum + value,
-          0
-        ) / multiples.length
-      : null;
+  const multiples = verifiedAth.map(record => Number(record?.athMultipleByMarketCap));
+  const averageAthX = multiples.length ? multiples.reduce((sum,value)=>sum+value,0)/multiples.length : null;
+  const sortedAth = multiples.slice().sort((a,b)=>a-b);
+  const medianAthX = sortedAth.length
+    ? (sortedAth.length % 2
+        ? sortedAth[Math.floor(sortedAth.length/2)]
+        : (sortedAth[sortedAth.length/2-1] + sortedAth[sortedAth.length/2]) / 2)
+    : null;
 
   const neverAboveEntryV407 = multiples.filter(value => value <= 1.000001).length;
   const wentAboveEntryV407 = multiples.filter(value => value > 1.000001).length;
   const reached125x = multiples.filter(value => value >= 1.25).length;
   const reached15x = multiples.filter(value => value >= 1.5).length;
+  const reached2x = multiples.filter(value => value >= 2).length;
+  const reached5x = multiples.filter(value => value >= 5).length;
+  const reached10x = multiples.filter(value => value >= 10).length;
 
-  const reached2x =
-    multiples.filter(
-      value =>
-        value >= 2
-    ).length;
-
-  const reached5x =
-    multiples.filter(
-      value =>
-        value >= 5
-    ).length;
-
-  const reached10x =
-    multiples.filter(
-      value =>
-        value >= 10
-    ).length;
+  const currentRows = entries.map(performanceCurrentV1181).filter(x=>x.verified);
+  const currentProfitable = currentRows.filter(x=>x.multiple > 1.000001).length;
+  const currentMedian = (()=>{
+    const a=currentRows.map(x=>x.multiple).sort((x,y)=>x-y);
+    if(!a.length) return null;
+    return a.length%2?a[Math.floor(a.length/2)]:(a[a.length/2-1]+a[a.length/2])/2;
+  })();
 
   const oneMinuteRowsV1096 = entries
     .map(record => record?.oneMinuteOutcomeV1096?.outcome || null)
-    .filter(outcome =>
-      outcome?.verified === true &&
-      outcome?.frozen === true &&
-      Number.isFinite(Number(outcome?.multipleByMarketCap)) &&
-      Number(outcome.multipleByMarketCap) > 0
-    );
-  const oneMinuteMultiplesV1096 =
-    oneMinuteRowsV1096
-      .map(outcome => Number(outcome.multipleByMarketCap))
-      .sort((a,b)=>a-b);
+    .filter(outcome => outcome?.verified === true && outcome?.frozen === true && Number.isFinite(Number(outcome?.multipleByMarketCap)) && Number(outcome.multipleByMarketCap) > 0);
+  const oneMinuteMultiplesV1096 = oneMinuteRowsV1096.map(outcome=>Number(outcome.multipleByMarketCap)).sort((a,b)=>a-b);
   const oneMinuteMedianV1096 = oneMinuteMultiplesV1096.length
-    ? (
-        oneMinuteMultiplesV1096.length % 2
-          ? oneMinuteMultiplesV1096[Math.floor(oneMinuteMultiplesV1096.length/2)]
-          : (
-              oneMinuteMultiplesV1096[(oneMinuteMultiplesV1096.length/2)-1] +
-              oneMinuteMultiplesV1096[oneMinuteMultiplesV1096.length/2]
-            ) / 2
-      )
+    ? (oneMinuteMultiplesV1096.length%2
+        ? oneMinuteMultiplesV1096[Math.floor(oneMinuteMultiplesV1096.length/2)]
+        : (oneMinuteMultiplesV1096[oneMinuteMultiplesV1096.length/2-1]+oneMinuteMultiplesV1096[oneMinuteMultiplesV1096.length/2])/2)
     : null;
 
-  const best =
-    verifiedAth
-      .slice()
-      .sort(
-        (a, b) =>
-          Number(
-            b?.athMultipleByMarketCap
-          ) -
-          Number(
-            a?.athMultipleByMarketCap
-          )
-      )[0] ||
-    null;
+  const best = verifiedAth.slice().sort((a,b)=>Number(b?.athMultipleByMarketCap)-Number(a?.athMultipleByMarketCap))[0] || null;
 
-  return [
-    "📊 <b>Bot Call Performance</b>",
+  const lines = [
+    "📊 <b>Bot Call Performance — V1181</b>",
     "",
-    `Tracked calls: <b>${entries.length}</b>`,
-    `Verified ATH records: <b>${verifiedAth.length}</b>`,
-    `Average verified ATH: <b>${telegramMultipleV271(
-      averageAthX
-    )}</b>`,
-    `Went above entry: <b>${wentAboveEntryV407}/${verifiedAth.length}</b>`,
-    `Never above entry: <b>${neverAboveEntryV407}/${verifiedAth.length}</b>`,
-    `Reached 1.25x+: <b>${reached125x}</b>`,
-    `Reached 1.5x+: <b>${reached15x}</b>`,
-    `Reached 2x+: <b>${reached2x}</b>`,
-    `Reached 5x+: <b>${reached5x}</b>`,
-    `Reached 10x+: <b>${reached10x}</b>`,
-    `⏱ V1096 1m captured: <b>${oneMinuteRowsV1096.length}</b> | Median 1m MC: <b>${telegramMultipleV271(oneMinuteMedianV1096)}</b>`,
-    best
-      ? `Best call: <b>${escapeHtml(
-          best?.symbol ||
-          "UNKNOWN"
-        )}</b> — <b>${telegramMultipleV271(
-          best?.athMultipleByMarketCap
-        )}</b>`
-      : "Best call: <b>UNVERIFIED</b>",
+    `Period: <b>${escapeHtml(period)}</b> · Tracked <b>${entries.length}</b>${period === "all" ? ` / registry ${allEntries.length}` : ""}`,
+    `Verified ATH: <b>${verifiedAth.length}</b> · Median <b>${telegramMultipleV271(medianAthX)}</b> · Average <b>${telegramMultipleV271(averageAthX)}</b>`,
+    `Went above entry: <b>${wentAboveEntryV407}/${verifiedAth.length}</b> · Never above: <b>${neverAboveEntryV407}/${verifiedAth.length}</b>`,
+    `≥1.25x <b>${reached125x}</b> · ≥1.5x <b>${reached15x}</b> · ≥2x <b>${reached2x}</b> · ≥5x <b>${reached5x}</b> · ≥10x <b>${reached10x}</b>`,
+    `Current verified: <b>${currentRows.length}</b> · Above entry now <b>${currentProfitable}/${currentRows.length}</b> · Median current <b>${telegramMultipleV271(currentMedian)}</b>`,
+    `⏱ 1m captured: <b>${oneMinuteRowsV1096.length}</b> · Median 1m <b>${telegramMultipleV271(oneMinuteMedianV1096)}</b>`,
+    best ? `🏆 Best: <b>${escapeHtml(best?.symbol || "UNKNOWN")}</b> — <b>${telegramMultipleV271(best?.athMultipleByMarketCap)}</b>` : "🏆 Best: <b>UNVERIFIED</b>"
+  ];
+
+  const shown = detail ? entries.slice(0,250) : entries.slice(0,6);
+  lines.push("", detail ? "📚 <b>Per-call performance</b>" : "🕒 <b>Latest calls</b>");
+
+  for (const record of shown) {
+    const symbol = escapeHtml(record?.symbol || "UNKNOWN");
+    const addr = normalize(record?.address || "");
+    const current = performanceCurrentV1181(record);
+    const low = performanceLowV1181(record);
+    const entryPrice = performanceEntryPriceV1181(record);
+    const context = performanceCallContextV1181(record);
+    const h1 = performanceHorizonMultipleV1181(record,"h1");
+    const h6 = performanceHorizonMultipleV1181(record,"h6");
+    const h24 = performanceHorizonMultipleV1181(record,"h24");
+    const athX = Number(record?.athMultipleByMarketCap);
+    const entryMc = Number(record?.entryMarketCap);
+    const currentMc = Number(record?.currentMarketCap);
+
+    lines.push(
+      "",
+      `• <b>${symbol}</b>${addr ? ` · <code>${escapeHtml(addr.slice(0,8))}…${escapeHtml(addr.slice(-6))}</code>` : ""}`,
+      `  Called: <b>${escapeHtml(callTimestampTextV306(record?.entryTimestamp))}</b> · ${escapeHtml(context.callType)}`,
+      `  Entry: <b>${entryPrice.verified ? `$${telegramPlainNumberV271(entryPrice.price, entryPrice.price >= 1 ? 6 : 10)}` : "UNVERIFIED"}</b> · Entry MC <b>${Number.isFinite(entryMc)&&entryMc>0?telegramMoneyV271(entryMc):"UNVERIFIED"}</b>`,
+      `  Now: <b>${current.verified ? `${telegramMultipleV271(current.multiple)} (${performanceSignedPctV1181(current.pct)})` : "UNVERIFIED"}</b>${current.verified&&Number.isFinite(currentMc)&&currentMc>0?` · MC ${telegramMoneyV271(currentMc)}`:""}`,
+      `  ATH: <b>${Number.isFinite(athX)&&athX>0?telegramMultipleV271(athX):"UNVERIFIED"}</b> · Low since V407: <b>${low.verified ? `${telegramMultipleV271(low.multiple)} (${performanceSignedPctV1181(low.pct)})` : "UNVERIFIED"}</b>`,
+      `  Horizons: 1h <b>${h1?telegramMultipleV271(h1):"UNVERIFIED"}</b> · 6h <b>${h6?telegramMultipleV271(h6):"UNVERIFIED"}</b> · 24h <b>${h24?telegramMultipleV271(h24):"UNVERIFIED"}</b>`
+    );
+
+    if (detail) {
+      lines.push(
+        `  Narrative: <b>${escapeHtml(context.narrative)}</b> · ${escapeHtml(context.narrativeEvidence)}`,
+        `  Launch age at call: <b>${escapeHtml(context.launchAge)}</b>${context.launchAgeVerified ? " · VERIFIED" : ""}`,
+        `  Entry class: <b>${context.reAlert ? "RE-ALERT" : context.firstCall ? "FIRST CALL" : "LEGACY/UNVERIFIED"}</b>`
+      );
+    }
+  }
+
+  if (!detail && entries.length > shown.length) {
+    lines.push("", `Showing latest <b>${shown.length}</b>. Protected web /performance contains the detailed copy.`);
+  }
+
+  lines.push(
     "",
-    "<i>Never-above-entry uses the already-stored verified ATH record. Lowest-MC/drawdown tracking is forward-only from V407 and is never historically guessed.</i>"
-  ].join("\n");
+    "<i>V1181 is read-only reporting. Current/ATH/horizon values use stored verified observations only. Lowest-MC tracking remains forward-only from V407; historical lows are never guessed. Exact Entry price is shown only when the frozen V1175 exact-pool baseline verified it.</i>"
+  );
+
+  return lines.join("\n");
 }
 
 
@@ -197179,7 +197240,7 @@ function webDiagTextResponseV1179(text,status=200){
   return new Response(telegramHtmlToPlainV1179(text),{status,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store, max-age=0","pragma":"no-cache","x-content-type-options":"nosniff","referrer-policy":"no-referrer","content-security-policy":"default-src 'none'; frame-ancestors 'none'"}});
 }
 
-function webDiagLongRouteV1179(path,state,env){
+function webDiagLongRouteV1179(path,state,env,url=null){
   if(path==="/telegramaudit") return finalTelegramQualificationAuditMessageV935(state);
   if(path==="/evidenceaudit") return evidenceAuditTelegramMessageV727(state);
   if(path==="/scorehandoff") return scoreHandoffMessageV938(state);
@@ -197190,7 +197251,7 @@ function webDiagLongRouteV1179(path,state,env){
     const result={...(state?.marketCompletionAuditV968||{recordedAt:null,scanVersion:VERSION,candidateCount:0,selected:false,failureReasons:["NO_COMPLETED_V968_SCAN_RECORDED_YET"]}),v979LatestScanDecision:state?.marketPairDecisionAuditV979||null};
     return marketCompletionAuditTelegramV968(result);
   }
-  if(path==="/performance") return performanceSummaryV271(state);
+  if(path==="/performance") return performanceSummaryV271(state,{detail:true,period:url?.searchParams?.get("period")||"all"});
   return null;
 }
 
@@ -197213,7 +197274,7 @@ function webDiagStatusMessageV1179(state){
   const active=webDiagStillEnabledV1179(c);
   const exp=Number(c?.expiresAt||0);
   return [
-    "🔐 <b>ChainVanta Web Diagnostics — V1180</b>","",
+    "🔐 <b>ChainVanta Web Diagnostics — V1181</b>","",
     `Status: <b>${active?"ENABLED":"DISABLED"}</b>`,
     `Mode: <b>${escapeHtml(String(c?.mode||"OFF"))}</b>`,
     `Expires: <b>${exp>0?escapeHtml(new Date(exp).toISOString()):active?"MANUAL OFF":"N/A"}</b>`,
@@ -199152,7 +199213,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         `${WEB_DIAG_BASE_V1179}/riskaudit`,
         `${WEB_DIAG_BASE_V1179}/holderaudit`,
         `${WEB_DIAG_BASE_V1179}/marketaudit`,
-        `${WEB_DIAG_BASE_V1179}/performance`,"",
+        `${WEB_DIAG_BASE_V1179}/performance?period=all`,
+        `${WEB_DIAG_BASE_V1179}/performance?period=24h`,
+        `${WEB_DIAG_BASE_V1179}/performance?period=7d`,
+        `${WEB_DIAG_BASE_V1179}/performance?period=30d`,"",
         "Token-specific: /telegramwhy?token=0x..., /marketwhy?token=0x..., /sendwhy?token=0x...",
         "Scheduler: /scheduler-status-v673","",
         "Use /webdiag off in the authorised Admin Telegram to revoke this browser session immediately."
@@ -199160,7 +199224,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       return webDiagTextResponseV1179(bodyV1179);
     }
 
-    const longV1179 = webDiagLongRouteV1179(path,stateAuthV1179,env);
+    const longV1179 = webDiagLongRouteV1179(path,stateAuthV1179,env,url);
     if (longV1179 !== null) return webDiagTextResponseV1179(longV1179);
     // Existing token-specific/scheduler handlers continue below after authorization.
   }
