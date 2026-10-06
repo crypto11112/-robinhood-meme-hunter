@@ -1,5 +1,5 @@
 /**
- * V1181 — Expanded verified call performance reporting.
+ * V1182 — Performance low/current consistency hardening.
  * - Keeps existing aggregate /performance statistics and adds median ATH/current-position coverage.
  * - Telegram /performance shows six latest per-call summaries with exact frozen entry when V1175 verified it, current x/% from stored verified MC, ATH, V407 forward-only low, and frozen 1h/6h/24h outcomes.
  * - Protected web /performance provides full per-call copy with ?period=24h|7d|30d|all, plus V1178 narrative/launch-age context when frozen at entry.
@@ -144515,10 +144515,57 @@ function performanceCurrentV1181(record) {
   return { verified:true, multiple:x, pct:(x - 1) * 100 };
 }
 
-function performanceLowV1181(record) {
-  const x = Number(record?.drawdownTrackerV407?.lowestMultipleByMarketCap);
-  if (!Number.isFinite(x) || x <= 0) return { verified:false, multiple:null, pct:null };
-  return { verified:true, multiple:x, pct:(x - 1) * 100 };
+function performanceLowV1182(record) {
+  const stored = Number(record?.drawdownTrackerV407?.lowestMultipleByMarketCap);
+  const current = performanceCurrentV1181(record);
+
+  const storedVerified = Number.isFinite(stored) && stored > 0;
+  const currentExtendsStoredLow =
+    current.verified === true &&
+    storedVerified &&
+    current.multiple < stored - 1e-9;
+
+  if (currentExtendsStoredLow) {
+    return {
+      verified: true,
+      multiple: current.multiple,
+      pct: current.pct,
+      source: "CURRENT_VERIFIED_EXTENDS_V407_LOW",
+      storedV407Multiple: stored,
+      currentExtendsStoredLow: true
+    };
+  }
+
+  if (storedVerified) {
+    return {
+      verified: true,
+      multiple: stored,
+      pct: (stored - 1) * 100,
+      source: "V407_TRACKER",
+      storedV407Multiple: stored,
+      currentExtendsStoredLow: false
+    };
+  }
+
+  if (current.verified === true) {
+    return {
+      verified: true,
+      multiple: current.multiple,
+      pct: current.pct,
+      source: "CURRENT_VERIFIED_ONLY",
+      storedV407Multiple: null,
+      currentExtendsStoredLow: true
+    };
+  }
+
+  return {
+    verified: false,
+    multiple: null,
+    pct: null,
+    source: "UNVERIFIED",
+    storedV407Multiple: null,
+    currentExtendsStoredLow: false
+  };
 }
 
 function performanceHorizonMultipleV1181(record, key) {
@@ -144572,7 +144619,7 @@ function performanceSummaryV271(state, options = {}) {
 
   if (!entries.length) {
     return [
-      "📊 <b>Bot Call Performance — V1181</b>",
+      "📊 <b>Bot Call Performance — V1182</b>",
       "",
       `Period: <b>${escapeHtml(period)}</b>`,
       "No tracked call baselines exist in this period."
@@ -144604,6 +144651,10 @@ function performanceSummaryV271(state, options = {}) {
     return a.length%2?a[Math.floor(a.length/2)]:(a[a.length/2-1]+a[a.length/2])/2;
   })();
 
+  const lowConsistencyRowsV1182 = entries
+    .map(record => performanceLowV1182(record))
+    .filter(low => low.source === "CURRENT_VERIFIED_EXTENDS_V407_LOW");
+
   const oneMinuteRowsV1096 = entries
     .map(record => record?.oneMinuteOutcomeV1096?.outcome || null)
     .filter(outcome => outcome?.verified === true && outcome?.frozen === true && Number.isFinite(Number(outcome?.multipleByMarketCap)) && Number(outcome.multipleByMarketCap) > 0);
@@ -144617,13 +144668,14 @@ function performanceSummaryV271(state, options = {}) {
   const best = verifiedAth.slice().sort((a,b)=>Number(b?.athMultipleByMarketCap)-Number(a?.athMultipleByMarketCap))[0] || null;
 
   const lines = [
-    "📊 <b>Bot Call Performance — V1181</b>",
+    "📊 <b>Bot Call Performance — V1182</b>",
     "",
     `Period: <b>${escapeHtml(period)}</b> · Tracked <b>${entries.length}</b>${period === "all" ? ` / registry ${allEntries.length}` : ""}`,
     `Verified ATH: <b>${verifiedAth.length}</b> · Median <b>${telegramMultipleV271(medianAthX)}</b> · Average <b>${telegramMultipleV271(averageAthX)}</b>`,
     `Went above entry: <b>${wentAboveEntryV407}/${verifiedAth.length}</b> · Never above: <b>${neverAboveEntryV407}/${verifiedAth.length}</b>`,
     `≥1.25x <b>${reached125x}</b> · ≥1.5x <b>${reached15x}</b> · ≥2x <b>${reached2x}</b> · ≥5x <b>${reached5x}</b> · ≥10x <b>${reached10x}</b>`,
     `Current verified: <b>${currentRows.length}</b> · Above entry now <b>${currentProfitable}/${currentRows.length}</b> · Median current <b>${telegramMultipleV271(currentMedian)}</b>`,
+    `Low/current integrity: <b>${lowConsistencyRowsV1182.length}</b> current verified observation${lowConsistencyRowsV1182.length===1?"":"s"} extend the stored V407 low in this report`,
     `⏱ 1m captured: <b>${oneMinuteRowsV1096.length}</b> · Median 1m <b>${telegramMultipleV271(oneMinuteMedianV1096)}</b>`,
     best ? `🏆 Best: <b>${escapeHtml(best?.symbol || "UNKNOWN")}</b> — <b>${telegramMultipleV271(best?.athMultipleByMarketCap)}</b>` : "🏆 Best: <b>UNVERIFIED</b>"
   ];
@@ -144635,7 +144687,7 @@ function performanceSummaryV271(state, options = {}) {
     const symbol = escapeHtml(record?.symbol || "UNKNOWN");
     const addr = normalize(record?.address || "");
     const current = performanceCurrentV1181(record);
-    const low = performanceLowV1181(record);
+    const low = performanceLowV1182(record);
     const entryPrice = performanceEntryPriceV1181(record);
     const context = performanceCallContextV1181(record);
     const h1 = performanceHorizonMultipleV1181(record,"h1");
@@ -144651,7 +144703,7 @@ function performanceSummaryV271(state, options = {}) {
       `  Called: <b>${escapeHtml(callTimestampTextV306(record?.entryTimestamp))}</b> · ${escapeHtml(context.callType)}`,
       `  Entry: <b>${entryPrice.verified ? `$${telegramPlainNumberV271(entryPrice.price, entryPrice.price >= 1 ? 6 : 10)}` : "UNVERIFIED"}</b> · Entry MC <b>${Number.isFinite(entryMc)&&entryMc>0?telegramMoneyV271(entryMc):"UNVERIFIED"}</b>`,
       `  Now: <b>${current.verified ? `${telegramMultipleV271(current.multiple)} (${performanceSignedPctV1181(current.pct)})` : "UNVERIFIED"}</b>${current.verified&&Number.isFinite(currentMc)&&currentMc>0?` · MC ${telegramMoneyV271(currentMc)}`:""}`,
-      `  ATH: <b>${Number.isFinite(athX)&&athX>0?telegramMultipleV271(athX):"UNVERIFIED"}</b> · Low since V407: <b>${low.verified ? `${telegramMultipleV271(low.multiple)} (${performanceSignedPctV1181(low.pct)})` : "UNVERIFIED"}</b>`,
+      `  ATH: <b>${Number.isFinite(athX)&&athX>0?telegramMultipleV271(athX):"UNVERIFIED"}</b> · Observed low: <b>${low.verified ? `${telegramMultipleV271(low.multiple)} (${performanceSignedPctV1181(low.pct)})` : "UNVERIFIED"}</b>${low.source==="CURRENT_VERIFIED_EXTENDS_V407_LOW" ? ` · current verified extends stored V407 low ${telegramMultipleV271(low.storedV407Multiple)}` : low.source==="CURRENT_VERIFIED_ONLY" ? " · current verified only" : ""}`,
       `  Horizons: 1h <b>${h1?telegramMultipleV271(h1):"UNVERIFIED"}</b> · 6h <b>${h6?telegramMultipleV271(h6):"UNVERIFIED"}</b> · 24h <b>${h24?telegramMultipleV271(h24):"UNVERIFIED"}</b>`
     );
 
@@ -144670,7 +144722,7 @@ function performanceSummaryV271(state, options = {}) {
 
   lines.push(
     "",
-    "<i>V1181 is read-only reporting. Current/ATH/horizon values use stored verified observations only. Lowest-MC tracking remains forward-only from V407; historical lows are never guessed. Exact Entry price is shown only when the frozen V1175 exact-pool baseline verified it.</i>"
+    "<i>V1182 is read-only reporting. Current/ATH/horizon values use stored verified observations only. Observed low uses the V407 tracked low unless a newer verified current observation is lower; in that case the report shows the verified current value without rewriting historical V407 state. Historical lows are never guessed. Exact Entry price is shown only when the frozen V1175 exact-pool baseline verified it.</i>"
   );
 
   return lines.join("\n");
