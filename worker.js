@@ -1,4 +1,13 @@
 /*
+ * ChainVanta V1177 — POST-SEND DEDUPE OBSERVABILITY HARDENING
+ * - Builds directly from deployed V1176.
+ * - Fixes a diagnostic ambiguity only: /sendwhy previously displayed the retained PRE-SEND decision snapshot, so immediately after a successful call it could still say WOULD_SEND:YES even though V1174 had already checkpointed the successful alert and production dedupe was closed.
+ * - V1177 keeps the original pre-send decision for audit, but also recomputes CURRENT resend eligibility from persisted state.alerts at command/web read time, using zero provider/RPC/Telegram requests.
+ * - Telegram and web /sendwhy now make the distinction explicit: original pre-send decision vs current resend state.
+ * - Production sender logic, V1174 dedupe ordering, V1175 call baseline, V1176 Premium/Free renderer split, scoring, risk, qualification, thresholds, budgets and scheduler are unchanged.
+ */
+
+/*
  * ChainVanta V1176 — PREMIUM/FREE PRODUCT SPLIT + CONVERSION TEASER
  * - Builds directly from deployed V1175 and preserves the verified customer call baseline, V1174 dedupe ordering, V1173 relay recovery, all scoring/risk/qualification thresholds and the 30-minute delayed-Free queue.
  * - Premium continues to receive the complete V1175 intelligence card immediately.
@@ -84200,6 +84209,7 @@ function captureTelegramSendWhyV1169(state, candidates, budget, env) {
       confidenceScore:safeNumber(candidate?.confidence?.score),
       riskScore:candidate?.risk?.verified===true?safeNumber(candidate?.risk?.score):null,
       duplicateCooldownClear, cooldownExpired, scoreImproved, newAccumulation,
+      candidateWhaleFlow:candidate?.whaleFlow?.flow || null,
       priorAlertPresent:Boolean(previousTimestamp), priorAlertTimestamp:previousTimestamp || null,
       priorAlertScore:previousTimestamp ? previousScore : null,
       alertCooldownMs:ALERT_COOLDOWN,
@@ -84229,22 +84239,91 @@ function captureTelegramSendWhyV1169(state, candidates, budget, env) {
 
 function telegramSendWhySnapshotV1169(state, rawAddress) {
   const address=normalize(rawAddress);
-  if(!isAddress(address)) return {ok:false,version:'V1169',status:'INVALID_TOKEN_ADDRESS_V1169',address:null};
+  if(!isAddress(address)) return {ok:false,version:'V1177',status:'INVALID_TOKEN_ADDRESS_V1169',address:null};
   const row=Array.isArray(state?.telegramSendWhyV1169?.records)
     ? state.telegramSendWhyV1169.records.find(r=>normalize(r?.address)===address) : null;
-  if(!row) return {ok:false,version:'V1169',status:'TOKEN_NOT_IN_RETAINED_SENDER_TRACE_V1169',address,note:'Complete a live autonomous scan containing this token, then retry.'};
-  return {ok:true,version:'V1169',runtimeVersion:VERSION,status:row.wouldSend===true?'WOULD_SEND_V1169':row.wouldAttemptSend===true?'WOULD_ATTEMPT_BUT_DELIVERY_PREREQ_BLOCKED_V1169':'WOULD_NOT_ATTEMPT_SEND_V1169',...row,readOnly:true};
+  if(!row) return {ok:false,version:'V1177',status:'TOKEN_NOT_IN_RETAINED_SENDER_TRACE_V1169',address,note:'Complete a live autonomous scan containing this token, then retry.'};
+
+  // V1177: the retained V1169 row is intentionally a PRE-SEND decision trace.
+  // Recompute the CURRENT resend state from the persisted successful-alert record
+  // so an operator querying /sendwhy after delivery sees the actual dedupe state.
+  const currentAlert = state?.alerts?.[address];
+  const currentAlertTimestamp = typeof currentAlert === 'object'
+    ? safeNumber(currentAlert?.timestamp) : safeNumber(currentAlert);
+  const currentAlertScore = typeof currentAlert === 'object'
+    ? safeNumber(currentAlert?.score) : 0;
+  const currentCooldownExpired = !currentAlertTimestamp || Date.now() - currentAlertTimestamp >= ALERT_COOLDOWN;
+  const currentScoreImproved = safeNumber(row?.opportunityScore) - currentAlertScore >= 10;
+  const rowWhaleFlow = row?.candidateWhaleFlow || null;
+  const currentNewAccumulation = rowWhaleFlow === 'NET_ACCUMULATION' && currentAlert?.whaleFlow !== 'NET_ACCUMULATION';
+  const currentDuplicateCooldownClear = currentCooldownExpired || currentScoreImproved || currentNewAccumulation;
+  const currentWouldAttemptSend = row?.qualified === true && currentDuplicateCooldownClear && row?.notificationBudgetReady === true;
+  const currentWouldSend = currentWouldAttemptSend && row?.destinationConfigured === true && row?.textRenderValid === true && row?.fallbackCapacityReady === true;
+  let currentFirstBlocker = null;
+  if (row?.qualified !== true) currentFirstBlocker = 'NOT_TELEGRAM_QUALIFIED_V1169';
+  else if (!currentDuplicateCooldownClear) currentFirstBlocker = 'ALERT_COOLDOWN_V1169';
+  else if (row?.notificationBudgetReady !== true) currentFirstBlocker = 'NOTIFICATION_BUDGET_EXHAUSTED_V1169';
+  else if (row?.destinationConfigured !== true) currentFirstBlocker = 'TELEGRAM_DESTINATION_NOT_CONFIGURED_V1169';
+  else if (row?.renderError) currentFirstBlocker = 'TELEGRAM_MESSAGE_RENDER_EXCEPTION_V1169';
+  else if (row?.textRenderValid !== true) currentFirstBlocker = 'TELEGRAM_TEXT_RENDER_INVALID_OR_TOO_LONG_V1169';
+  else if (row?.fallbackCapacityReady !== true) currentFirstBlocker = 'PHOTO_FALLBACK_NOTIFICATION_HEADROOM_INSUFFICIENT_V1169';
+
+  return {
+    ok:true,version:'V1177',runtimeVersion:VERSION,
+    status:currentWouldSend===true?'CURRENTLY_WOULD_SEND_V1177':currentWouldAttemptSend===true?'CURRENTLY_WOULD_ATTEMPT_BUT_DELIVERY_PREREQ_BLOCKED_V1177':'CURRENTLY_WOULD_NOT_SEND_V1177',
+    ...row,
+    preSendDecisionV1177:{
+      recordedAt:row?.recordedAt || null,
+      duplicateCooldownClear:row?.duplicateCooldownClear===true,
+      cooldownExpired:row?.cooldownExpired===true,
+      scoreImproved:row?.scoreImproved===true,
+      newAccumulation:row?.newAccumulation===true,
+      wouldAttemptSend:row?.wouldAttemptSend===true,
+      wouldSend:row?.wouldSend===true,
+      firstBlocker:row?.firstBlocker || null
+    },
+    currentResendStateV1177:{
+      checkedAt:Date.now(),
+      successfulAlertPresent:Boolean(currentAlertTimestamp),
+      successfulAlertTimestamp:currentAlertTimestamp || null,
+      successfulAlertScore:currentAlertTimestamp ? currentAlertScore : null,
+      successfulAlertWhaleFlow:typeof currentAlert === 'object' ? (currentAlert?.whaleFlow || null) : null,
+      duplicateCooldownClear:currentDuplicateCooldownClear,
+      cooldownExpired:currentCooldownExpired,
+      scoreImproved:currentScoreImproved,
+      newAccumulation:currentNewAccumulation,
+      wouldAttemptSend:currentWouldAttemptSend,
+      wouldSend:currentWouldSend,
+      firstBlocker:currentFirstBlocker
+    },
+    // Backwards-compatible top-level fields now reflect CURRENT state for operator clarity.
+    duplicateCooldownClear:currentDuplicateCooldownClear,
+    cooldownExpired:currentCooldownExpired,
+    scoreImproved:currentScoreImproved,
+    newAccumulation:currentNewAccumulation,
+    wouldAttemptSend:currentWouldAttemptSend,
+    wouldSend:currentWouldSend,
+    firstBlocker:currentFirstBlocker,
+    readOnly:true,
+    diagnosticSemanticsV1177:'PRE_SEND_TRACE_PLUS_CURRENT_PERSISTED_DEDUPE_STATE',
+    providerRequestsAdded:0,
+    telegramRequestsAdded:0
+  };
 }
 
 function telegramSendWhyMessageV1169(state, rawAddress) {
   const d=telegramSendWhySnapshotV1169(state, rawAddress);
-  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1175</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
-  return ['📤 <b>Telegram Sender Dry Run — V1175</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Recorded: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 Duplicate/cooldown clear: <b>${d.duplicateCooldownClear?'YES':'NO'}</b> · expired ${d.cooldownExpired?'YES':'NO'} · +10 score ${d.scoreImproved?'YES':'NO'} · new accumulation ${d.newAccumulation?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`💵 Entry baseline: <b>${d.entryPriceVerifiedV1175===true && Number.isFinite(Number(d.entryPriceUsdV1175))?('$'+telegramPlainNumberV271(d.entryPriceUsdV1175,10)):'UNVERIFIED'}</b> · exact-pool ${d.entryPriceVerifiedV1175===true?'VERIFIED':'UNVERIFIED'}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'} · compact V1175`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send: <b>${d.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND: <b>${d.wouldSend?'YES':'NO'}</b>`,`🚧 First blocker: <b>${escapeHtml(d.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>Captured at the real pre-send boundary using production cooldown, budget, route and renderer checks. Dry-run only: no Telegram API call.</i>'].join('\n');
+  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1177</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
+  const pre=d.preSendDecisionV1177||{};
+  const cur=d.currentResendStateV1177||{};
+  return ['📤 <b>Telegram Sender Dry Run — V1177</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Pre-send trace: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 CURRENT duplicate/cooldown clear: <b>${cur.duplicateCooldownClear?'YES':'NO'}</b> · expired ${cur.cooldownExpired?'YES':'NO'} · +10 score ${cur.scoreImproved?'YES':'NO'} · new accumulation ${cur.newAccumulation?'YES':'NO'}`,`📌 Current successful alert: <b>${cur.successfulAlertPresent?'YES':'NO'}</b>${cur.successfulAlertTimestamp?` · ${escapeHtml(new Date(cur.successfulAlertTimestamp).toISOString())}`:''}`,`🕘 Original pre-send decision: <b>${pre.wouldSend?'WOULD_SEND':'WOULD_NOT_SEND'}</b> · cooldown clear ${pre.duplicateCooldownClear?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`💵 Entry baseline: <b>${d.entryPriceVerifiedV1175===true && Number.isFinite(Number(d.entryPriceUsdV1175))?('$'+telegramPlainNumberV271(d.entryPriceUsdV1175,10)):'UNVERIFIED'}</b> · exact-pool ${d.entryPriceVerifiedV1175===true?'VERIFIED':'UNVERIFIED'}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'} · compact V1175`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send NOW: <b>${cur.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND NOW: <b>${cur.wouldSend?'YES':'NO'}</b>`,`🚧 Current first blocker: <b>${escapeHtml(cur.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>V1177 separates the original pre-send trace from the current persisted resend state. Read-only; no Telegram/API/provider request.</i>'].join('\n');
 }
 
 function telegramSendWhyPlainTextV1169(d) {
-  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1175\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
-  return ['ChainVanta Telegram Sender Dry Run — V1175',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Recorded: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`Duplicate/cooldown clear: ${d.duplicateCooldownClear?'YES':'NO'}`,`Cooldown expired: ${d.cooldownExpired?'YES':'NO'}`,`Score improved >=10: ${d.scoreImproved?'YES':'NO'}`,`New accumulation: ${d.newAccumulation?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Entry baseline: ${d.entryPriceVerifiedV1175===true && Number.isFinite(Number(d.entryPriceUsdV1175))?('$'+telegramPlainNumberV271(d.entryPriceUsdV1175,10)):'UNVERIFIED'} (${d.entryPriceVerifiedV1175===true?'EXACT-POOL VERIFIED':'EXACT-POOL UNVERIFIED'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send: ${d.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND: ${d.wouldSend?'YES':'NO'}`,`First blocker: ${d.firstBlocker||'NONE'}`,'','Read-only dry run. No Telegram API call and zero provider requests.'].join('\n');
+  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1177\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
+  const pre=d.preSendDecisionV1177||{};
+  const cur=d.currentResendStateV1177||{};
+  return ['ChainVanta Telegram Sender Dry Run — V1177',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Pre-send trace: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`CURRENT duplicate/cooldown clear: ${cur.duplicateCooldownClear?'YES':'NO'}`,`CURRENT cooldown expired: ${cur.cooldownExpired?'YES':'NO'}`,`CURRENT score improved >=10: ${cur.scoreImproved?'YES':'NO'}`,`CURRENT new accumulation: ${cur.newAccumulation?'YES':'NO'}`,`Current successful alert present: ${cur.successfulAlertPresent?'YES':'NO'}`,`Current successful alert timestamp: ${cur.successfulAlertTimestamp?new Date(cur.successfulAlertTimestamp).toISOString():'NONE'}`,`Original pre-send WOULD_SEND: ${pre.wouldSend?'YES':'NO'}`,`Original pre-send cooldown clear: ${pre.duplicateCooldownClear?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Entry baseline: ${d.entryPriceVerifiedV1175===true && Number.isFinite(Number(d.entryPriceUsdV1175))?('$'+telegramPlainNumberV271(d.entryPriceUsdV1175,10)):'UNVERIFIED'} (${d.entryPriceVerifiedV1175===true?'EXACT-POOL VERIFIED':'EXACT-POOL UNVERIFIED'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send NOW: ${cur.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND NOW: ${cur.wouldSend?'YES':'NO'}`,`Current first blocker: ${cur.firstBlocker||'NONE'}`,'','V1177: pre-send trace + current persisted dedupe state. Read-only; zero provider/Telegram requests.'].join('\n');
 }
 
 function buildTelegramQualificationDiagnostics(
