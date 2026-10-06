@@ -1,3 +1,4 @@
+// V1194 — WebDiag persistence diagnostic only. Reports exact binding/write/readback failure; no scanner/scoring/provider/payment changes.
 // V1193 — Web Diagnostics dedicated state persistence repair.
 // Moves only Web Diagnostics control state to a small dedicated KV record so /webdiag on/off
 // does not depend on rewriting the large main scanner state. Read-back is verified before a login
@@ -10002,7 +10003,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1193";
+const VERSION = "V1194";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179959,10 +179960,16 @@ async function telegramCommandReplyV271(
           replyMarkupV1186 = {inline_keyboard:[[{ text:"🔐 Open secure diagnostic login", url:loginUrlV1179 }]]};
         }
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1193</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1194</b>","",
           `Status: <b>${savedV1179?.saved===true&&savedV1179?.verified===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
-          expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>"
+          expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>",
+          `KV binding: <b>${escapeHtml(String(savedV1179?.binding||"NONE"))}</b>`,
+          `KV put completed: <b>${savedV1179?.putCompleted===true?"YES":"NO"}</b>`,
+          `Immediate read-back present: <b>${savedV1179?.readbackPresent===true?"YES":"NO"}</b>`,
+          `Save diagnostic: <code>${escapeHtml(String(savedV1179?.error||"NONE").slice(0,300))}</code>`,
+          "",
+          "<i>V1194 diagnostic only. No provider/RPC requests and no production scoring/alert changes.</i>"
         ].join("\n");
       }
     } else {
@@ -197476,9 +197483,16 @@ async function webDiagControlWriteV1193(env,control){
       Number(check.expiresAt||0)===Number(clean.expiresAt||0) &&
       String(check.bootstrapHash||"")===String(clean.bootstrapHash||"") &&
       Number(check.enabledAt||0)===Number(clean.enabledAt||0);
-    return {saved:verified,verified,binding,error:verified?null:"READBACK_MISMATCH"};
+    return {
+      saved:verified,
+      verified,
+      putCompleted:true,
+      readbackPresent:!!raw,
+      binding,
+      error:verified?null:(raw?"READBACK_MISMATCH":"READBACK_EMPTY_AFTER_PUT")
+    };
   }catch(error){
-    return {saved:false,verified:false,binding,error:errorString(error)};
+    return {saved:false,verified:false,putCompleted:false,readbackPresent:false,binding,error:errorString(error)};
   }
 }
 
