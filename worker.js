@@ -1,3 +1,4 @@
+// V1208 — Premium entitlement validation. Payment-only hardening; scanner/scoring/providers/OutcomeIntel unchanged.
 // V1207 — Stripe webhook idempotency hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
 // V1206 — adds protected WebDiag route-grant link to Admin /outcomeintel response only. Evidence/collector logic unchanged.
 // V1205 — Outcome Intelligence presentation + provenance alignment only. No collector/scoring/provider changes.
@@ -10016,7 +10017,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1207";
+const VERSION = "V1208";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -188829,9 +188830,71 @@ async function createStripeCheckoutV1031(env, telegramUserId, telegramUsername, 
   }
 }
 
+
+async function verifyPremiumCheckoutEntitlementV1208(env, event) {
+  const secret=String(env?.STRIPE_SECRET_KEY||"").trim();
+  const expectedPriceId=String(env?.STRIPE_PRICE_ID||"").trim();
+  const webhookSession=event?.data?.object||{};
+  const sessionId=String(webhookSession?.id||"").trim();
+
+  if(!secret) return {ok:false,reason:"STRIPE_SECRET_KEY_NOT_CONFIGURED_V1208"};
+  if(!expectedPriceId) return {ok:false,reason:"STRIPE_PRICE_ID_NOT_CONFIGURED_V1208"};
+  if(!/^cs_/.test(sessionId)) return {ok:false,reason:"CHECKOUT_SESSION_ID_INVALID_V1208"};
+
+  try {
+    const response=await fetch(
+      `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}?expand%5B%5D=line_items`,
+      {method:"GET",headers:{"authorization":`Bearer ${secret}`}}
+    );
+    const session=await response.json().catch(()=>({}));
+    if(!response.ok || !session?.id) {
+      return {ok:false,reason:"STRIPE_CHECKOUT_RETRIEVE_FAILED_V1208",httpStatus:response.status};
+    }
+
+    const mode=String(session?.mode||"").toLowerCase();
+    const paymentStatus=String(session?.payment_status||"").toLowerCase();
+    const status=String(session?.status||"").toLowerCase();
+    const items=Array.isArray(session?.line_items?.data)?session.line_items.data:[];
+    const matchingItems=items.filter(item=>{
+      const price=typeof item?.price==="string" ? item.price : String(item?.price?.id||"");
+      return price===expectedPriceId && Number(item?.quantity||0)===1;
+    });
+    const subscriptionId=typeof session?.subscription==="string"
+      ? session.subscription
+      : String(session?.subscription?.id||"");
+
+    if(mode!=="subscription") return {ok:false,reason:"CHECKOUT_NOT_SUBSCRIPTION_V1208"};
+    if(status!=="complete") return {ok:false,reason:"CHECKOUT_NOT_COMPLETE_V1208"};
+    if(!(paymentStatus==="paid" || paymentStatus==="no_payment_required"))
+      return {ok:false,reason:"CHECKOUT_NOT_PAID_V1208"};
+    if(matchingItems.length!==1 || items.length!==1)
+      return {ok:false,reason:"PREMIUM_PRICE_OR_QUANTITY_MISMATCH_V1208"};
+    if(!subscriptionId) return {ok:false,reason:"STRIPE_SUBSCRIPTION_MISSING_V1208"};
+
+    return {
+      ok:true,
+      session,
+      subscriptionId,
+      entitlement:"CHAINVANTA_PREMIUM",
+      priceMatched:true,
+      quantity:1
+    };
+  } catch(error) {
+    return {ok:false,reason:"PREMIUM_ENTITLEMENT_VERIFY_EXCEPTION_V1208",error:errorString(error)};
+  }
+}
+
 async function saveStripeCheckoutMappingV1031(env, event) {
   if (!env?.CHAINVANTA_DB) return { ok:false, reason:"CHAINVANTA_DB_NOT_BOUND_V1031" };
-  const session = event?.data?.object || {};
+  const entitlementV1208 = await verifyPremiumCheckoutEntitlementV1208(env,event);
+  if (entitlementV1208?.ok !== true) {
+    return {
+      ok:false,
+      reason:entitlementV1208?.reason || "PREMIUM_ENTITLEMENT_NOT_VERIFIED_V1208",
+      entitlementVerified:false
+    };
+  }
+  const session = entitlementV1208.session;
   const telegramUserId = String(session?.metadata?.telegram_user_id || session?.client_reference_id || "").trim();
   if (!/^\d+$/.test(telegramUserId)) return { ok:false, reason:"TELEGRAM_USER_ID_MISSING_V1031" };
 
@@ -188860,7 +188923,7 @@ async function saveStripeCheckoutMappingV1031(env, event) {
       telegramUserId, telegramUsername, customerId, subscriptionId,
       email, status, ts, ts
     ).run();
-    return { ok:true, telegramUserId, status, customerId:Boolean(customerId), subscriptionId:Boolean(subscriptionId) };
+    return { ok:true, telegramUserId, status, customerId:Boolean(customerId), subscriptionId:Boolean(subscriptionId), entitlementVerified:true, premiumPriceMatched:true };
   } catch (error) {
     console.error("V1031 D1 subscriber mapping failed", errorString(error));
     return { ok:false, reason:"D1_SUBSCRIBER_MAPPING_FAILED_V1031", error:errorString(error) };
