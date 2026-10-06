@@ -1,4 +1,10 @@
 /**
+ * V1190 — completed protected diagnostics dashboard UX on top of the frozen V1188/V1189 auth baseline.
+ * - Adds Admin-only /webdiaghome with a short-lived route-bound browser handoff to the diagnostics dashboard.
+ * - Adds a server-side token diagnostic launcher for telegramwhy / marketwhy / sendwhy.
+ * - Simplifies Cloudflare Access status wording and removes the redundant bottom performance button.
+ * - No scanner, scoring, provider, payment, subscription, production-alert or qualification logic changes.
+ *
  * V1187 — early POST authorization routing + clean admin Telegram diagnostics UX.
  * - Preserves V1184 Telegram-admin /webdiag gate, one-time bootstrap link, hashed secrets and revocable HttpOnly browser session.
  * - Adds optional fail-closed Cloudflare Access JWT verification for protected diagnostic routes when CF_ACCESS_REQUIRED=1.
@@ -178179,7 +178185,8 @@ function telegramHelpV271() {
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
-    "<code>/webdiag on|off|status</code> — V1179 Admin-protected web diagnostic access (supports on 1h/6h/24h)",
+    "<code>/webdiag on|off|status</code> — Admin-protected web diagnostic access (supports on 1h/6h/24h)",
+    "<code>/webdiaghome</code> — Open the protected ChainVanta diagnostics dashboard",
     "<code>/telegramwhy 0xADDRESS</code> — exact autonomous Telegram blocker + authoritative pool (read-only; web link included)",
     "<code>/sendwhy 0xADDRESS</code> — production sender dry-run: cooldown, budget, route, render + WOULD_SEND (read-only; web link included)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
@@ -179857,7 +179864,7 @@ async function telegramCommandReplyV271(
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
       const savedV1179 = await writeState(env,stateV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1189</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1190</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
       const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
@@ -179881,7 +179888,7 @@ async function telegramCommandReplyV271(
           ]]
         };
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1189</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1190</b>","",
           `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>"
@@ -179895,6 +179902,40 @@ async function telegramCommandReplyV271(
       ? await sendTelegramDirectTextV1054(env,chatId,replyV1179,replyMarkupV1186)
       : await sendTelegram(env,replyV1179,null,null,chatId);
     return {success:sentV1179?.success===true,ignored:false,command:"/webdiag",scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
+  // V1190: direct Admin Telegram entry point to the protected diagnostics dashboard.
+  if (parsed.command === "/webdiaghome") {
+    const loadedV1190 = await readState(env);
+    const stateV1190 = loadedV1190?.state || newState();
+    const controlV1190 = webDiagControlV1179(stateV1190);
+    let replyV1190 = "";
+    let markupV1190 = null;
+    if (!webDiagStillEnabledV1179(controlV1190)) {
+      replyV1190 = [
+        "🔒 <b>ChainVanta Diagnostics</b>",
+        "",
+        "Status: <b>DISABLED</b>",
+        "Enable temporary access first with <code>/webdiag on 1h</code>."
+      ].join("\n");
+    } else {
+      const homeLinkV1190 = await webDiagIssueRouteGrantV1188(env,controlV1190,"/webdiag-home");
+      if (!homeLinkV1190) {
+        replyV1190 = "⚠️ <b>Unable to create a secure dashboard handoff.</b> Try <code>/webdiag status</code> and then retry.";
+      } else {
+        replyV1190 = [
+          "🛡 <b>ChainVanta Diagnostics</b>",
+          "",
+          "Status: <b>ENABLED</b>",
+          `Session window: <b>${escapeHtml(webDiagFormatExpiryV1189(controlV1190?.expiresAt))}</b>`
+        ].join("\n");
+        markupV1190 = {inline_keyboard:[[{text:"🛡 Open diagnostics dashboard",url:homeLinkV1190}]]};
+      }
+    }
+    const sentV1190 = markupV1190
+      ? await sendTelegramDirectTextV1054(env,chatId,replyV1190,markupV1190)
+      : await sendTelegram(env,replyV1190,null,null,chatId);
+    return {success:sentV1190?.success===true,ignored:false,command:"/webdiaghome",scannerBudgetConsumed:false,externalProviderRequests:0};
   }
 
   if (parsed.command === "/marketaudit" || parsed.command === "/marketcompletion") {
@@ -197339,7 +197380,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/scheduler-status-v673","/scheduler-start-v673",
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
-  "/webdiag-home"
+  "/webdiag-home","/webdiag-token-open"
 ]);
 
 function webDiagControlV1179(state){
@@ -197493,11 +197534,12 @@ function webDiagFormatExpiryV1189(value){
   }catch(_){ return new Date(n).toISOString(); }
 }
 
-function webDiagHomeHtmlV1189(auth){
+function webDiagHomeHtmlV1190(auth){
   const control=auth?.control||{};
   const access=auth?.access||{};
   const expiry=webDiagHtmlEscapeV1184(webDiagFormatExpiryV1189(control?.expiresAt));
-  const cfState=access?.required===true ? "Cloudflare Access verified" : "Cloudflare Access ready (not enforced yet)";
+  const cfState=access?.required===true ? "Cloudflare Access: Protected" : "Cloudflare Access: Ready";
+  const cfDetail=access?.required===true ? "Outer identity layer enforced" : "Outer identity layer not enforced yet";
   const groups=[
     ["Telegram & Delivery",[
       ["/telegramaudit","Telegram audit","Qualification and Telegram delivery decisions"],
@@ -197523,8 +197565,8 @@ function webDiagHomeHtmlV1189(auth){
   const cards=groups.map(([title,items])=>`<section class="group"><h2>${webDiagHtmlEscapeV1184(title)}</h2><div class="grid">${items.map(([href,label,desc])=>`<a class="tool" href="${href}"><span class="tool-title">${webDiagHtmlEscapeV1184(label)}</span><span class="tool-desc">${webDiagHtmlEscapeV1184(desc)}</span><span class="arrow">›</span></a>`).join("")}</div></section>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ChainVanta Admin Diagnostics</title>
 <style>
-:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1040px;margin:0 auto;padding:18px 16px 40px}.top{background:#101828;color:#fff;border-radius:18px;padding:20px;margin-bottom:16px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#98a2b3}.top h1{font-size:26px;margin:7px 0 8px}.top p{margin:0;color:#d0d5dd;line-height:1.5}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px}.status{background:#1d2939;border-radius:12px;padding:12px}.status b{display:block;color:#fff;font-size:14px}.status span{display:block;color:#98a2b3;font-size:12px;margin-top:4px;line-height:1.35}.group{background:#fff;border:1px solid #e4e7ec;border-radius:16px;padding:16px;margin-top:14px}.group h2{font-size:17px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tool{position:relative;display:block;text-decoration:none;color:#101828;border:1px solid #e4e7ec;border-radius:13px;padding:14px 38px 14px 14px;min-height:78px;background:#fff}.tool:active{background:#f9fafb}.tool-title{display:block;font-size:15px;font-weight:750}.tool-desc{display:block;font-size:12px;color:#667085;line-height:1.4;margin-top:5px}.arrow{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:24px;color:#98a2b3}.utility{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.utility a,.utility button{width:100%;appearance:none;border-radius:12px;padding:13px 14px;font:inherit;font-weight:750;cursor:pointer;text-align:center}.secondary{border:1px solid #d0d5dd;background:#fff;color:#101828;text-decoration:none}.danger{border:1px solid #fda29b;background:#fff5f4;color:#b42318}.note{font-size:12px;color:#667085;line-height:1.5;margin-top:14px;padding:0 2px}.token-note{background:#fff;border:1px dashed #d0d5dd;border-radius:14px;padding:14px;margin-top:14px;font-size:13px;color:#475467;line-height:1.55}code{word-break:break-all}@media(max-width:680px){.status-grid{grid-template-columns:1fr}.grid,.utility{grid-template-columns:1fr}.top h1{font-size:23px}.wrap{padding:12px 12px 32px}}
-</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>Outer identity security layer</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<div class="token-note"><b>Token-specific diagnostics</b><br>Use the normal Telegram token diagnostic commands; their protected web links will authorise this browser when required and return you to the selected report.</div><div class="utility"><a class="secondary" href="/performance?period=all">Open full performance</a><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1040px;margin:0 auto;padding:18px 16px 40px}.top{background:#101828;color:#fff;border-radius:18px;padding:20px;margin-bottom:16px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#98a2b3}.top h1{font-size:26px;margin:7px 0 8px}.top p{margin:0;color:#d0d5dd;line-height:1.5}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px}.status{background:#1d2939;border-radius:12px;padding:12px}.status b{display:block;color:#fff;font-size:14px}.status span{display:block;color:#98a2b3;font-size:12px;margin-top:4px;line-height:1.35}.group{background:#fff;border:1px solid #e4e7ec;border-radius:16px;padding:16px;margin-top:14px}.group h2{font-size:17px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tool{position:relative;display:block;text-decoration:none;color:#101828;border:1px solid #e4e7ec;border-radius:13px;padding:14px 38px 14px 14px;min-height:78px;background:#fff}.tool:active{background:#f9fafb}.tool-title{display:block;font-size:15px;font-weight:750}.tool-desc{display:block;font-size:12px;color:#667085;line-height:1.4;margin-top:5px}.arrow{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:24px;color:#98a2b3}.utility{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.utility a,.utility button{width:100%;appearance:none;border-radius:12px;padding:13px 14px;font:inherit;font-weight:750;cursor:pointer;text-align:center}.secondary{border:1px solid #d0d5dd;background:#fff;color:#101828;text-decoration:none}.danger{border:1px solid #fda29b;background:#fff5f4;color:#b42318}.note{font-size:12px;color:#667085;line-height:1.5;margin-top:14px;padding:0 2px}.token-note{background:#fff;border:1px dashed #d0d5dd;border-radius:14px;padding:14px;margin-top:14px;font-size:13px;color:#475467;line-height:1.55}.launcher-copy{margin:0 0 12px;color:#667085;font-size:13px;line-height:1.5}.token-launcher{display:grid;grid-template-columns:1fr 220px auto;gap:10px;align-items:end}.token-launcher label{font-size:12px;font-weight:700;color:#475467;grid-row:1}.token-launcher input,.token-launcher select{width:100%;border:1px solid #d0d5dd;border-radius:11px;background:#fff;color:#101828;padding:12px 12px;font:inherit;min-height:46px}.token-launcher input{grid-column:1}.token-launcher select{grid-column:2}.token-launcher .primary{grid-column:3;appearance:none;border:0;border-radius:11px;background:#101828;color:#fff;padding:12px 16px;font:inherit;font-weight:750;min-height:46px}.utility.single{grid-template-columns:1fr}.utility.single form{width:100%}code{word-break:break-all}@media(max-width:680px){.status-grid{grid-template-columns:1fr}.grid,.utility,.token-launcher{grid-template-columns:1fr}.token-launcher label,.token-launcher input,.token-launcher select,.token-launcher .primary{grid-column:1;grid-row:auto}.top h1{font-size:23px}.wrap{padding:12px 12px 32px}}
+</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>${webDiagHtmlEscapeV1184(cfDetail)}</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<section class="group"><h2>Token-specific diagnostics</h2><p class="launcher-copy">Paste a token contract address and open one of the existing protected token reports directly.</p><form class="token-launcher" method="post" action="/webdiag-token-open"><label for="token-v1190">Token contract</label><input id="token-v1190" name="token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x…" required pattern="0x[0-9a-fA-F]{40}"><label for="tool-v1190">Diagnostic</label><select id="tool-v1190" name="tool"><option value="telegramwhy">Telegram why</option><option value="marketwhy">Market why</option><option value="sendwhy">Send why</option></select><button class="primary" type="submit">Open token diagnostic</button></form></section><div class="utility single"><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
 }
 
 function webDiagRouteCookieValueV1188(request){
@@ -197992,7 +198034,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     !scheduledRelayV671 &&
     path !== "/webdiag-access" &&
     path !== "/webdiag-open" &&
-    path !== "/webdiag-logout"
+    path !== "/webdiag-logout" &&
+    path !== "/webdiag-token-open"
   ) {
     return jsonResponse(
       {
@@ -199883,8 +199926,20 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     const authV1179 = await webDiagAuthorizedV1179(request,stateAuthV1179,env);
     if (!authV1179.ok) return webDiagDeniedResponseV1179(authV1179);
 
+    if (path === "/webdiag-token-open") {
+      if (request.method !== "POST") return new Response("Method not allowed",{status:405,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
+      const formV1190 = await request.formData();
+      const tokenV1190 = String(formV1190.get("token")||"").trim();
+      const toolV1190 = String(formV1190.get("tool")||"").trim().toLowerCase();
+      const toolMapV1190 = {telegramwhy:"/telegramwhy",marketwhy:"/marketwhy",sendwhy:"/sendwhy"};
+      if (!/^0x[0-9a-fA-F]{40}$/.test(tokenV1190) || !toolMapV1190[toolV1190]) {
+        return new Response("Invalid token address or diagnostic selection.",{status:400,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff"}});
+      }
+      return new Response(null,{status:303,headers:{"location":`${toolMapV1190[toolV1190]}?token=${encodeURIComponent(tokenV1190)}`,"cache-control":"no-store, max-age=0","pragma":"no-cache","referrer-policy":"no-referrer","x-content-type-options":"nosniff"}});
+    }
+
     if (path === "/webdiag-home") {
-      return new Response(webDiagHomeHtmlV1189(authV1179),{status:200,headers:{
+      return new Response(webDiagHomeHtmlV1190(authV1179),{status:200,headers:{
         "content-type":"text/html; charset=utf-8",
         "cache-control":"no-store, max-age=0",
         "pragma":"no-cache",
