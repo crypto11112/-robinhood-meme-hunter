@@ -1,4 +1,14 @@
 /*
+ * ChainVanta V1174 — SUCCESSFUL PREMIUM SEND DEDUPE CHECKPOINT
+ * - Builds directly from deployed V1173 and preserves the V1173 scheduled-relay 503 recovery plus all V1171/V1172 behavior.
+ * - Live Premium evidence showed the same STOCKKIT contract could be sent twice about one minute apart while /sendwhy still reported cooldown expired and score-improved.
+ * - Root cause: the successful-call V311 checkpoint ran BEFORE state.alerts[address] was updated, so a relay retry/next scan could reload a state containing the queued Free call and call-performance data but not the authoritative latest Premium alert timestamp/score.
+ * - V1174 writes the successful Premium alert record into state immediately after Telegram success (and after the zero-request Free-delay queue mutation), then checkpoints that state BEFORE slower post-send telemetry/history work.
+ * - The existing cooldown/re-alert rules are unchanged; they now compare against the most recently checkpointed successful Premium send rather than an older retained alert.
+ * - Zero new provider/RPC requests. No request ceilings, scoring, risk, qualification, V726, market rules, Free 30-minute delay, Telegram thresholds, routing, or watch capacity changes.
+ */
+
+/*
  * ChainVanta V1173 — SCHEDULED HEAVY-SCAN RELAY 503 RECOVERY
  * - Builds directly from deployed V1172 and preserves V1171/V1172 behavior.
  * - Two real scheduler snapshots proved repeated V914_HEAVY_SCAN_RELAY_HTTP_503:NO_JSON_BODY failures while the Durable Object alarm itself re-armed correctly.
@@ -83976,13 +83986,13 @@ function telegramSendWhySnapshotV1169(state, rawAddress) {
 
 function telegramSendWhyMessageV1169(state, rawAddress) {
   const d=telegramSendWhySnapshotV1169(state, rawAddress);
-  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1170</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
-  return ['📤 <b>Telegram Sender Dry Run — V1170</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Recorded: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 Duplicate/cooldown clear: <b>${d.duplicateCooldownClear?'YES':'NO'}</b> · expired ${d.cooldownExpired?'YES':'NO'} · +10 score ${d.scoreImproved?'YES':'NO'} · new accumulation ${d.newAccumulation?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'} · compact V1170`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send: <b>${d.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND: <b>${d.wouldSend?'YES':'NO'}</b>`,`🚧 First blocker: <b>${escapeHtml(d.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>Captured at the real pre-send boundary using production cooldown, budget, route and renderer checks. Dry-run only: no Telegram API call.</i>'].join('\n');
+  if(!d.ok) return ['📤 <b>Telegram Sender Dry Run — V1174</b>','',`Status: <b>${escapeHtml(d.status||'UNAVAILABLE')}</b>`,d.address?`Token: <code>${escapeHtml(d.address)}</code>`:'ℹ️ Use <code>/sendwhy 0xADDRESS</code>.',d.note?`ℹ️ ${escapeHtml(d.note)}`:'','','<i>Read-only. No Telegram send and zero provider requests.</i>'].filter(Boolean).join('\n');
+  return ['📤 <b>Telegram Sender Dry Run — V1174</b>','',`<b>${escapeHtml(d.symbol||'UNKNOWN')}</b> · <code>${escapeHtml(d.address)}</code>`,`Recorded: <b>${escapeHtml(new Date(d.recordedAt).toISOString())}</b>`,'',`📨 Qualified: <b>${d.qualified?'YES':'NO'}</b> · Opp ${safeNumber(d.opportunityScore)} · Conf ${safeNumber(d.confidenceScore)} · Risk ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`🧊 Duplicate/cooldown clear: <b>${d.duplicateCooldownClear?'YES':'NO'}</b> · expired ${d.cooldownExpired?'YES':'NO'} · +10 score ${d.scoreImproved?'YES':'NO'} · new accumulation ${d.newAccumulation?'YES':'NO'}`,`💳 Notification budget ready: <b>${d.notificationBudgetReady?'YES':'NO'}</b> · remaining ${safeNumber(d.notificationRemaining)}`,`🎯 Telegram destination configured: <b>${d.destinationConfigured?'YES':'NO'}</b> · route ${escapeHtml(d.destinationMode||'NONE')}`,`📝 Message render: <b>${d.textRenderValid?'VALID':'INVALID'}</b> · ${safeNumber(d.messageLength)} chars${d.hasImage?' · image YES':' · image NO'} · compact V1170`,`🖼 Photo/fallback headroom: <b>${d.fallbackCapacityReady?'YES':'NO'}</b>`,'',`🚦 Would attempt production send: <b>${d.wouldAttemptSend?'YES':'NO'}</b>`,`✅ WOULD_SEND: <b>${d.wouldSend?'YES':'NO'}</b>`,`🚧 First blocker: <b>${escapeHtml(d.firstBlocker||'NONE')}</b>`,'',`🌐 Web: <code>https://robinhood-meme-hunter.johnd1987.workers.dev/sendwhy?token=${escapeHtml(d.address)}</code>`,'','<i>Captured at the real pre-send boundary using production cooldown, budget, route and renderer checks. Dry-run only: no Telegram API call.</i>'].join('\n');
 }
 
 function telegramSendWhyPlainTextV1169(d) {
-  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1170\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
-  return ['ChainVanta Telegram Sender Dry Run — V1170',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Recorded: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`Duplicate/cooldown clear: ${d.duplicateCooldownClear?'YES':'NO'}`,`Cooldown expired: ${d.cooldownExpired?'YES':'NO'}`,`Score improved >=10: ${d.scoreImproved?'YES':'NO'}`,`New accumulation: ${d.newAccumulation?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send: ${d.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND: ${d.wouldSend?'YES':'NO'}`,`First blocker: ${d.firstBlocker||'NONE'}`,'','Read-only dry run. No Telegram API call and zero provider requests.'].join('\n');
+  if(!d?.ok) return `ChainVanta Telegram Sender Dry Run — V1174\nStatus: ${d?.status||'UNAVAILABLE'}\nToken: ${d?.address||'INVALID'}\n${d?.note||''}`;
+  return ['ChainVanta Telegram Sender Dry Run — V1174',`Token: ${d.symbol||'UNKNOWN'} ${d.address}`,`Recorded: ${new Date(d.recordedAt).toISOString()}`,'',`Qualified: ${d.qualified?'YES':'NO'}`,`Opportunity: ${safeNumber(d.opportunityScore)}`,`Confidence: ${safeNumber(d.confidenceScore)}`,`Risk: ${d.riskScore===null?'UNVERIFIED':safeNumber(d.riskScore)}`,`Duplicate/cooldown clear: ${d.duplicateCooldownClear?'YES':'NO'}`,`Cooldown expired: ${d.cooldownExpired?'YES':'NO'}`,`Score improved >=10: ${d.scoreImproved?'YES':'NO'}`,`New accumulation: ${d.newAccumulation?'YES':'NO'}`,`Notification budget ready: ${d.notificationBudgetReady?'YES':'NO'} (remaining ${safeNumber(d.notificationRemaining)})`,`Telegram destination configured: ${d.destinationConfigured?'YES':'NO'} (${d.destinationMode||'NONE'})`,`Message render valid: ${d.textRenderValid?'YES':'NO'} (${safeNumber(d.messageLength)} chars)`,`Image: ${d.hasImage?'YES':'NO'}`,`Photo/fallback headroom: ${d.fallbackCapacityReady?'YES':'NO'}`,'',`Would attempt production send: ${d.wouldAttemptSend?'YES':'NO'}`,`WOULD_SEND: ${d.wouldSend?'YES':'NO'}`,`First blocker: ${d.firstBlocker||'NONE'}`,'','Read-only dry run. No Telegram API call and zero provider requests.'].join('\n');
 }
 
 function buildTelegramQualificationDiagnostics(
@@ -124495,6 +124505,53 @@ for (
           );
       }
 
+      /*
+       * V1174: persist the authoritative latest successful Premium alert BEFORE
+       * slower post-send telemetry/history work. The existing V311 checkpoint
+       * previously ran before state.alerts[address] was updated, leaving a
+       * short but real cross-scan/relay-retry window where the same token could
+       * pass cooldown again against an older retained alert. The Free-delay
+       * queue mutation above is included in this same checkpoint.
+       */
+      const successfulPremiumMessageIdV1174 =
+        Number(result?.data?.result?.message_id);
+      const successfulPremiumSendAtV1174 = Date.now();
+
+      state.alerts[address] = {
+        timestamp: successfulPremiumSendAtV1174,
+        score: safeNumber(candidate?.opportunity?.score),
+        confidence: safeNumber(candidate?.confidence?.score),
+        whaleFlow: candidate?.whaleFlow?.flow || null,
+        successfulPremiumMessageIdV1174:
+          Number.isFinite(successfulPremiumMessageIdV1174) && successfulPremiumMessageIdV1174 > 0
+            ? successfulPremiumMessageIdV1174
+            : null,
+        successfulPremiumRouteV1174:
+          String(env.TELEGRAM_PREMIUM_CHAT_ID || "").trim()
+            ? "PREMIUM_CHAT"
+            : "LEGACY_CHAT",
+        dedupeCheckpointVersion: "V1174"
+      };
+
+      const telegramAlertDedupeCheckpointV1174 =
+        await writeState(env, state);
+
+      telegramResults[telegramResults.length - 1].telegramAlertDedupeCheckpointV1174 = {
+        attempted: true,
+        saved: telegramAlertDedupeCheckpointV1174?.saved === true,
+        binding: telegramAlertDedupeCheckpointV1174?.binding || null,
+        error: telegramAlertDedupeCheckpointV1174?.error || null,
+        address,
+        timestamp: successfulPremiumSendAtV1174,
+        score: safeNumber(candidate?.opportunity?.score),
+        messageId:
+          Number.isFinite(successfulPremiumMessageIdV1174) && successfulPremiumMessageIdV1174 > 0
+            ? successfulPremiumMessageIdV1174
+            : null,
+        freeQueueMutationIncluded: true,
+        providerRequestsAdded: 0
+      };
+
       // V412: bind this exact successful Telegram API delivery to the candidate
       // before call registration. The proof is only entry-frozen when there is
       // no pre-existing frozen entryTimestamp; repeat alerts remain separate.
@@ -124760,25 +124817,6 @@ for (
         telegramResults.length - 1
       ].alertHistoryPersistenceV268 =
         alertHistoryPersistenceV268;
-
-      state.alerts[
-        address
-      ] = {
-        timestamp:
-          Date.now(),
-
-        score:
-          candidate.opportunity
-            .score,
-
-        confidence:
-          candidate.confidence
-            .score,
-
-        whaleFlow:
-          candidate.whaleFlow
-            .flow
-      };
 
       const followUpAlertRegistrationV267 =
         registerSuccessfulAlertFollowUpV267(
