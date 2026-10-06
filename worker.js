@@ -1,4 +1,11 @@
 /**
+ * V1186 — POST-confirmed one-time diagnostic browser authorization.
+ * - Preserves V1185 Cloudflare Access-ready hardening and cross-platform download response.
+ * - GET /webdiag-access validates the current bootstrap secret but never consumes it or creates a session.
+ * - GET renders a minimal no-cache Authorise this browser confirmation form.
+ * - POST /webdiag-access revalidates Cloudflare Access (when enabled), diagnostic state, expiry, and bootstrap hash, then atomically consumes the bootstrap and creates the revocable HttpOnly browser session.
+ * - Prevents Telegram/Safari link previews and safe-link scanners from accidentally burning the one-time login on a GET.
+ * - No scanner, scoring, risk, qualification, provider-budget, Premium/Free, scheduler or Telegram-send logic changes.
  * V1185 — Cloudflare Access-ready diagnostic hardening + cross-platform downloads.
  * - Preserves V1184 Telegram-admin /webdiag gate, one-time bootstrap link, hashed secrets and revocable HttpOnly browser session.
  * - Adds optional fail-closed Cloudflare Access JWT verification for protected diagnostic routes when CF_ACCESS_REQUIRED=1.
@@ -199548,40 +199555,78 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   }
 
 
-  // V1179: one-time bootstrap establishes an HttpOnly browser session.
+  // V1186: GET validates the one-time bootstrap but does NOT consume it.
+  // The browser session is created only after an explicit same-page POST confirmation.
   if (path === "/webdiag-access" && request.method === "GET") {
-    // V1185: when Cloudflare Access enforcement is enabled, identity/MFA must pass before the one-time ChainVanta bootstrap can be consumed.
-    const accessV1185 = await webDiagVerifyAccessJwtV1185(request,env);
-    if (!accessV1185.ok) return webDiagDeniedResponseV1179({reason:accessV1185.reason,access:accessV1185});
-    const loadedV1179 = await readState(env);
-    const stateV1179 = loadedV1179?.state || newState();
-    const controlV1179 = webDiagControlV1179(stateV1179);
-    if (!webDiagStillEnabledV1179(controlV1179)) return webDiagDeniedResponseV1179({reason:controlV1179?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
-    const keyV1179 = String(url.searchParams.get("key") || "");
-    if (!keyV1179 || !controlV1179.bootstrapHash || await webDiagSha256V1179(keyV1179) !== String(controlV1179.bootstrapHash)) {
+    const accessV1186 = await webDiagVerifyAccessJwtV1185(request,env);
+    if (!accessV1186.ok) return webDiagDeniedResponseV1179({reason:accessV1186.reason,access:accessV1186});
+    const loadedV1186 = await readState(env);
+    const stateV1186 = loadedV1186?.state || newState();
+    const controlV1186 = webDiagControlV1179(stateV1186);
+    if (!webDiagStillEnabledV1179(controlV1186)) return webDiagDeniedResponseV1179({reason:controlV1186?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
+    const keyV1186 = String(url.searchParams.get("key") || "");
+    if (!keyV1186 || !controlV1186.bootstrapHash || await webDiagSha256V1179(keyV1186) !== String(controlV1186.bootstrapHash)) {
       return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
     }
-    const sessionV1179 = webDiagRandomSecretV1179(32);
-    stateV1179.webDiagControlV1179 = {
-      ...controlV1179, bootstrapHash:null, sessionHash:await webDiagSha256V1179(sessionV1179), lastLoginAt:Date.now()
-    };
-    const savedV1179 = await writeState(env,stateV1179);
-    if (savedV1179?.saved !== true) return new Response("Unable to establish diagnostic session.",{status:503,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
-    const maxAgeV1179 = Number(controlV1179.expiresAt||0)>0 ? Math.max(1,Math.floor((Number(controlV1179.expiresAt)-Date.now())/1000)) : 21600;
-    const loginHtmlV1184 = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChainVanta Diagnostic Login</title>
-<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:700px;margin:0 auto;padding:24px;color:#111}.ok{padding:14px;border-radius:12px;background:#eef8ef}.btn{display:inline-block;margin-top:14px;padding:12px 16px;border-radius:10px;background:#111;color:#fff;text-decoration:none}.small{font-size:13px;color:#5b6470;margin-top:16px;word-break:break-word}</style></head><body>
-<h1>ChainVanta Protected Diagnostics — V1185</h1>
-<div class="ok"><b>Diagnostic browser session established.</b><br>This browser now has the protected Admin session cookie.</div>
-<a class="btn" href="/webdiag-home">Open diagnostics</a>
-<p class="small">If this page was opened in Safari, continue using Safari for the protected diagnostic pages. The one-time bootstrap key has now been consumed.</p>
+    const confirmHtmlV1186 = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorise ChainVanta Diagnostics</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:700px;margin:0 auto;padding:24px;color:#111}.box{padding:16px;border-radius:12px;background:#f5f6f8}.btn{appearance:none;border:0;display:inline-block;margin-top:16px;padding:13px 17px;border-radius:10px;background:#111;color:#fff;font:inherit;font-weight:600;cursor:pointer}.small{font-size:13px;color:#5b6470;margin-top:16px;line-height:1.45}</style></head><body>
+<h1>ChainVanta Protected Diagnostics — V1186</h1>
+<div class="box"><b>Admin diagnostic access is ready.</b><br>Opening this page has not consumed your one-time login. Tap below to authorise this browser.</div>
+<form method="post" action="/webdiag-access"><input type="hidden" name="key" value="${escapeHtml(keyV1186)}"><button class="btn" type="submit">Authorise this browser</button></form>
+<p class="small">For security, the one-time key is consumed only after you press the button. Link previews and automated GET requests cannot create a diagnostic session.</p>
 </body></html>`;
-    return new Response(loginHtmlV1184,{status:200,headers:{
+    return new Response(confirmHtmlV1186,{status:200,headers:{
       "content-type":"text/html; charset=utf-8",
-      "set-cookie":`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1179)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeV1179}`,
       "cache-control":"no-store, max-age=0",
       "pragma":"no-cache",
       "referrer-policy":"no-referrer",
       "x-content-type-options":"nosniff",
+      "x-frame-options":"DENY",
+      "content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+    }});
+  }
+
+  if (path === "/webdiag-access" && request.method === "POST") {
+    const accessV1186 = await webDiagVerifyAccessJwtV1185(request,env);
+    if (!accessV1186.ok) return webDiagDeniedResponseV1179({reason:accessV1186.reason,access:accessV1186});
+    const loadedV1186 = await readState(env);
+    const stateV1186 = loadedV1186?.state || newState();
+    const controlV1186 = webDiagControlV1179(stateV1186);
+    if (!webDiagStillEnabledV1179(controlV1186)) return webDiagDeniedResponseV1179({reason:controlV1186?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
+
+    let formV1186;
+    try { formV1186 = await request.formData(); } catch { formV1186 = null; }
+    const keyV1186 = String(formV1186?.get("key") || "");
+    if (!keyV1186 || !controlV1186.bootstrapHash || await webDiagSha256V1179(keyV1186) !== String(controlV1186.bootstrapHash)) {
+      return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
+    }
+
+    const sessionV1186 = webDiagRandomSecretV1179(32);
+    stateV1186.webDiagControlV1179 = {
+      ...controlV1186,
+      bootstrapHash:null,
+      sessionHash:await webDiagSha256V1179(sessionV1186),
+      lastLoginAt:Date.now()
+    };
+    const savedV1186 = await writeState(env,stateV1186);
+    if (savedV1186?.saved !== true) return new Response("Unable to establish diagnostic session.",{status:503,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
+
+    const maxAgeV1186 = Number(controlV1186.expiresAt||0)>0 ? Math.max(1,Math.floor((Number(controlV1186.expiresAt)-Date.now())/1000)) : 21600;
+    const successHtmlV1186 = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChainVanta Diagnostic Login</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:700px;margin:0 auto;padding:24px;color:#111}.ok{padding:14px;border-radius:12px;background:#eef8ef}.btn{display:inline-block;margin-top:14px;padding:12px 16px;border-radius:10px;background:#111;color:#fff;text-decoration:none}.small{font-size:13px;color:#5b6470;margin-top:16px;line-height:1.45}</style></head><body>
+<h1>ChainVanta Protected Diagnostics — V1186</h1>
+<div class="ok"><b>Diagnostic browser session established.</b><br>The one-time login is now consumed and this browser has the protected Admin session.</div>
+<a class="btn" href="/webdiag-home">Open diagnostics</a>
+<p class="small">Use <code>/webdiag off</code> in the authorised Admin Telegram to revoke this session immediately.</p>
+</body></html>`;
+    return new Response(successHtmlV1186,{status:200,headers:{
+      "content-type":"text/html; charset=utf-8",
+      "set-cookie":`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1186)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeV1186}`,
+      "cache-control":"no-store, max-age=0",
+      "pragma":"no-cache",
+      "referrer-policy":"no-referrer",
+      "x-content-type-options":"nosniff",
+      "x-frame-options":"DENY",
       "content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
     }});
   }
