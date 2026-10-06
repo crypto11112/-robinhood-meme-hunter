@@ -1,3 +1,4 @@
+// V1202 — Telegram-safe /outcomeintel delivery; no collector/scoring/provider/security changes.
 // V1201 — read-only frozen-outcome provenance/timing audit; no collector, scoring, budget, or security changes.
 // V1200 — read-only Outcome Intelligence cooldown/backlog telemetry; no budget/scoring/provider-policy changes.
 // V1199 — authoritative forward-audit schema migration in the V1120 observer path; no hindsight backfill.
@@ -10010,7 +10011,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1201";
+const VERSION = "V1202";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144758,7 +144759,7 @@ function outcomeCooldownTimeV1200(value) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1201</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1202</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144855,7 +144856,7 @@ async function outcomeIntelMessageV1197(state, env) {
     const mig=obs?.migrationV1199||null;
     if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1201 telemetry only: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1202 Telegram-safe telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
@@ -180044,8 +180045,27 @@ async function telegramCommandReplyV271(
     const loadedV1191 = await readState(env);
     const stateV1191 = loadedV1191?.state || newState();
     const replyV1191 = await outcomeIntelMessageV1197(stateV1191, env);
-    const sentV1191 = await sendTelegram(env, replyV1191, null, null, chatId);
-    return {success:sentV1191?.success===true,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,internalDurableObjectReads:1};
+    const chunksV1202=[];
+    if(replyV1191.length<=3600) chunksV1202.push(replyV1191);
+    else {
+      const linesV1202=replyV1191.split("\n");
+      let chunkV1202="";
+      for(const lineV1202 of linesV1202){
+        const candidateV1202=chunkV1202?chunkV1202+"\n"+lineV1202:lineV1202;
+        if(candidateV1202.length>3600 && chunkV1202){
+          chunksV1202.push(chunkV1202);
+          chunkV1202=lineV1202;
+        } else chunkV1202=candidateV1202;
+      }
+      if(chunkV1202) chunksV1202.push(chunkV1202);
+    }
+    let sentOkV1202=true;
+    for(let iV1202=0;iV1202<chunksV1202.length;iV1202++){
+      const prefixV1202=chunksV1202.length>1?`<b>Outcome Intelligence ${iV1202+1}/${chunksV1202.length}</b>\n`:"";
+      const sentV1202=await sendTelegram(env,prefixV1202+chunksV1202[iV1202],null,null,chatId);
+      if(sentV1202?.success!==true){sentOkV1202=false;break;}
+    }
+    return {success:sentOkV1202,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,internalDurableObjectReads:1,telegramChunks:chunksV1202.length};
   }
 
   if (parsed.command === "/webdiag") {
