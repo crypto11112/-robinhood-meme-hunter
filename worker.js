@@ -1,4 +1,5 @@
 /**
+ * V1183 — Forward-low persistence hardening.
  * V1182 — Performance low/current consistency hardening.
  * - Keeps existing aggregate /performance statistics and adds median ATH/current-position coverage.
  * - Telegram /performance shows six latest per-call summaries with exact frozen entry when V1175 verified it, current x/% from stored verified MC, ATH, V407 forward-only low, and frozen 1h/6h/24h outcomes.
@@ -68612,6 +68613,81 @@ function dexPerformanceBatchAddressesV295(state, targetToken) {
     .slice(0, 30);
 }
 
+
+/*
+ * V1183 — forward-low persistence hardening.
+ *
+ * Some verified current-market observations are written by the bounded
+ * DexScreener performance batch (V295) rather than by
+ * buildCallPerformanceRecordV270().  Before V1183 that path updated
+ * currentMarketCap/currentMultiple but did not advance drawdownTrackerV407,
+ * which could leave the persisted V407 low above a newer verified current
+ * observation.
+ *
+ * This helper is strictly forward-only:
+ * - it consumes only the verified market-cap observation being processed now;
+ * - it never reconstructs or guesses historical lows;
+ * - it never raises an existing low;
+ * - it records the observation timestamp/source that actually advanced it.
+ */
+function advanceForwardLowV1183(record, marketCap, observedAt, source = null) {
+  if (!record || typeof record !== "object") return { updated:false, initialised:false };
+
+  const entryMc = Number(record?.entryMarketCap);
+  const mc = Number(marketCap);
+  const at = Number(observedAt);
+
+  if (
+    !Number.isFinite(entryMc) || entryMc <= 0 ||
+    !Number.isFinite(mc) || mc <= 0 ||
+    !Number.isFinite(at) || at <= 0
+  ) {
+    return { updated:false, initialised:false };
+  }
+
+  const existingTracker =
+    record?.drawdownTrackerV407 &&
+    typeof record.drawdownTrackerV407 === "object"
+      ? { ...record.drawdownTrackerV407 }
+      : null;
+
+  if (!existingTracker) {
+    record.drawdownTrackerV407 = {
+      version: "V407",
+      forwardOnly: true,
+      historicalBackfillAllowed: false,
+      startedAt: at,
+      startedAtEntry: false,
+      lowestMarketCap: mc,
+      lowestObservedAt: at,
+      lowestMultipleByMarketCap: mc / entryMc,
+      lowestSourceV1183: source || null,
+      lastForwardLowCheckAtV1183: at,
+      lastForwardLowCheckSourceV1183: source || null
+    };
+    return { updated:true, initialised:true };
+  }
+
+  existingTracker.lastForwardLowCheckAtV1183 = at;
+  existingTracker.lastForwardLowCheckSourceV1183 = source || null;
+
+  const priorLow = Number(existingTracker.lowestMarketCap);
+  if (!Number.isFinite(priorLow) || priorLow <= 0 || mc < priorLow) {
+    existingTracker.lowestMarketCap = mc;
+    existingTracker.lowestObservedAt = at;
+    existingTracker.lowestSourceV1183 = source || null;
+    existingTracker.lowestMultipleByMarketCap = mc / entryMc;
+    record.drawdownTrackerV407 = existingTracker;
+    return { updated:true, initialised:false };
+  }
+
+  // Keep the multiple internally consistent with the frozen entry baseline.
+  existingTracker.lowestMultipleByMarketCap =
+    Number(existingTracker.lowestMarketCap) / entryMc;
+  record.drawdownTrackerV407 = existingTracker;
+  return { updated:false, initialised:false };
+}
+
 function applyDexPerformanceBatchV295(state, pairs, targetToken) {
   if (
     !state?.callPerformanceV270 ||
@@ -68729,6 +68805,19 @@ function applyDexPerformanceBatchV295(state, pairs, targetToken) {
       next.athPriceUsd,
       next.currentPriceUsd
     );
+
+    const forwardLowV1183 = advanceForwardLowV1183(
+      next,
+      marketCap,
+      nowMs,
+      "DEXSCREENER_TOKENS_V1_BATCH_V295"
+    );
+    next.forwardLowPersistenceV1183 = {
+      checkedAt: nowMs,
+      source: "DEXSCREENER_TOKENS_V1_BATCH_V295",
+      updated: forwardLowV1183.updated === true,
+      initialised: forwardLowV1183.initialised === true
+    };
 
     seedHistoricalPerformanceMilestonesV308(next);
     capturePerformanceMilestonesV308(next, nowMs);
@@ -108308,9 +108397,12 @@ function buildCallPerformanceRecordV270(
     } else if (market.verified && Number.isFinite(Number(currentMarketCap)) && Number(currentMarketCap) > 0) {
       const mcNow = Number(currentMarketCap);
       const priorLow = Number(drawdownTrackerV407.lowestMarketCap);
+      drawdownTrackerV407.lastForwardLowCheckAtV1183 = nowMs;
+      drawdownTrackerV407.lastForwardLowCheckSourceV1183 = market.source || null;
       if (!Number.isFinite(priorLow) || priorLow <= 0 || mcNow < priorLow) {
         drawdownTrackerV407.lowestMarketCap = mcNow;
         drawdownTrackerV407.lowestObservedAt = nowMs;
+        drawdownTrackerV407.lowestSourceV1183 = market.source || null;
       }
       drawdownTrackerV407.lowestMultipleByMarketCap =
         Number(drawdownTrackerV407.lowestMarketCap) / Number(entryMarketCap);
@@ -144619,7 +144711,7 @@ function performanceSummaryV271(state, options = {}) {
 
   if (!entries.length) {
     return [
-      "📊 <b>Bot Call Performance — V1182</b>",
+      "📊 <b>Bot Call Performance — V1183</b>",
       "",
       `Period: <b>${escapeHtml(period)}</b>`,
       "No tracked call baselines exist in this period."
@@ -144668,7 +144760,7 @@ function performanceSummaryV271(state, options = {}) {
   const best = verifiedAth.slice().sort((a,b)=>Number(b?.athMultipleByMarketCap)-Number(a?.athMultipleByMarketCap))[0] || null;
 
   const lines = [
-    "📊 <b>Bot Call Performance — V1182</b>",
+    "📊 <b>Bot Call Performance — V1183</b>",
     "",
     `Period: <b>${escapeHtml(period)}</b> · Tracked <b>${entries.length}</b>${period === "all" ? ` / registry ${allEntries.length}` : ""}`,
     `Verified ATH: <b>${verifiedAth.length}</b> · Median <b>${telegramMultipleV271(medianAthX)}</b> · Average <b>${telegramMultipleV271(averageAthX)}</b>`,
@@ -144722,7 +144814,7 @@ function performanceSummaryV271(state, options = {}) {
 
   lines.push(
     "",
-    "<i>V1182 is read-only reporting. Current/ATH/horizon values use stored verified observations only. Observed low uses the V407 tracked low unless a newer verified current observation is lower; in that case the report shows the verified current value without rewriting historical V407 state. Historical lows are never guessed. Exact Entry price is shown only when the frozen V1175 exact-pool baseline verified it.</i>"
+    "<i>V1183 keeps the V1182 evidence-safe report and now persists new forward lows whenever a verified V295/current-market observation is processed. Historical lows are never reconstructed or guessed; an existing low can only stay the same or move lower on a new verified observation. Exact Entry price is shown only when the frozen V1175 exact-pool baseline verified it.</i>"
   );
 
   return lines.join("\n");
