@@ -1,3 +1,4 @@
+// V1203 — restores /outcomeintel Telegram delivery and adds it to protected WebDiag with copy/download.
 // V1202 — Telegram-safe /outcomeintel delivery; no collector/scoring/provider/security changes.
 // V1201 — read-only frozen-outcome provenance/timing audit; no collector, scoring, budget, or security changes.
 // V1200 — read-only Outcome Intelligence cooldown/backlog telemetry; no budget/scoring/provider-policy changes.
@@ -10011,7 +10012,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1202";
+const VERSION = "V1203";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144759,7 +144760,7 @@ function outcomeCooldownTimeV1200(value) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1202</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1203</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144856,7 +144857,7 @@ async function outcomeIntelMessageV1197(state, env) {
     const mig=obs?.migrationV1199||null;
     if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1202 Telegram-safe telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1203 protected-delivery telemetry: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
@@ -180045,27 +180046,22 @@ async function telegramCommandReplyV271(
     const loadedV1191 = await readState(env);
     const stateV1191 = loadedV1191?.state || newState();
     const replyV1191 = await outcomeIntelMessageV1197(stateV1191, env);
-    const chunksV1202=[];
-    if(replyV1191.length<=3600) chunksV1202.push(replyV1191);
-    else {
-      const linesV1202=replyV1191.split("\n");
-      let chunkV1202="";
-      for(const lineV1202 of linesV1202){
-        const candidateV1202=chunkV1202?chunkV1202+"\n"+lineV1202:lineV1202;
-        if(candidateV1202.length>3600 && chunkV1202){
-          chunksV1202.push(chunkV1202);
-          chunkV1202=lineV1202;
-        } else chunkV1202=candidateV1202;
+    const chunksV1203 = telegramChunksV292(replyV1191);
+    let sentOkV1203=true, sendErrorV1203=null;
+    for(let iV1203=0;iV1203<chunksV1203.length;iV1203++){
+      if(iV1203>0) await sleepV292(125);
+      const sentV1203=await sendTelegram(env,chunksV1203[iV1203],null,null,chatId);
+      if(sentV1203?.success!==true){
+        sentOkV1203=false;
+        sendErrorV1203=sentV1203?.error||sentV1203?.reason||sentV1203?.status||"TELEGRAM_SEND_FAILED";
+        break;
       }
-      if(chunkV1202) chunksV1202.push(chunkV1202);
     }
-    let sentOkV1202=true;
-    for(let iV1202=0;iV1202<chunksV1202.length;iV1202++){
-      const prefixV1202=chunksV1202.length>1?`<b>Outcome Intelligence ${iV1202+1}/${chunksV1202.length}</b>\n`:"";
-      const sentV1202=await sendTelegram(env,prefixV1202+chunksV1202[iV1202],null,null,chatId);
-      if(sentV1202?.success!==true){sentOkV1202=false;break;}
+    if(!sentOkV1203){
+      const fallbackV1203=`⚠️ <b>Outcome Intelligence delivery failed</b>\nTelegram could not deliver the full diagnostic.\nProtected web copy: <code>${WEB_DIAG_BASE_V1179}/webdiag-outcomeintel</code>\nError: <code>${escapeHtml(String(sendErrorV1203))}</code>`;
+      await sendTelegram(env,fallbackV1203,null,null,chatId);
     }
-    return {success:sentOkV1202,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,internalDurableObjectReads:1,telegramChunks:chunksV1202.length};
+    return {success:sentOkV1203,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,internalDurableObjectReads:1,telegramChunks:chunksV1203.length};
   }
 
   if (parsed.command === "/webdiag") {
@@ -197652,7 +197648,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/scheduler-status-v673","/scheduler-start-v673",
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
-  "/webdiag-home","/webdiag-token-open"
+  "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel"
 ]);
 
 function webDiagControlV1179(state){
@@ -197823,6 +197819,9 @@ function webDiagHomeHtmlV1190(auth){
       ["/riskaudit","Risk audit","Risk completion and overrides"],
       ["/holderaudit","Holder audit","Holder evidence and recovery"],
       ["/marketaudit","Market audit","Market and exact-pool evidence"]
+    ]],
+    ["Outcome Intelligence",[
+      ["/webdiag-outcomeintel","Outcome Intelligence","Forward-only 5s→7d outcome audit, observer backlog and provenance"]
     ]],
     ["Performance",[
       ["/performance?period=24h","Performance — 24h","Recent performance window"],
@@ -198084,6 +198083,7 @@ function webDiagHomeHtmlV1184(){
     ["/riskaudit","Risk audit"],
     ["/holderaudit","Holder audit"],
     ["/marketaudit","Market audit"],
+    ["/webdiag-outcomeintel","Outcome Intelligence"],
     ["/performance?period=all","Performance — all"],
     ["/performance?period=24h","Performance — 24h"],
     ["/performance?period=7d","Performance — 7d"],
@@ -200224,6 +200224,14 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         "referrer-policy":"no-referrer",
         "content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
       }});
+    }
+
+    if (path === "/webdiag-outcomeintel") {
+      const outcomeWebV1203 = await outcomeIntelMessageV1197(stateAuthV1179,env);
+      if (String(url.searchParams.get("download")||"") === "1") {
+        return webDiagDownloadResponseV1184(outcomeWebV1203,"chainvanta-outcome-intelligence.txt");
+      }
+      return webDiagHtmlResponseV1184("ChainVanta Outcome Intelligence",outcomeWebV1203,url);
     }
 
     const longV1179 = webDiagLongRouteV1179(path,stateAuthV1179,env,url);
