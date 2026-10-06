@@ -1,3 +1,8 @@
+// V1193 — Web Diagnostics dedicated state persistence repair.
+// Moves only Web Diagnostics control state to a small dedicated KV record so /webdiag on/off
+// does not depend on rewriting the large main scanner state. Read-back is verified before a login
+// button is issued. Scanner, scoring, risk, providers, payments, alerts and V1192 outcomes unchanged.
+//
 // V1192 — forward outcome collector expansion (measurement-only).
 // Extends the existing V1117/V1120 decision audit to genuine forward horizons:
 // 5s, 10s, 30s, 1m, 2m, 5m, 10m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 24h, 48h, 7d.
@@ -9997,7 +10002,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1192";
+const VERSION = "V1193";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179916,6 +179921,7 @@ async function telegramCommandReplyV271(
   if (parsed.command === "/webdiag") {
     const loadedV1179 = await readState(env);
     const stateV1179 = loadedV1179?.state || newState();
+    stateV1179.webDiagControlV1179 = await webDiagControlReadV1193(env,stateV1179);
     const rawArgV1179 = String(parsed.argument || "status").trim().toLowerCase();
     const partsV1179 = rawArgV1179.split(/\s+/).filter(Boolean);
     const actionV1179 = partsV1179[0] || "status";
@@ -179930,8 +179936,8 @@ async function telegramCommandReplyV271(
         ...webDiagControlV1179(stateV1179), enabled:false, mode:"OFF", expiresAt:null,
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
-      const savedV1179 = await writeState(env,stateV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1190</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      const savedV1179 = await webDiagControlWriteV1193(env,stateV1179.webDiagControlV1179);
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1193</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
       const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
@@ -179946,17 +179952,15 @@ async function telegramCommandReplyV271(
           expiresAt:expiresAtV1179, bootstrapHash:bootstrapHashV1179, sessionHash:null,
           enabledAt:Date.now(), enabledBy:`ADMIN_CHAT:${chatId}`, disabledAt:null, lastLoginAt:null
         };
-        const savedV1179 = await writeState(env,stateV1179);
-        // V1186: the secret URL exists only behind a Telegram inline button; it is never printed in chat text.
-        const loginUrlV1179 = `${WEB_DIAG_BASE_V1179}/webdiag-access?key=${encodeURIComponent(bootstrapV1179)}`;
-        replyMarkupV1186 = {
-          inline_keyboard:[[
-            { text:"🔐 Open secure diagnostic login", url:loginUrlV1179 }
-          ]]
-        };
+        const savedV1179 = await webDiagControlWriteV1193(env,stateV1179.webDiagControlV1179);
+        // V1193: issue no login secret unless the dedicated control record was written and read back.
+        if(savedV1179?.saved===true && savedV1179?.verified===true){
+          const loginUrlV1179 = `${WEB_DIAG_BASE_V1179}/webdiag-access?key=${encodeURIComponent(bootstrapV1179)}`;
+          replyMarkupV1186 = {inline_keyboard:[[{ text:"🔐 Open secure diagnostic login", url:loginUrlV1179 }]]};
+        }
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1190</b>","",
-          `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
+          "🔓 <b>ChainVanta Web Diagnostics — V1193</b>","",
+          `Status: <b>${savedV1179?.saved===true&&savedV1179?.verified===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>"
         ].join("\n");
@@ -179975,6 +179979,7 @@ async function telegramCommandReplyV271(
   if (parsed.command === "/webdiaghome") {
     const loadedV1190 = await readState(env);
     const stateV1190 = loadedV1190?.state || newState();
+    stateV1190.webDiagControlV1179 = await webDiagControlReadV1193(env,stateV1190);
     const controlV1190 = webDiagControlV1179(stateV1190);
     let replyV1190 = "";
     let markupV1190 = null;
@@ -197441,6 +197446,42 @@ const WEB_DIAG_BOOTSTRAP_COOKIE_V1186 = "cv_diag_boot_v1186";
 const WEB_DIAG_ROUTE_COOKIE_V1188 = "cv_diag_route_v1188";
 const WEB_DIAG_ROUTE_GRANTS_KEY_V1188 = "cv_webdiag_route_grants_v1188";
 const WEB_DIAG_SESSIONS_KEY_V1188 = "cv_webdiag_sessions_v1188";
+const WEB_DIAG_CONTROL_KEY_V1193 = "cv_webdiag_control_v1193";
+
+async function webDiagControlReadV1193(env,stateFallback=null){
+  const {kv}=getKV(env);
+  if(kv && typeof kv.get==="function"){
+    try{
+      const raw=await kv.get(WEB_DIAG_CONTROL_KEY_V1193);
+      if(raw){
+        const parsed=JSON.parse(raw);
+        if(parsed && typeof parsed==="object") return parsed;
+      }
+    }catch(_){}
+  }
+  return webDiagControlV1179(stateFallback||{});
+}
+
+async function webDiagControlWriteV1193(env,control){
+  const {kv,binding}=getKV(env);
+  if(!kv || typeof kv.put!=="function") return {saved:false,verified:false,binding,error:"KV_NOT_CONFIGURED"};
+  try{
+    const clean={...control,updatedAt:Date.now(),schemaVersion:"V1193_1"};
+    await kv.put(WEB_DIAG_CONTROL_KEY_V1193,JSON.stringify(clean));
+    const raw=await kv.get(WEB_DIAG_CONTROL_KEY_V1193);
+    const check=raw?JSON.parse(raw):null;
+    const verified=!!check &&
+      check.enabled===clean.enabled &&
+      String(check.mode||"")===String(clean.mode||"") &&
+      Number(check.expiresAt||0)===Number(clean.expiresAt||0) &&
+      String(check.bootstrapHash||"")===String(clean.bootstrapHash||"") &&
+      Number(check.enabledAt||0)===Number(clean.enabledAt||0);
+    return {saved:verified,verified,binding,error:verified?null:"READBACK_MISMATCH"};
+  }catch(error){
+    return {saved:false,verified:false,binding,error:errorString(error)};
+  }
+}
+
 const WEB_DIAG_BASE_V1179 = "https://robinhood-meme-hunter.johnd1987.workers.dev";
 const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramwhy","/marketwhy","/sendwhy",
@@ -197725,8 +197766,9 @@ async function webDiagVerifyAccessJwtV1185(request,env){
 
 async function webDiagAuthorizedV1179(request,state,env){
   const access=await webDiagVerifyAccessJwtV1185(request,env);
-  if(!access.ok) return {ok:false,reason:access.reason,access,control:webDiagControlV1179(state)};
-  const control=webDiagControlV1179(state);
+  const dedicatedControlV1193=await webDiagControlReadV1193(env,state);
+  if(!access.ok) return {ok:false,reason:access.reason,access,control:dedicatedControlV1193};
+  const control=dedicatedControlV1193;
   if(!webDiagStillEnabledV1179(control)) return {ok:false,reason:control?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179",access,control};
   const session=webDiagCookieValueV1179(request);
   if(!session) return {ok:false,reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179",access,control};
@@ -199844,6 +199886,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
     const loadedV1179 = await readState(env);
     const stateV1179 = loadedV1179?.state || newState();
+    stateV1179.webDiagControlV1179 = await webDiagControlReadV1193(env,stateV1179);
     const controlV1179 = webDiagControlV1179(stateV1179);
     if (!webDiagStillEnabledV1179(controlV1179)) {
       return webDiagDeniedResponseV1179({reason:controlV1179?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
@@ -199906,8 +199949,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       sessionHash:await webDiagSha256V1179(sessionV1179),
       lastLoginAt:Date.now()
     };
-    const savedV1179 = await writeState(env,stateV1179);
-    if (savedV1179?.saved !== true) {
+    const savedV1179 = await webDiagControlWriteV1193(env,stateV1179.webDiagControlV1179);
+    if (savedV1179?.saved !== true || savedV1179?.verified !== true) {
       return new Response("Unable to establish diagnostic session.",{status:503,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
     }
     await webDiagRegisterSessionV1188(env,stateV1179.webDiagControlV1179,sessionV1179);
@@ -199931,6 +199974,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     if (!accessV1188.ok) return webDiagDeniedResponseV1179({reason:accessV1188.reason,access:accessV1188});
     const loadedV1188 = await readState(env);
     const stateV1188 = loadedV1188?.state || newState();
+    stateV1188.webDiagControlV1179 = await webDiagControlReadV1193(env,stateV1188);
     const controlV1188 = webDiagControlV1179(stateV1188);
     if (!webDiagStillEnabledV1179(controlV1188)) return webDiagDeniedResponseV1179({reason:controlV1188?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
     const requestedTargetV1188 = webDiagSafeTargetV1188(url.searchParams.get("next") || "");
@@ -199972,6 +200016,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   if (path === "/webdiag-logout" && request.method === "POST") {
     const loadedLogoutV1189 = await readState(env);
     const stateLogoutV1189 = loadedLogoutV1189?.state || newState();
+    stateLogoutV1189.webDiagControlV1179 = await webDiagControlReadV1193(env,stateLogoutV1189);
     const controlLogoutV1189 = webDiagControlV1179(stateLogoutV1189);
     const sessionLogoutV1189 = webDiagCookieValueV1179(request);
     await webDiagRevokeCurrentSessionV1189(env,controlLogoutV1189,sessionLogoutV1189);
@@ -199990,6 +200035,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   if (WEB_DIAG_PROTECTED_PATHS_V1179.has(path)) {
     const loadedAuthV1179 = await readState(env);
     const stateAuthV1179 = loadedAuthV1179?.state || newState();
+    stateAuthV1179.webDiagControlV1179 = await webDiagControlReadV1193(env,stateAuthV1179);
     const authV1179 = await webDiagAuthorizedV1179(request,stateAuthV1179,env);
     if (!authV1179.ok) return webDiagDeniedResponseV1179(authV1179);
 
