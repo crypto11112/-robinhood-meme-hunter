@@ -1,4 +1,7 @@
 /**
+ * V1191 SAFE — Outcome Intelligence diagnostic; built from known-good V1190.
+ * - Adds read-only /outcomeintel; no production scanner/provider/payment/alert changes.
+ *
  * V1190 — completed protected diagnostics dashboard UX on top of the frozen V1188/V1189 auth baseline.
  * - Adds Admin-only /webdiaghome with a short-lived route-bound browser handoff to the diagnostics dashboard.
  * - Adds a server-side token diagnostic launcher for telegramwhy / marketwhy / sendwhy.
@@ -20,6 +23,17 @@
  * - Protected web /performance provides full per-call copy with ?period=24h|7d|30d|all, plus V1178 narrative/launch-age context when frozen at entry.
  * - Read-only reporting only: zero provider requests, zero writes, no scoring/risk/qualification/sender/budget/scheduler changes.
  */
+
+/* =========================================================
+   V1191 SAFE — OUTCOME INTELLIGENCE TELEGRAM DIAGNOSTIC
+   - Built directly from known-good V1190.
+   - Adds read-only /outcomeintel command only.
+   - Reads existing frozen forward-only outcome evidence.
+   - Missing horizons remain NOT_CAPTURED; no inference/backfill.
+   - Zero provider/RPC requests, zero state writes.
+   - No scanner/scoring/risk/qualification/payment/Telegram alert changes.
+   ========================================================= */
+
 /* V1179 ADMIN-PROTECTED WEB DIAGNOSTICS
  * - Adds ADMIN-chat-only /webdiag on|off|status with optional 1h/6h/24h timed access.
  * - Web diagnostics are closed by default and require a short-lived bootstrap login followed by an HttpOnly Secure SameSite=Strict session cookie.
@@ -9976,7 +9990,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1051";
+const VERSION = "V1191";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144703,6 +144717,43 @@ function performanceCallContextV1181(record) {
   };
 }
 
+function outcomeIntelMessageV1191(state) {
+  const registry = state?.callPerformanceV270 && typeof state.callPerformanceV270 === "object" ? state.callPerformanceV270 : {};
+  const records = Object.values(registry).filter(record => record && typeof record === "object");
+  const targets = [["first trade",null],["5s",null],["10s",null],["30s",null],["1m","m1"],["2m",null],["5m","m5"],["10m",null],["15m","m15"],["30m","m30"],["1h","h1"],["2h",null],["4h",null],["6h","h6"],["12h","h12"],["24h","h24"],["48h",null],["7d",null]];
+  function existingOutcome(record,key){
+    if(key==="m1"){
+      const one=record?.oneMinuteOutcomeV1096?.outcome;
+      return one?.verified===true&&one?.frozen===true?one:null;
+    }
+    if(!key)return null;
+    const growth=record?.growthOutcomesV620?.outcomes?.[key]?.price;
+    if(growth?.verified===true&&growth?.frozen===true)return growth;
+    const fixed=record?.fixedHorizonOutcomesV317?.outcomes?.[key];
+    if(fixed?.verified===true&&fixed?.frozen===true)return fixed;
+    return null;
+  }
+  function multipleFor(outcome){
+    const direct=Number(outcome?.multipleByMarketCap);
+    if(Number.isFinite(direct)&&direct>0)return direct;
+    const growthPct=Number(outcome?.growthPct??outcome?.priceGrowthPct);
+    if(Number.isFinite(growthPct))return 1+growthPct/100;
+    return null;
+  }
+  const lines=["🧠 <b>Outcome Intelligence — V1191</b>","",`Historical call records: <b>${records.length}</b>`,`Mode: <b>READ-ONLY / FORWARD-ONLY</b>`,""];
+  for(const [label,key] of targets){
+    if(!key){lines.push(`• ${label}: <b>NOT_CAPTURED</b>`);continue;}
+    const captured=[];
+    for(const record of records){const outcome=existingOutcome(record,key);if(outcome)captured.push(multipleFor(outcome));}
+    const valid=captured.filter(x=>Number.isFinite(x)&&x>0);
+    const positive=valid.filter(x=>x>1.000001).length;
+    const doubled=valid.filter(x=>x>=2).length;
+    lines.push(`• ${label}: <b>${captured.length}</b> captured${valid.length?` · positive ${positive}/${valid.length} · ≥2x ${doubled}/${valid.length}`:""}`);
+  }
+  lines.push("","Existing evidence used: V1096 1m + V620/V317 frozen outcomes.","New short/long horizons are deliberately NOT_CAPTURED until genuine forward observations exist.","","<i>Zero provider/RPC requests · zero state writes · no production scoring or alert changes.</i>");
+  return lines.join("\\n");
+}
+
 function performanceSummaryV271(state, options = {}) {
   const period = performancePeriodLabelV1181(options?.period || "all");
   const detail = options?.detail === true;
@@ -179846,6 +179897,15 @@ async function telegramCommandReplyV271(
 
 
   // V1179: Admin-channel-only control for protected browser diagnostics.
+  // V1191 read-only outcome intelligence. Existing Admin Telegram authorization applies.
+  if (parsed.command === "/outcomeintel") {
+    const loadedV1191 = await readState(env);
+    const stateV1191 = loadedV1191?.state || newState();
+    const replyV1191 = outcomeIntelMessageV1191(stateV1191);
+    const sentV1191 = await sendTelegram(env, replyV1191, null, null, chatId);
+    return {success:sentV1191?.success===true,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
   if (parsed.command === "/webdiag") {
     const loadedV1179 = await readState(env);
     const stateV1179 = loadedV1179?.state || newState();
