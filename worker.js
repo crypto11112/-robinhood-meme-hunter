@@ -1,3 +1,4 @@
+// V1195 — Production WebDiag security controls: 30m/1h/6h/24h, 1h default; retains V1194 KV diagnostics.
 // V1194 — WebDiag persistence diagnostic only. Reports exact binding/write/readback failure; no scanner/scoring/provider/payment changes.
 // V1193 — Web Diagnostics dedicated state persistence repair.
 // Moves only Web Diagnostics control state to a small dedicated KV record so /webdiag on/off
@@ -10003,7 +10004,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1194";
+const VERSION = "V1195";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179960,7 +179961,7 @@ async function telegramCommandReplyV271(
           replyMarkupV1186 = {inline_keyboard:[[{ text:"🔐 Open secure diagnostic login", url:loginUrlV1179 }]]};
         }
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1194</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1195</b>","",
           `Status: <b>${savedV1179?.saved===true&&savedV1179?.verified===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>",
