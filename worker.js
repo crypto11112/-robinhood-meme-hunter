@@ -1,3 +1,4 @@
+// V1212 — internal API surface lockdown. Customer/webhook/WebDiag bootstrap routes remain public as required.
 // V1211 — operational/provider-control route access hardening only. Scanner/scoring/provider policy/OutcomeIntel unchanged.
 // V1210 — legacy diagnostic/control route access hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
 // V1209 — Stripe event-ordering hardening. Payment-state only; scanner/scoring/providers/OutcomeIntel unchanged.
@@ -10020,7 +10021,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1211";
+const VERSION = "V1212";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -197917,7 +197918,61 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/live-decision-observer-start","/live-budget-status","/live-budget-pause","/live-budget-resume",
   "/live-priority-lane-test","/live-priority-rpc-test","/live-priority-status","/live-priority-lane-status",
   "/live-decision-audit-status","/live-exact-pool-flow-collection-status",
-  "/last-alert-scan","/alert-history","/usage","/durable-usage-v404"
+  "/last-alert-scan","/alert-history","/usage","/durable-usage-v404",
+
+  // V1212: remaining internal scanner/provider/status APIs are private
+  // administration surfaces. /scan is deliberately handled separately because
+  // the production scheduler relay must retain its established path.
+  "/accumulation",
+  "/accumulation-status",
+  "/bitquery-established-shadow-status",
+  "/bitquery-rpc-crosscheck",
+  "/bitquery-rpc-established-shadow-status",
+  "/bitquery-rpc-fair-window-status",
+  "/bitquery-shadow-status",
+  "/bitquery-swaps",
+  "/bitquery-swaps-complete",
+  "/bitquery-swaps-economic",
+  "/bitquery-swaps-normalized",
+  "/bitquery-usage",
+  "/bitquery-v4-crosscheck",
+  "/bitquery-v4-poolkey-crosscheck",
+  "/bitquery-v4-transaction-complete-crosscheck",
+  "/breakout",
+  "/breakout-status",
+  "/cohort-flow-status",
+  "/erc20-rpc",
+  "/flow-accumulation",
+  "/flow-accumulation-status",
+  "/history-integrity",
+  "/intelligence-cohort-status",
+  "/intelligence-watchlist-status",
+  "/live-calibration-diversity-status",
+  "/live-cohort-fairness-exclusion-status",
+  "/live-cohort-fairness-status",
+  "/live-cohort-observation-routing-status",
+  "/live-directional-watch-registration-status",
+  "/live-exact-pool-continuity-status",
+  "/live-flow-bootstrap-eligibility-status",
+  "/live-identity-handoff-runtime-status",
+  "/live-near-miss-analyze-selection-status",
+  "/live-promotion-diversity-diagnostic",
+  "/live-promotion-evidence-completion-status",
+  "/live-promotion-evidence-progression",
+  "/live-promotion-evidence-provenance-status",
+  "/live-promotion-near-miss-status",
+  "/live-registry-candidate-identity-handoff-status",
+  "/onchain-price-history-status",
+  "/run-all",
+  "/state",
+  "/v3live-tx-lookup",
+  "/v4allpools",
+  "/v4livetokens",
+  "/v4poolsearch",
+  "/v4swapamounts",
+  "/v4swapdirection",
+  "/weakening",
+  "/weakening-status"
 ]);
 
 function webDiagControlV1179(state){
