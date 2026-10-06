@@ -1,3 +1,4 @@
+// V1197 — Read-only Outcome Intelligence visibility: historical + forward V1117/V1120 audit in one Telegram command.
 // V1196 — Final WebDiag window wiring: 30m/1h/6h/24h; /webdiag on defaults to 1h; current status/help labels.
 // V1195 — Production WebDiag security controls: 30m/1h/6h/24h, 1h default; retains V1194 KV diagnostics.
 // V1194 — WebDiag persistence diagnostic only. Reports exact binding/write/readback failure; no scanner/scoring/provider/payment changes.
@@ -10005,7 +10006,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1196";
+const VERSION = "V1197";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144732,6 +144733,54 @@ function performanceCallContextV1181(record) {
   };
 }
 
+
+async function outcomeIntelMessageV1197(state, env) {
+  const historical = outcomeIntelMessageV1191(state)
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1197</b>");
+
+  const snap = await readLiveDecisionAuditV1117(env);
+  const records = Array.isArray(snap?.records) ? snap.records : [];
+  const ordered = [
+    ["5s","s5"],["10s","s10"],["30s","s30"],["1m","m1"],["2m","m2"],["5m","m5"],
+    ["10m","m10"],["15m","m15"],["30m","m30"],["1h","h1"],["2h","h2"],["4h","h4"],
+    ["6h","h6"],["12h","h12"],["24h","h24"],["48h","h48"],["7d","d7"]
+  ];
+  const lines = ["", "🔭 <b>Forward decision audit — V1117/V1120</b>"];
+  if (snap?.available !== true) {
+    lines.push(`Status: <b>${escapeHtml(String(snap?.status || "UNAVAILABLE"))}</b>`,
+      "No forward-audit figures were inferred.");
+  } else {
+    lines.push(`Decision records: <b>${records.length}</b>`);
+    for (const [label,key] of ordered) {
+      let frozen=0,pending=0,due=0,future=0,eligible=0,exact=0,near=0,acceptable=0,stale=0;
+      for (const rec of records) {
+        const h = rec?.horizons?.[key];
+        if (!h) continue;
+        if (h.status === "FROZEN") {
+          frozen++;
+          if (h.performanceEligibleV1121 === true || h.performanceEligibleV1122 === true) eligible++;
+          const q = String(h.timingGradeV1122 || h.performanceQualityV1121 || "").toUpperCase();
+          if (q === "EXACT") exact++;
+          else if (q === "NEAR_EXACT") near++;
+          else if (q === "ACCEPTABLE_LAG") acceptable++;
+          else if (q === "STALE") stale++;
+        } else if (h.status === "PENDING") {
+          pending++;
+          if (h.targetPassed === true) due++; else future++;
+        }
+      }
+      lines.push(`• ${label}: <b>${frozen} frozen</b> · pending ${pending} (due ${due} / future ${future}) · eligible ${eligible}` +
+        ((exact+near+acceptable+stale)>0 ? ` · timing E${exact}/N${near}/A${acceptable}/S${stale}` : ""));
+    }
+    const obs=snap?.outcomeObserverV1120||null;
+    if(obs) lines.push("",`Observer: <b>${escapeHtml(String(obs?.status||"AVAILABLE"))}</b>` +
+      (Number.isFinite(Number(obs?.pendingHorizons))?` · pending ${Number(obs.pendingHorizons)}`:"") +
+      (Number.isFinite(Number(obs?.dueHorizons))?` · due ${Number(obs.dueHorizons)}`:""));
+  }
+  lines.push("", "<i>V1197 visibility only: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  return historical + "\\n" + lines.join("\\n");
+}
+
 function outcomeIntelMessageV1191(state) {
   const registry = state?.callPerformanceV270 && typeof state.callPerformanceV270 === "object" ? state.callPerformanceV270 : {};
   const records = Object.values(registry).filter(record => record && typeof record === "object");
@@ -179916,9 +179965,9 @@ async function telegramCommandReplyV271(
   if (parsed.command === "/outcomeintel") {
     const loadedV1191 = await readState(env);
     const stateV1191 = loadedV1191?.state || newState();
-    const replyV1191 = outcomeIntelMessageV1191(stateV1191);
+    const replyV1191 = await outcomeIntelMessageV1197(stateV1191, env);
     const sentV1191 = await sendTelegram(env, replyV1191, null, null, chatId);
-    return {success:sentV1191?.success===true,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    return {success:sentV1191?.success===true,ignored:false,command:"/outcomeintel",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,internalDurableObjectReads:1};
   }
 
   if (parsed.command === "/webdiag") {
