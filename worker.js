@@ -1,4 +1,11 @@
 /**
+ * V1185 — Cloudflare Access-ready diagnostic hardening + cross-platform downloads.
+ * - Preserves V1184 Telegram-admin /webdiag gate, one-time bootstrap link, hashed secrets and revocable HttpOnly browser session.
+ * - Adds optional fail-closed Cloudflare Access JWT verification for protected diagnostic routes when CF_ACCESS_REQUIRED=1.
+ * - Verifies RS256 signature against the configured Cloudflare Access team certs, plus exp/nbf/aud and optional email allow-list.
+ * - Keeps MFA policy at Cloudflare Access; ChainVanta verifies the resulting identity assertion before its own session gate.
+ * - Changes diagnostic .txt downloads to application/octet-stream with attachment filename headers for stronger iPhone/Android/desktop download behaviour.
+ * - No scanner, scoring, risk, qualification, provider-budget, Premium/Free, scheduler or Telegram-send logic changes.
  * V1184 — Safari-friendly protected diagnostics + copy/download UX.
  * V1183 — Forward-low persistence hardening.
  * V1182 — Performance low/current consistency hardening.
@@ -179849,7 +179856,7 @@ async function telegramCommandReplyV271(
         bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
       };
       const savedV1179 = await writeState(env,stateV1179);
-      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1184</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1185</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
     } else if (actionV1179 === "on") {
       const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
       if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
@@ -179868,7 +179875,7 @@ async function telegramCommandReplyV271(
         // V1180: render the one-time login as an explicit Telegram HTML anchor so it is tappable.
         const loginUrlV1179 = `${WEB_DIAG_BASE_V1179}/webdiag-access?key=${encodeURIComponent(bootstrapV1179)}`;
         replyV1179 = [
-          "🔓 <b>ChainVanta Web Diagnostics — V1184</b>","",
+          "🔓 <b>ChainVanta Web Diagnostics — V1185</b>","",
           `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
           `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
           expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>","",
@@ -179876,7 +179883,7 @@ async function telegramCommandReplyV271(
           `<a href="${escapeHtml(loginUrlV1179)}">🔐 Open secure diagnostic login</a>`,
           "If Telegram opens the wrong browser, copy the private URL below and paste it directly into Safari:",
           `<code>${escapeHtml(loginUrlV1179)}</code>`,"",
-          "V1184 returns a Safari-friendly login confirmation page before you open diagnostics.",
+          "V1185 returns a Safari-friendly login confirmation page before you open diagnostics.",
           "After login, diagnostic commands can use clean web URLs without secrets in the link.",
           "The raw login secret is not stored; only its SHA-256 hash is persisted."
         ].join("\n");
@@ -197356,25 +197363,108 @@ function webDiagStillEnabledV1179(control,at=Date.now()){
   return !(exp>0 && at>=exp);
 }
 
-async function webDiagAuthorizedV1179(request,state){
+/* =========================================================
+   V1185 CLOUDFLARE ACCESS IDENTITY GATE
+   ========================================================= */
+let WEB_DIAG_ACCESS_JWKS_CACHE_V1185 = { expiresAt:0, keys:null };
+
+function webDiagBase64UrlBytesV1185(value){
+  let s=String(value||"").replace(/-/g,"+").replace(/_/g,"/");
+  while(s.length%4) s+="=";
+  const raw=atob(s);
+  const out=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) out[i]=raw.charCodeAt(i);
+  return out;
+}
+
+function webDiagJwtJsonV1185(part){
+  try { return JSON.parse(new TextDecoder().decode(webDiagBase64UrlBytesV1185(part))); } catch(e){ return null; }
+}
+
+function webDiagAccessRequiredV1185(env){
+  return String(env?.CF_ACCESS_REQUIRED||"").trim()==="1";
+}
+
+function webDiagAccessTeamDomainV1185(env){
+  return String(env?.CF_ACCESS_TEAM_DOMAIN||"").trim().replace(/\/$/,"");
+}
+
+function webDiagAccessAllowedEmailsV1185(env){
+  return new Set(String(env?.CF_ACCESS_ALLOWED_EMAILS||"").split(",").map(x=>x.trim().toLowerCase()).filter(Boolean));
+}
+
+async function webDiagAccessKeysV1185(env){
+  const nowMs=Date.now();
+  if(WEB_DIAG_ACCESS_JWKS_CACHE_V1185.keys && nowMs < WEB_DIAG_ACCESS_JWKS_CACHE_V1185.expiresAt) return WEB_DIAG_ACCESS_JWKS_CACHE_V1185.keys;
+  const team=webDiagAccessTeamDomainV1185(env);
+  if(!team) throw new Error("CF_ACCESS_TEAM_DOMAIN_MISSING_V1185");
+  const res=await fetch(`${team}/cdn-cgi/access/certs`,{headers:{"accept":"application/json"}});
+  if(!res.ok) throw new Error(`CF_ACCESS_CERTS_HTTP_${res.status}_V1185`);
+  const body=await res.json();
+  const keys=Array.isArray(body?.keys)?body.keys:[];
+  if(!keys.length) throw new Error("CF_ACCESS_CERTS_EMPTY_V1185");
+  WEB_DIAG_ACCESS_JWKS_CACHE_V1185={expiresAt:nowMs+3600000,keys};
+  return keys;
+}
+
+async function webDiagVerifyAccessJwtV1185(request,env){
+  if(!webDiagAccessRequiredV1185(env)) return {ok:true,required:false,reason:"CF_ACCESS_NOT_REQUIRED_V1185"};
+  const token=String(request?.headers?.get("cf-access-jwt-assertion")||"").trim();
+  if(!token) return {ok:false,required:true,reason:"CF_ACCESS_ASSERTION_MISSING_V1185"};
+  const parts=token.split(".");
+  if(parts.length!==3) return {ok:false,required:true,reason:"CF_ACCESS_ASSERTION_MALFORMED_V1185"};
+  const header=webDiagJwtJsonV1185(parts[0]);
+  const payload=webDiagJwtJsonV1185(parts[1]);
+  if(!header||!payload||header.alg!=="RS256"||!header.kid) return {ok:false,required:true,reason:"CF_ACCESS_ASSERTION_HEADER_INVALID_V1185"};
+  const nowSec=Math.floor(Date.now()/1000);
+  if(!Number.isFinite(Number(payload.exp)) || nowSec>=Number(payload.exp)) return {ok:false,required:true,reason:"CF_ACCESS_ASSERTION_EXPIRED_V1185"};
+  if(Number.isFinite(Number(payload.nbf)) && nowSec<Number(payload.nbf)) return {ok:false,required:true,reason:"CF_ACCESS_ASSERTION_NOT_YET_VALID_V1185"};
+  const expectedAud=String(env?.CF_ACCESS_AUD||"").trim();
+  if(!expectedAud) return {ok:false,required:true,reason:"CF_ACCESS_AUD_MISSING_V1185"};
+  const aud=Array.isArray(payload.aud)?payload.aud:[payload.aud];
+  if(!aud.map(String).includes(expectedAud)) return {ok:false,required:true,reason:"CF_ACCESS_AUD_MISMATCH_V1185"};
+  const allowed=webDiagAccessAllowedEmailsV1185(env);
+  const email=String(payload.email||"").trim().toLowerCase();
+  if(allowed.size && (!email || !allowed.has(email))) return {ok:false,required:true,reason:"CF_ACCESS_IDENTITY_NOT_ALLOWED_V1185"};
+  try {
+    const keys=await webDiagAccessKeysV1185(env);
+    const jwk=keys.find(k=>String(k?.kid||"")===String(header.kid));
+    if(!jwk) return {ok:false,required:true,reason:"CF_ACCESS_SIGNING_KEY_NOT_FOUND_V1185"};
+    const key=await crypto.subtle.importKey("jwk",jwk,{name:"RSASSA-PKCS1-v1_5",hash:"SHA-256"},false,["verify"]);
+    const signed=new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+    const signature=webDiagBase64UrlBytesV1185(parts[2]);
+    const verified=await crypto.subtle.verify({name:"RSASSA-PKCS1-v1_5"},key,signature,signed);
+    if(!verified) return {ok:false,required:true,reason:"CF_ACCESS_SIGNATURE_INVALID_V1185"};
+  } catch(e){
+    return {ok:false,required:true,reason:String(e?.message||"CF_ACCESS_VERIFY_FAILED_V1185")};
+  }
+  return {ok:true,required:true,reason:"CF_ACCESS_VERIFIED_V1185",email:email||null};
+}
+
+async function webDiagAuthorizedV1179(request,state,env){
+  const access=await webDiagVerifyAccessJwtV1185(request,env);
+  if(!access.ok) return {ok:false,reason:access.reason,access,control:webDiagControlV1179(state)};
   const control=webDiagControlV1179(state);
-  if(!webDiagStillEnabledV1179(control)) return {ok:false,reason:control?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179",control};
+  if(!webDiagStillEnabledV1179(control)) return {ok:false,reason:control?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179",access,control};
   const session=webDiagCookieValueV1179(request);
-  if(!session || !control.sessionHash) return {ok:false,reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179",control};
+  if(!session || !control.sessionHash) return {ok:false,reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179",access,control};
   const hash=await webDiagSha256V1179(session);
-  if(hash!==String(control.sessionHash)) return {ok:false,reason:"WEB_DIAGNOSTICS_SESSION_INVALID_V1179",control};
-  return {ok:true,reason:"AUTHORIZED_V1179",control};
+  if(hash!==String(control.sessionHash)) return {ok:false,reason:"WEB_DIAGNOSTICS_SESSION_INVALID_V1179",access,control};
+  return {ok:true,reason:"AUTHORIZED_V1185",access,control};
 }
 
 function webDiagDeniedResponseV1179(auth){
   const expired=auth?.reason==="WEB_DIAGNOSTICS_EXPIRED_V1179";
   const disabled=auth?.reason==="WEB_DIAGNOSTICS_DISABLED_V1179";
+  const cfDenied=String(auth?.reason||"").startsWith("CF_ACCESS_");
   const body=disabled
     ? "ChainVanta diagnostics are disabled. Enable them from the authorised Admin Telegram with /webdiag on or /webdiag on 6h."
     : expired
       ? "ChainVanta diagnostic access has expired. Re-enable it from the authorised Admin Telegram."
-      : "ChainVanta diagnostic login required. Use the private login link generated by /webdiag on in the authorised Admin Telegram.";
-  return new Response(body,{status:disabled||expired?403:401,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","referrer-policy":"no-referrer"}});
+      : cfDenied
+        ? "ChainVanta diagnostic access requires the authorised Cloudflare Access identity and MFA session."
+        : "ChainVanta diagnostic login required. Use the private login link generated by /webdiag on in the authorised Admin Telegram.";
+  return new Response(body,{status:disabled||expired||cfDenied?403:401,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store, max-age=0","pragma":"no-cache","x-content-type-options":"nosniff","referrer-policy":"no-referrer","content-security-policy":"default-src 'none'; frame-ancestors 'none'"}});
 }
 
 function telegramHtmlToPlainV1179(value){
@@ -197476,16 +197566,22 @@ document.getElementById("copyBtn").addEventListener("click", async () => {
 
 function webDiagDownloadResponseV1184(text, filename="chainvanta-diagnostic.txt", status=200){
   const safeName = String(filename||"chainvanta-diagnostic.txt").replace(/[^a-zA-Z0-9._-]/g,"_");
-  return new Response(telegramHtmlToPlainV1179(text),{
+  const plain = telegramHtmlToPlainV1179(text);
+  const bytes = new TextEncoder().encode(plain);
+  return new Response(bytes,{
     status,
     headers:{
-      "content-type":"text/plain; charset=utf-8",
-      "content-disposition":`attachment; filename="${safeName}"`,
-      "cache-control":"no-store, max-age=0",
+      // V1185: binary attachment discourages iOS Safari from rendering the report inline.
+      "content-type":"application/octet-stream",
+      "content-disposition":`attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+      "content-length":String(bytes.byteLength),
+      "cache-control":"no-store, max-age=0, must-revalidate",
       "pragma":"no-cache",
+      "expires":"0",
       "x-content-type-options":"nosniff",
       "referrer-policy":"no-referrer",
-      "content-security-policy":"default-src 'none'; frame-ancestors 'none'"
+      "content-security-policy":"default-src 'none'; frame-ancestors 'none'",
+      "cross-origin-resource-policy":"same-origin"
     }
   });
 }
@@ -197508,9 +197604,9 @@ function webDiagHomeHtmlV1184(){
   const rows = links.map(([href,label])=>`<li><a href="${href}">${webDiagHtmlEscapeV1184(label)}</a></li>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChainVanta Protected Diagnostics</title>
 <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:760px;margin:0 auto;padding:22px;color:#111}h1{font-size:22px}li{margin:12px 0}a{color:#0645ad}.ok{padding:12px;border-radius:10px;background:#eef8ef}.small{color:#5b6470;font-size:13px}</style></head><body>
-<h1>ChainVanta Protected Diagnostics — V1184</h1>
-<p class="ok"><b>Access: AUTHORIZED</b><br>Safari/browser session established successfully.</p>
-<p>Open any protected diagnostic below. Long reports include <b>Copy full diagnostic</b> and <b>Download .txt</b>.</p>
+<h1>ChainVanta Protected Diagnostics — V1185</h1>
+<p class="ok"><b>Access: AUTHORIZED</b><br>Cloudflare identity (when enabled) + ChainVanta browser session established successfully.</p>
+<p>Open any protected diagnostic below. Long reports include <b>Copy full diagnostic</b> and a cross-platform <b>Download .txt</b> attachment.</p>
 <ul>${rows}</ul>
 <p>Token-specific: <code>/telegramwhy?token=0x...</code>, <code>/marketwhy?token=0x...</code>, <code>/sendwhy?token=0x...</code></p>
 <p class="small">Use <code>/webdiag off</code> in the authorised Admin Telegram to revoke this browser session immediately.</p>
@@ -197551,7 +197647,7 @@ function webDiagStatusMessageV1179(state){
   const active=webDiagStillEnabledV1179(c);
   const exp=Number(c?.expiresAt||0);
   return [
-    "🔐 <b>ChainVanta Web Diagnostics — V1184</b>","",
+    "🔐 <b>ChainVanta Web Diagnostics — V1185</b>","",
     `Status: <b>${active?"ENABLED":"DISABLED"}</b>`,
     `Mode: <b>${escapeHtml(String(c?.mode||"OFF"))}</b>`,
     `Expires: <b>${exp>0?escapeHtml(new Date(exp).toISOString()):active?"MANUAL OFF":"N/A"}</b>`,
@@ -199454,6 +199550,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
   // V1179: one-time bootstrap establishes an HttpOnly browser session.
   if (path === "/webdiag-access" && request.method === "GET") {
+    // V1185: when Cloudflare Access enforcement is enabled, identity/MFA must pass before the one-time ChainVanta bootstrap can be consumed.
+    const accessV1185 = await webDiagVerifyAccessJwtV1185(request,env);
+    if (!accessV1185.ok) return webDiagDeniedResponseV1179({reason:accessV1185.reason,access:accessV1185});
     const loadedV1179 = await readState(env);
     const stateV1179 = loadedV1179?.state || newState();
     const controlV1179 = webDiagControlV1179(stateV1179);
@@ -199471,7 +199570,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     const maxAgeV1179 = Number(controlV1179.expiresAt||0)>0 ? Math.max(1,Math.floor((Number(controlV1179.expiresAt)-Date.now())/1000)) : 21600;
     const loginHtmlV1184 = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChainVanta Diagnostic Login</title>
 <style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:700px;margin:0 auto;padding:24px;color:#111}.ok{padding:14px;border-radius:12px;background:#eef8ef}.btn{display:inline-block;margin-top:14px;padding:12px 16px;border-radius:10px;background:#111;color:#fff;text-decoration:none}.small{font-size:13px;color:#5b6470;margin-top:16px;word-break:break-word}</style></head><body>
-<h1>ChainVanta Protected Diagnostics — V1184</h1>
+<h1>ChainVanta Protected Diagnostics — V1185</h1>
 <div class="ok"><b>Diagnostic browser session established.</b><br>This browser now has the protected Admin session cookie.</div>
 <a class="btn" href="/webdiag-home">Open diagnostics</a>
 <p class="small">If this page was opened in Safari, continue using Safari for the protected diagnostic pages. The one-time bootstrap key has now been consumed.</p>
@@ -199491,7 +199590,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   if (WEB_DIAG_PROTECTED_PATHS_V1179.has(path)) {
     const loadedAuthV1179 = await readState(env);
     const stateAuthV1179 = loadedAuthV1179?.state || newState();
-    const authV1179 = await webDiagAuthorizedV1179(request,stateAuthV1179);
+    const authV1179 = await webDiagAuthorizedV1179(request,stateAuthV1179,env);
     if (!authV1179.ok) return webDiagDeniedResponseV1179(authV1179);
 
     if (path === "/webdiag-home") {
