@@ -1,3 +1,12 @@
+/* V1179 ADMIN-PROTECTED WEB DIAGNOSTICS
+ * - Adds ADMIN-chat-only /webdiag on|off|status with optional 1h/6h/24h timed access.
+ * - Web diagnostics are closed by default and require a short-lived bootstrap login followed by an HttpOnly Secure SameSite=Strict session cookie.
+ * - Only SHA-256 hashes of bootstrap/session secrets are persisted; raw secrets are never stored in state.
+ * - Protects existing /telegramwhy, /marketwhy, /sendwhy, /scheduler-status-v673 and /scheduler-start-v673 web routes.
+ * - Adds protected full-copy web routes for /telegramaudit, /evidenceaudit, /scorehandoff, /rescoreaudit, /riskaudit, /holderaudit, /marketaudit and /performance.
+ * - Long Telegram diagnostics append a clean web-copy URL; Telegram and web reuse the existing formatter functions to avoid diagnostic drift.
+ * - Read-only diagnostic access only. No scanner, scoring, risk, provider, budget, qualification, Premium/Free or sender changes.
+ */
 /*
  * ChainVanta V1177 — POST-SEND DEDUPE OBSERVABILITY HARDENING
  * - Builds directly from deployed V1176.
@@ -177957,6 +177966,7 @@ function telegramHelpV271() {
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
+    "<code>/webdiag on|off|status</code> — V1179 Admin-protected web diagnostic access (supports on 1h/6h/24h)",
     "<code>/telegramwhy 0xADDRESS</code> — exact autonomous Telegram blocker + authoritative pool (read-only; web link included)",
     "<code>/sendwhy 0xADDRESS</code> — production sender dry-run: cooldown, budget, route, render + WOULD_SEND (read-only; web link included)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
@@ -179614,6 +179624,61 @@ async function telegramCommandReplyV271(
 
 
 
+
+  // V1179: Admin-channel-only control for protected browser diagnostics.
+  if (parsed.command === "/webdiag") {
+    const loadedV1179 = await readState(env);
+    const stateV1179 = loadedV1179?.state || newState();
+    const rawArgV1179 = String(parsed.argument || "status").trim().toLowerCase();
+    const partsV1179 = rawArgV1179.split(/\s+/).filter(Boolean);
+    const actionV1179 = partsV1179[0] || "status";
+    const durationV1179 = partsV1179[1] || "";
+    let replyV1179 = "";
+
+    if (actionV1179 === "status") {
+      replyV1179 = webDiagStatusMessageV1179(stateV1179);
+    } else if (actionV1179 === "off") {
+      stateV1179.webDiagControlV1179 = {
+        ...webDiagControlV1179(stateV1179), enabled:false, mode:"OFF", expiresAt:null,
+        bootstrapHash:null, sessionHash:null, disabledAt:Date.now(), disabledBy:`ADMIN_CHAT:${chatId}`
+      };
+      const savedV1179 = await writeState(env,stateV1179);
+      replyV1179 = ["🔒 <b>ChainVanta Web Diagnostics — V1179</b>","","Status: <b>DISABLED</b>",`State saved: <b>${savedV1179?.saved===true?"YES":"NO"}</b>`,`All existing diagnostic browser sessions are revoked immediately.`].join("\n");
+    } else if (actionV1179 === "on") {
+      const allowedDurationsV1179 = {"1h":3600000,"6h":21600000,"24h":86400000};
+      if (durationV1179 && !allowedDurationsV1179[durationV1179]) {
+        replyV1179 = "⚠️ <b>Usage:</b> <code>/webdiag on</code>, <code>/webdiag on 1h</code>, <code>/webdiag on 6h</code>, <code>/webdiag on 24h</code>, <code>/webdiag off</code>, or <code>/webdiag status</code>.";
+      } else {
+        const bootstrapV1179 = webDiagRandomSecretV1179(32);
+        const bootstrapHashV1179 = await webDiagSha256V1179(bootstrapV1179);
+        const ttlV1179 = durationV1179 ? allowedDurationsV1179[durationV1179] : 0;
+        const expiresAtV1179 = ttlV1179 ? Date.now()+ttlV1179 : null;
+        stateV1179.webDiagControlV1179 = {
+          enabled:true, mode:durationV1179?durationV1179.toUpperCase():"MANUAL",
+          expiresAt:expiresAtV1179, bootstrapHash:bootstrapHashV1179, sessionHash:null,
+          enabledAt:Date.now(), enabledBy:`ADMIN_CHAT:${chatId}`, disabledAt:null, lastLoginAt:null
+        };
+        const savedV1179 = await writeState(env,stateV1179);
+        const loginUrlV1179 = `${WEB_DIAG_BASE_V1179}/webdiag-access?key=${encodeURIComponent(bootstrapV1179)}`;
+        replyV1179 = [
+          "🔓 <b>ChainVanta Web Diagnostics — V1179</b>","",
+          `Status: <b>${savedV1179?.saved===true?"ENABLED":"STATE SAVE FAILED"}</b>`,
+          `Mode: <b>${durationV1179?durationV1179.toUpperCase():"MANUAL"}</b>`,
+          expiresAtV1179?`Expires: <b>${escapeHtml(new Date(expiresAtV1179).toISOString())}</b>`:"Expires: <b>when /webdiag off is used</b>","",
+          "Open this private one-time login link in the browser you will use for diagnostics:",
+          `<code>${escapeHtml(loginUrlV1179)}</code>`,"",
+          "After login, diagnostic commands can use clean web URLs without secrets in the link.",
+          "The raw login secret is not stored; only its SHA-256 hash is persisted."
+        ].join("\n");
+      }
+    } else {
+      replyV1179 = "⚠️ <b>Usage:</b> <code>/webdiag on</code>, <code>/webdiag on 1h</code>, <code>/webdiag on 6h</code>, <code>/webdiag on 24h</code>, <code>/webdiag off</code>, or <code>/webdiag status</code>.";
+    }
+
+    const sentV1179 = await sendTelegram(env,replyV1179,null,null,chatId);
+    return {success:sentV1179?.success===true,ignored:false,command:"/webdiag",scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
   if (parsed.command === "/marketaudit" || parsed.command === "/marketcompletion") {
     const stateV968 = await readState(env);
     const resultV968 = {
@@ -179626,7 +179691,7 @@ async function telegramCommandReplyV271(
       }),
       v979LatestScanDecision: stateV968?.state?.marketPairDecisionAuditV979 || null
     };
-    const replyV968 = marketCompletionAuditTelegramV968(resultV968);
+    const replyV968 = marketCompletionAuditTelegramV968(resultV968) + `\n\n🌐 <b>Full web copy:</b> <code>${WEB_DIAG_BASE_V1179}/marketaudit</code>\n<i>Requires Admin /webdiag browser login.</i>`;
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV968 = await sendTelegram(env, replyV968, null, null);
     if (diagnosticV273) {
@@ -181211,6 +181276,12 @@ async function telegramCommandReplyV271(
   if (diagnosticV273) {
     diagnosticV273.replyAttempted =
       true;
+  }
+
+  // V1179: append one clean protected browser-copy URL to long diagnostics.
+  const webRouteV1179 = webDiagRouteForCommandV1179(parsed.command);
+  if (webRouteV1179 && typeof reply === "string") {
+    reply += `\n\n🌐 <b>Full web copy:</b> <code>${WEB_DIAG_BASE_V1179}${webRouteV1179}</code>\n<i>Requires Admin /webdiag browser login.</i>`;
   }
 
   // V759: preserve the existing chunked delivery and also route
@@ -197029,6 +197100,130 @@ async function bitqueryEstablishedShadowStatusV1070(env) {
   };
 }
 
+
+/* =========================================================
+   V1179 ADMIN-PROTECTED WEB DIAGNOSTICS
+   ========================================================= */
+const WEB_DIAG_COOKIE_V1179 = "cv_diag_v1179";
+const WEB_DIAG_BASE_V1179 = "https://robinhood-meme-hunter.johnd1987.workers.dev";
+const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
+  "/telegramwhy","/marketwhy","/sendwhy",
+  "/scheduler-status-v673","/scheduler-start-v673",
+  "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
+  "/riskaudit","/holderaudit","/marketaudit","/performance",
+  "/webdiag-home"
+]);
+
+function webDiagControlV1179(state){
+  const c=state?.webDiagControlV1179;
+  return c && typeof c === "object" ? c : {enabled:false,mode:"OFF",expiresAt:null,bootstrapHash:null,sessionHash:null,enabledAt:null,enabledBy:null,disabledAt:null,lastLoginAt:null};
+}
+
+function webDiagRandomSecretV1179(bytes=32){
+  const a=new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  return Array.from(a,b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+async function webDiagSha256V1179(value){
+  const data=new TextEncoder().encode(String(value||""));
+  const digest=await crypto.subtle.digest("SHA-256",data);
+  return Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+function webDiagCookieValueV1179(request){
+  const cookie=String(request?.headers?.get("cookie")||"");
+  for(const part of cookie.split(";")){
+    const [k,...rest]=part.trim().split("=");
+    if(k===WEB_DIAG_COOKIE_V1179) return decodeURIComponent(rest.join("="));
+  }
+  return "";
+}
+
+function webDiagStillEnabledV1179(control,at=Date.now()){
+  if(control?.enabled!==true) return false;
+  const exp=Number(control?.expiresAt||0);
+  return !(exp>0 && at>=exp);
+}
+
+async function webDiagAuthorizedV1179(request,state){
+  const control=webDiagControlV1179(state);
+  if(!webDiagStillEnabledV1179(control)) return {ok:false,reason:control?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179",control};
+  const session=webDiagCookieValueV1179(request);
+  if(!session || !control.sessionHash) return {ok:false,reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179",control};
+  const hash=await webDiagSha256V1179(session);
+  if(hash!==String(control.sessionHash)) return {ok:false,reason:"WEB_DIAGNOSTICS_SESSION_INVALID_V1179",control};
+  return {ok:true,reason:"AUTHORIZED_V1179",control};
+}
+
+function webDiagDeniedResponseV1179(auth){
+  const expired=auth?.reason==="WEB_DIAGNOSTICS_EXPIRED_V1179";
+  const disabled=auth?.reason==="WEB_DIAGNOSTICS_DISABLED_V1179";
+  const body=disabled
+    ? "ChainVanta diagnostics are disabled. Enable them from the authorised Admin Telegram with /webdiag on or /webdiag on 6h."
+    : expired
+      ? "ChainVanta diagnostic access has expired. Re-enable it from the authorised Admin Telegram."
+      : "ChainVanta diagnostic login required. Use the private login link generated by /webdiag on in the authorised Admin Telegram.";
+  return new Response(body,{status:disabled||expired?403:401,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","referrer-policy":"no-referrer"}});
+}
+
+function telegramHtmlToPlainV1179(value){
+  return String(value??"")
+    .replace(/<br\s*\/?\s*>/gi,"\n")
+    .replace(/<[^>]*>/g,"")
+    .replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,"&");
+}
+
+function webDiagTextResponseV1179(text,status=200){
+  return new Response(telegramHtmlToPlainV1179(text),{status,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store, max-age=0","pragma":"no-cache","x-content-type-options":"nosniff","referrer-policy":"no-referrer","content-security-policy":"default-src 'none'; frame-ancestors 'none'"}});
+}
+
+function webDiagLongRouteV1179(path,state,env){
+  if(path==="/telegramaudit") return finalTelegramQualificationAuditMessageV935(state);
+  if(path==="/evidenceaudit") return evidenceAuditTelegramMessageV727(state);
+  if(path==="/scorehandoff") return scoreHandoffMessageV938(state);
+  if(path==="/rescoreaudit") return rescoreTriggerMessageV939(state);
+  if(path==="/riskaudit") return riskCompletionMessageV940(state);
+  if(path==="/holderaudit") return holderRecoveryMessageV941(state,env);
+  if(path==="/marketaudit"){
+    const result={...(state?.marketCompletionAuditV968||{recordedAt:null,scanVersion:VERSION,candidateCount:0,selected:false,failureReasons:["NO_COMPLETED_V968_SCAN_RECORDED_YET"]}),v979LatestScanDecision:state?.marketPairDecisionAuditV979||null};
+    return marketCompletionAuditTelegramV968(result);
+  }
+  if(path==="/performance") return performanceSummaryV271(state);
+  return null;
+}
+
+function webDiagRouteForCommandV1179(command){
+  const c=String(command||"").toLowerCase();
+  const map={
+    "/telegramaudit":"/telegramaudit","/qualstarve":"/telegramaudit",
+    "/evidenceaudit":"/evidenceaudit","/completionaudit":"/evidenceaudit",
+    "/scorehandoff":"/scorehandoff","/handoffaudit":"/scorehandoff",
+    "/rescoreaudit":"/rescoreaudit","/rescoretrigger":"/rescoreaudit",
+    "/riskaudit":"/riskaudit","/riskcompletion":"/riskaudit",
+    "/holderaudit":"/holderaudit","/holderrecovery":"/holderaudit",
+    "/performance":"/performance"
+  };
+  return map[c]||null;
+}
+
+function webDiagStatusMessageV1179(state){
+  const c=webDiagControlV1179(state);
+  const active=webDiagStillEnabledV1179(c);
+  const exp=Number(c?.expiresAt||0);
+  return [
+    "🔐 <b>ChainVanta Web Diagnostics — V1179</b>","",
+    `Status: <b>${active?"ENABLED":"DISABLED"}</b>`,
+    `Mode: <b>${escapeHtml(String(c?.mode||"OFF"))}</b>`,
+    `Expires: <b>${exp>0?escapeHtml(new Date(exp).toISOString()):active?"MANUAL OFF":"N/A"}</b>`,
+    `Authenticated browser session: <b>${active&&c?.sessionHash?"YES":"NO"}</b>`,
+    c?.lastLoginAt?`Last browser login: <b>${escapeHtml(new Date(Number(c.lastLoginAt)).toISOString())}</b>`:null,
+    "",
+    "Diagnostics are closed by default. Web access requires both Admin enablement and the private browser session.",
+    "No API keys, provider credentials, Stripe secrets or Telegram secrets are exposed."
+  ].filter(Boolean).join("\n");
+}
+
 async function handleRequest(
   request,
   env,
@@ -198915,6 +199110,58 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   }
   if (path === "/v3live-stop") {
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "stop"));
+  }
+
+
+  // V1179: one-time bootstrap establishes an HttpOnly browser session.
+  if (path === "/webdiag-access" && request.method === "GET") {
+    const loadedV1179 = await readState(env);
+    const stateV1179 = loadedV1179?.state || newState();
+    const controlV1179 = webDiagControlV1179(stateV1179);
+    if (!webDiagStillEnabledV1179(controlV1179)) return webDiagDeniedResponseV1179({reason:controlV1179?.enabled===true?"WEB_DIAGNOSTICS_EXPIRED_V1179":"WEB_DIAGNOSTICS_DISABLED_V1179"});
+    const keyV1179 = String(url.searchParams.get("key") || "");
+    if (!keyV1179 || !controlV1179.bootstrapHash || await webDiagSha256V1179(keyV1179) !== String(controlV1179.bootstrapHash)) {
+      return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
+    }
+    const sessionV1179 = webDiagRandomSecretV1179(32);
+    stateV1179.webDiagControlV1179 = {
+      ...controlV1179, bootstrapHash:null, sessionHash:await webDiagSha256V1179(sessionV1179), lastLoginAt:Date.now()
+    };
+    const savedV1179 = await writeState(env,stateV1179);
+    if (savedV1179?.saved !== true) return new Response("Unable to establish diagnostic session.",{status:503,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store"}});
+    const maxAgeV1179 = Number(controlV1179.expiresAt||0)>0 ? Math.max(1,Math.floor((Number(controlV1179.expiresAt)-Date.now())/1000)) : 21600;
+    return new Response(null,{status:302,headers:{"location":"/webdiag-home","set-cookie":`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1179)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAgeV1179}`,"cache-control":"no-store","referrer-policy":"no-referrer"}});
+  }
+
+  // V1179: protect every exposed diagnostic route before route-specific rendering.
+  if (WEB_DIAG_PROTECTED_PATHS_V1179.has(path)) {
+    const loadedAuthV1179 = await readState(env);
+    const stateAuthV1179 = loadedAuthV1179?.state || newState();
+    const authV1179 = await webDiagAuthorizedV1179(request,stateAuthV1179);
+    if (!authV1179.ok) return webDiagDeniedResponseV1179(authV1179);
+
+    if (path === "/webdiag-home") {
+      const bodyV1179 = [
+        "ChainVanta Protected Diagnostics — V1179","",
+        "Access: AUTHORIZED","",
+        `${WEB_DIAG_BASE_V1179}/telegramaudit`,
+        `${WEB_DIAG_BASE_V1179}/evidenceaudit`,
+        `${WEB_DIAG_BASE_V1179}/scorehandoff`,
+        `${WEB_DIAG_BASE_V1179}/rescoreaudit`,
+        `${WEB_DIAG_BASE_V1179}/riskaudit`,
+        `${WEB_DIAG_BASE_V1179}/holderaudit`,
+        `${WEB_DIAG_BASE_V1179}/marketaudit`,
+        `${WEB_DIAG_BASE_V1179}/performance`,"",
+        "Token-specific: /telegramwhy?token=0x..., /marketwhy?token=0x..., /sendwhy?token=0x...",
+        "Scheduler: /scheduler-status-v673","",
+        "Use /webdiag off in the authorised Admin Telegram to revoke this browser session immediately."
+      ].join("\n");
+      return webDiagTextResponseV1179(bodyV1179);
+    }
+
+    const longV1179 = webDiagLongRouteV1179(path,stateAuthV1179,env);
+    if (longV1179 !== null) return webDiagTextResponseV1179(longV1179);
+    // Existing token-specific/scheduler handlers continue below after authorization.
   }
 
   if (path === "/telegramwhy") {
