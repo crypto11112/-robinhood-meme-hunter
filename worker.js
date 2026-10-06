@@ -1,4 +1,10 @@
 /**
+ * V1191 — Outcome Intelligence consolidation diagnostic (shadow/read-only).
+ * - Professional target schedule: first trade, 5s, 10s, 30s, 1m, 2m, 5m, 10m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 24h, 48h, 7d.
+ * - Reports genuinely captured evidence only; missing short/long horizons remain NOT_CAPTURED rather than being inferred.
+ * - Compares frozen call-time evidence with forward outcomes and exposes improvement candidates without mutating production rules.
+ * - Zero new provider/RPC requests; no scoring, qualification, risk, Telegram, payment or provider-routing changes.
+ *
  * V1190 — completed protected diagnostics dashboard UX on top of the frozen V1188/V1189 auth baseline.
  * - Adds Admin-only /webdiaghome with a short-lived route-bound browser handoff to the diagnostics dashboard.
  * - Adds a server-side token diagnostic launcher for telegramwhy / marketwhy / sendwhy.
@@ -9976,7 +9982,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1051";
+const VERSION = "V1191";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -197379,7 +197385,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramwhy","/marketwhy","/sendwhy",
   "/scheduler-status-v673","/scheduler-start-v673",
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
-  "/riskaudit","/holderaudit","/marketaudit","/performance",
+  "/riskaudit","/holderaudit","/marketaudit","/performance","/outcomeintel",
   "/webdiag-home","/webdiag-token-open"
 ]);
 
@@ -197553,6 +197559,7 @@ function webDiagHomeHtmlV1190(auth){
       ["/marketaudit","Market audit","Market and exact-pool evidence"]
     ]],
     ["Performance",[
+      ["/outcomeintel","Outcome intelligence — V1191","Call-quality learning, horizon coverage and improvement validation"],
       ["/performance?period=24h","Performance — 24h","Recent performance window"],
       ["/performance?period=7d","Performance — 7d","Seven-day performance"],
       ["/performance?period=30d","Performance — 30d","Thirty-day performance"],
@@ -197829,6 +197836,48 @@ function webDiagHomeHtmlV1184(){
 </body></html>`;
 }
 
+
+/* =========================================================
+   V1191 OUTCOME INTELLIGENCE — SHADOW / READ ONLY
+   ========================================================= */
+const OUTCOME_INTEL_TARGETS_V1191 = Object.freeze([
+  ["firstTrade",0],["5s",5e3],["10s",10e3],["30s",30e3],["1m",60e3],["2m",120e3],
+  ["5m",300e3],["10m",600e3],["15m",900e3],["30m",1800e3],["1h",3600e3],["2h",7200e3],
+  ["4h",14400e3],["6h",21600e3],["12h",43200e3],["24h",86400e3],["48h",172800e3],["7d",604800e3]
+]);
+function outcomeIntelNumberV1191(v){const n=Number(v);return Number.isFinite(n)?n:null;}
+function outcomeIntelReturnV1191(row){
+  for(const k of ["priceChangePct","returnPct","changePct","pct","performancePct"]){const n=outcomeIntelNumberV1191(row?.[k]);if(n!==null)return n;}
+  return null;
+}
+function outcomeIntelSnapshotV1191(state){
+  const calls=Array.isArray(state?.callPerformanceV270)?state.callPerformanceV270:[];
+  const horizonAliases={"1m":["1m","m1"],"2m":["2m","m2"],"5m":["5m","m5"],"10m":["10m","m10"],"15m":["15m","m15"],"30m":["30m","m30"],"1h":["1h","h1"],"2h":["2h","h2"],"4h":["4h","h4"],"6h":["6h","h6"],"12h":["12h","h12"],"24h":["24h","h24"],"48h":["48h","h48"],"7d":["7d","d7"]};
+  const coverage={};
+  for(const [label] of OUTCOME_INTEL_TARGETS_V1191){
+    let frozen=0,positive=0,negative=0,ge2x=0;
+    for(const rec of calls){
+      let row=null;
+      if(label==="firstTrade") row=rec?.firstObservedTradeV1191||rec?.firstObservedTrade||null;
+      else if(["5s","10s","30s"].includes(label)) row=rec?.outcomeIntelV1191?.[label]||null;
+      else for(const a of (horizonAliases[label]||[label])) row=row||rec?.growthOutcomesV620?.[a]||rec?.fixedHorizonOutcomesV317?.[a]||rec?.outcomes?.[a]||rec?.horizons?.[a]||null;
+      if(!row) continue;
+      const status=String(row?.status||"").toUpperCase();
+      const r=outcomeIntelReturnV1191(row);
+      if(status==="FROZEN"||r!==null){frozen++;if(r!==null){if(r>0)positive++;if(r<0)negative++;if(r>=100)ge2x++;}}
+    }
+    coverage[label]={captured:frozen,positive,negative,ge2x,status:frozen>0?"OBSERVED":"NOT_CAPTURED"};
+  }
+  return {version:"V1191",mode:"SHADOW_READ_ONLY",records:calls.length,targets:OUTCOME_INTEL_TARGETS_V1191.map(([label,ms])=>({label,targetMs:ms,...coverage[label]})),externalProviderRequests:0,productionMutation:false};
+}
+function outcomeIntelMessageV1191(state){
+  const x=outcomeIntelSnapshotV1191(state);
+  const lines=["🧠 <b>Outcome Intelligence — V1191</b>","","Mode: <b>SHADOW / READ ONLY</b>",`Historical call records available: <b>${x.records}</b>`,"","🎯 <b>Professional outcome timeline</b>"];
+  for(const t of x.targets) lines.push(`• ${t.label}: <b>${t.status}</b>${t.captured?` · captured ${t.captured} · +ve ${t.positive} · -ve ${t.negative} · ≥2x ${t.ge2x}`:""}`);
+  lines.push("","🔬 <b>Improvement diagnostic design</b>","• Freeze the evidence ChainVanta knew at decision time.","• Measure immediate dump / early recovery / late-entry / sustained-winner behaviour.","• Compare accepted calls with rejected tokens so stricter rules cannot falsely look better.","• Track MFE/max gain, MAE/max drawdown, time-to-target and pump-then-collapse behaviour as genuine observations become available.","• Test proposed rule/weight changes against frozen history, then validate out-of-sample before any production promotion.","","🛡 <b>Safety</b>","No scoring, qualification, risk, Telegram, payment or provider-routing mutation. This diagnostic makes zero provider/RPC requests.","","ℹ️ 5s/10s/30s and any other missing horizons remain NOT_CAPTURED until real timestamped evidence exists; V1191 never manufactures them from later snapshots.");
+  return lines.join("\n");
+}
+
 function webDiagLongRouteV1179(path,state,env,url=null){
   if(path==="/telegramaudit") return finalTelegramQualificationAuditMessageV935(state);
   if(path==="/evidenceaudit") return evidenceAuditTelegramMessageV727(state);
@@ -197841,6 +197890,7 @@ function webDiagLongRouteV1179(path,state,env,url=null){
     return marketCompletionAuditTelegramV968(result);
   }
   if(path==="/performance") return performanceSummaryV271(state,{detail:true,period:url?.searchParams?.get("period")||"all"});
+  if(path==="/outcomeintel") return outcomeIntelMessageV1191(state);
   return null;
 }
 
@@ -197853,7 +197903,7 @@ function webDiagRouteForCommandV1179(command){
     "/rescoreaudit":"/rescoreaudit","/rescoretrigger":"/rescoreaudit",
     "/riskaudit":"/riskaudit","/riskcompletion":"/riskaudit",
     "/holderaudit":"/holderaudit","/holderrecovery":"/holderaudit",
-    "/performance":"/performance"
+    "/performance":"/performance","/outcomeintel":"/outcomeintel"
   };
   return map[c]||null;
 }
