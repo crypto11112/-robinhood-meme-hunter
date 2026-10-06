@@ -1,4 +1,16 @@
 /*
+ * ChainVanta V1176 — PREMIUM/FREE PRODUCT SPLIT + CONVERSION TEASER
+ * - Builds directly from deployed V1175 and preserves the verified customer call baseline, V1174 dedupe ordering, V1173 relay recovery, all scoring/risk/qualification thresholds and the 30-minute delayed-Free queue.
+ * - Premium continues to receive the complete V1175 intelligence card immediately.
+ * - Free no longer receives the full Premium intelligence card. New successful Premium calls enqueue a compact V1176 Free teaser generated from the SAME frozen call evidence, so Free cannot drift/recalculate later.
+ * - Free keeps token name/symbol, contract, call type, Opportunity score, simple Risk band and verified entry market cap, plus a clear ~30-minute Premium timing advantage and upgrade prompt.
+ * - Free deliberately withholds exact Entry price, Confidence, Momentum, liquidity, volume, verified flow, holder concentration, whale direction, trigger/risk rationale and exact pool detail.
+ * - Existing queue retry/persistence semantics remain unchanged; only the queued message renderer changes for newly-enqueued calls.
+ * - Adds queue messageMode metadata so /freequeue can prove whether pending rows are V1176 Free teasers or legacy full-message rows.
+ * - Zero new provider/RPC requests. No scanner, scoring, risk, qualification, budget, cooldown/re-alert, scheduler, payment/access or Telegram destination changes.
+ */
+
+/*
  * ChainVanta V1175 — VERIFIED CUSTOMER CALL BASELINE + ENTRY PRICE
  * - Builds directly from deployed V1173 and preserves the V1173 scheduled-relay 503 recovery plus all V1171/V1172 behavior.
  * - Live Premium evidence showed the same STOCKKIT contract could be sent twice about one minute apart while /sendwhy still reported cooldown expired and score-improved.
@@ -16754,6 +16766,48 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
   ];
   rendered = lines.join("\n");
   return rendered.length <= 950 ? rendered : rendered.slice(0, 940);
+}
+
+
+/* =========================================================
+   V1176 — FREE CONVERSION TEASER RENDERER
+   Same successful call/evidence as Premium; reduced public payload only.
+   No provider requests and no re-evaluation at delayed-send time.
+   ========================================================= */
+function telegramFreeTeaserMessageV1176(candidate, baseline = null) {
+  const call = baseline && baseline?.version === "V1175"
+    ? baseline
+    : customerCallBaselineV1175(candidate, null, Date.now());
+  const market = candidate?.market || {};
+  const rawName = String(candidate?.name || "Unknown Token").slice(0,48);
+  const rawSymbol = String(candidate?.symbol || "UNKNOWN").slice(0,18);
+  const marketCapVerified = call?.entryMarketCapVerified === true && Number.isFinite(Number(call?.entryMarketCap)) && Number(call.entryMarketCap) > 0;
+  const marketCapText = marketCapVerified
+    ? `$${formatNumber(Number(call.entryMarketCap))}`
+    : (market?.verified === true && Number.isFinite(Number(market?.marketCap)) && Number(market.marketCap) > 0
+        ? `$${formatNumber(Number(market.marketCap))}`
+        : "UNVERIFIED");
+  const riskBand = candidate?.risk?.verified === true
+    ? String(candidate?.risk?.label || (safeNumber(candidate?.risk?.score) <= 39 ? "LOW" : "ACCEPTABLE")).trim().toUpperCase()
+    : "UNVERIFIED";
+
+  const lines = [
+    `🚨 <b>ChainVanta Free Alert</b> · ${escapeHtml(call?.callType || "Qualified Call")}`,
+    `🪙 <b>${escapeHtml(rawName)} (${escapeHtml(rawSymbol)})</b>`,
+    `<code>${escapeHtml(candidate?.address || "UNVERIFIED")}</code>`,
+    "",
+    `🎯 Opportunity <b>${safeNumber(candidate?.opportunity?.score)}/100</b> · Risk <b>${escapeHtml(riskBand)}</b>`,
+    `💰 Market Cap <b>${escapeHtml(marketCapText)}</b>`,
+    `⏱ <b>Premium received this call about 30 minutes earlier.</b>`,
+    "",
+    `🔒 <b>Premium unlocks:</b> verified Entry, Confidence + Momentum, liquidity/volume, live flow, holder concentration, whale direction, trigger/risk rationale and full call context.`,
+    `⚡ Use <b>/premium</b> for the full live ChainVanta feed.`,
+    "",
+    `⚠️ <i>Delayed public alert. High risk — research before trading.</i>`
+  ];
+
+  const rendered = lines.join("\n");
+  return rendered.length <= 900 ? rendered : rendered.slice(0, 890);
 }
 
 /* =========================================================
@@ -82694,7 +82748,7 @@ function freeCallQueueV1028(state) {
   return state.freeCallQueueV1028;
 }
 
-function enqueueFreeCallV1028(state, candidate, renderedMessage, premiumResult, imageUrl = null) {
+function enqueueFreeCallV1028(state, candidate, renderedMessage, premiumResult, imageUrl = null, messageMode = "LEGACY_FULL_COPY_V1028") {
   const queue = freeCallQueueV1028(state);
   if (!queue || !renderedMessage || premiumResult?.success !== true) {
     return {queued:false, reason:"NOT_ELIGIBLE_V1028"};
@@ -82721,7 +82775,8 @@ function enqueueFreeCallV1028(state, candidate, renderedMessage, premiumResult, 
     nextAttemptAt: nowMs + V1028_FREE_DELAY_MS,
     attempts: 0,
     lastAttemptAt: null,
-    lastError: null
+    lastError: null,
+    messageMode: String(messageMode || "LEGACY_FULL_COPY_V1028")
   });
   if (queue.entries.length > V1028_FREE_QUEUE_MAX) {
     const overflow = queue.entries.length - V1028_FREE_QUEUE_MAX;
@@ -82730,7 +82785,7 @@ function enqueueFreeCallV1028(state, candidate, renderedMessage, premiumResult, 
   }
   queue.totalEnqueued = safeNumber(queue.totalEnqueued) + 1;
   queue.lastUpdatedAt = nowMs;
-  return {queued:true, key, dueAt:nowMs + V1028_FREE_DELAY_MS};
+  return {queued:true, key, dueAt:nowMs + V1028_FREE_DELAY_MS, messageMode:String(messageMode || "LEGACY_FULL_COPY_V1028")};
 }
 
 async function processDueFreeCallsV1028(env) {
@@ -82832,7 +82887,7 @@ function freeQueueTelegramV1029(state) {
     lines.push("<b>Pending calls</b>");
     for (const row of pending.slice(0, 10)) {
       const at = Number(row?.nextAttemptAt || row?.dueAt || 0);
-      lines.push(`• <b>${escapeHtml(row?.symbol || "UNKNOWN")}</b> · attempts ${safeNumber(row?.attempts)} · ${at ? escapeHtml(new Date(at).toISOString()) : "NO_DUE_TIME"}`);
+      lines.push(`• <b>${escapeHtml(row?.symbol || "UNKNOWN")}</b> · ${escapeHtml(row?.messageMode || "LEGACY_FULL_COPY_V1028")} · attempts ${safeNumber(row?.attempts)} · ${at ? escapeHtml(new Date(at).toISOString()) : "NO_DUE_TIME"}`);
     }
     if (pending.length > 10) lines.push(`…and ${pending.length - 10} more`);
     lines.push("");
@@ -124707,17 +124762,31 @@ for (
     if (
       result.success
     ) {
-      // V1028: queue the already-rendered successful Premium alert for delayed
-      // Free delivery. This is KV state only and performs zero provider requests.
+      // V1176: queue a deliberately reduced Free teaser from the SAME successful
+      // Premium call evidence. The delayed sender later transmits this stored text
+      // unchanged, so Free cannot gain information through a fresh recalculation.
+      // Persistence/retry timing remains the proven V1028 path and adds zero
+      // provider/scanner requests.
       if (String(env.TELEGRAM_PREMIUM_CHAT_ID || "").trim() && String(env.TELEGRAM_FREE_CHAT_ID || "").trim()) {
+        const freeTelegramMessageV1176 =
+          telegramFreeTeaserMessageV1176(candidate, customerCallBaselinePreSendV1175);
+
         telegramResults[telegramResults.length - 1].freeDelayQueueV1028 =
           enqueueFreeCallV1028(
             state,
             candidate,
-            productionTelegramMessageV1175,
+            freeTelegramMessageV1176,
             result,
-            candidate.market?.imageUrl || null
+            candidate.market?.imageUrl || null,
+            "FREE_TEASER_V1176"
           );
+        telegramResults[telegramResults.length - 1].freeRendererV1176 = {
+          mode:"FREE_TEASER_V1176",
+          chars:freeTelegramMessageV1176.length,
+          sameUnderlyingCall:true,
+          recalculatedAtFreeSend:false,
+          providerRequestsAdded:0
+        };
       }
 
       /*
