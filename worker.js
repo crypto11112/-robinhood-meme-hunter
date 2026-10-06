@@ -1,3 +1,4 @@
+// V1201 — read-only frozen-outcome provenance/timing audit; no collector, scoring, budget, or security changes.
 // V1200 — read-only Outcome Intelligence cooldown/backlog telemetry; no budget/scoring/provider-policy changes.
 // V1199 — authoritative forward-audit schema migration in the V1120 observer path; no hindsight backfill.
 // V1198 — Forward-only horizon repair: safely initializes missing future horizons, marks elapsed missing horizons non-backfillable, and re-arms overdue observer work.
@@ -10009,7 +10010,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1200";
+const VERSION = "V1201";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -144757,7 +144758,7 @@ function outcomeCooldownTimeV1200(value) {
 
 async function outcomeIntelMessageV1197(state, env) {
   const historical = outcomeIntelMessageV1191(state)
-    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1200</b>");
+    .replace("🧠 <b>Outcome Intelligence — V1192</b>", "🧠 <b>Outcome Intelligence — V1201</b>");
 
   const snap = await readLiveDecisionAuditV1117(env);
   const records = Array.isArray(snap?.records) ? snap.records : [];
@@ -144812,10 +144813,49 @@ async function outcomeIntelMessageV1197(state, env) {
       if(pendingV1200!==null) lines.push(`Backlog: ${dueV1200||0} due now · ${futureV1200||0} scheduled future · ${pendingV1200} total pending`);
       lines.push(`Backlog state: ${String(obs?.status||"").includes("PROVIDER_COOLDOWN")?"Provider governor/cooldown is currently holding external outcome observation. V1200 does not bypass or raise that budget.":"No provider-cooldown hold is reported by the current observer status."}`);
     }
+    // V1201: explain frozen evidence quality/provenance without mutating audit state.
+    const provenanceHorizonsV1201=["s5","s10","s30","m2","m10","h6","h12"];
+    const provenanceLabelsV1201={s5:"5s",s10:"10s",s30:"30s",m2:"2m",m10:"10m",h6:"6h",h12:"12h"};
+    const provenanceRowsV1201=[];
+    for(const key of provenanceHorizonsV1201){
+      let frozen=0,preMigrationDecision=0,postMigrationDecision=0,forwardFlag=0,noBackfillFlag=0,stale=0,eligible=0;
+      let minDecisionAt=null,maxDecisionAt=null,minFrozenAt=null,maxFrozenAt=null;
+      const sources={};
+      for(const rec of records){
+        const h=rec?.horizons?.[key];
+        if(!h || h.status!=="FROZEN") continue;
+        frozen++;
+        const decisionAt=Number(rec?.decisionAt);
+        const frozenAt=Number(h?.frozenAt||h?.observedAt||h?.capturedAt||0);
+        if(Number.isFinite(decisionAt)&&decisionAt>0){
+          minDecisionAt=minDecisionAt===null?decisionAt:Math.min(minDecisionAt,decisionAt);
+          maxDecisionAt=maxDecisionAt===null?decisionAt:Math.max(maxDecisionAt,decisionAt);
+        }
+        if(Number.isFinite(frozenAt)&&frozenAt>0){
+          minFrozenAt=minFrozenAt===null?frozenAt:Math.min(minFrozenAt,frozenAt);
+          maxFrozenAt=maxFrozenAt===null?frozenAt:Math.max(maxFrozenAt,frozenAt);
+        }
+        if(h?.forwardOnly===true) forwardFlag++;
+        if(h?.hindsightBackfillAllowed===false) noBackfillFlag++;
+        const grade=String(h?.timingGradeV1122||h?.timingGrade||"").toUpperCase();
+        if(grade==="STALE") stale++;
+        if(h?.learningEligibleV1122===true||h?.learningEligible===true||h?.freezeEligible===true) eligible++;
+        const source=String(h?.source||h?.priceSource||h?.observationSource||h?.evidenceSource||"UNSPECIFIED");
+        sources[source]=(sources[source]||0)+1;
+      }
+      if(frozen){
+        const topSources=Object.entries(sources).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,v])=>`${k}×${v}`).join(", ");
+        provenanceRowsV1201.push(`• ${provenanceLabelsV1201[key]}: frozen ${frozen} · stale ${stale} · eligible ${eligible} · forwardFlag ${forwardFlag}/${frozen} · noBackfillFlag ${noBackfillFlag}/${frozen} · source ${escapeHtml(topSources||"UNSPECIFIED")}`);
+      }
+    }
+    if(provenanceRowsV1201.length){
+      lines.push("","🧬 <b>V1201 frozen-evidence provenance audit</b>",...provenanceRowsV1201,
+        "<i>Read-only classification of already-frozen evidence. It does not reclassify, backfill, unfreeze or alter learning eligibility.</i>");
+    }
     const mig=obs?.migrationV1199||null;
     if(mig) lines.push(`V1199 migration: ${mig.changed===true?"APPLIED":"NO CHANGE"} · records touched ${safeNumber(mig.recordsTouched)} · future initialized ${safeNumber(mig.initializedFuture)} · elapsed marked no-backfill ${safeNumber(mig.markedMissed)}`);
   }
-  lines.push("", "<i>V1200 telemetry only: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
+  lines.push("", "<i>V1201 telemetry only: one internal Durable Object read; zero provider/RPC requests, zero state writes, no scoring/alert/security changes.</i>");
   return historical + "\\n" + lines.join("\\n");
 }
 
