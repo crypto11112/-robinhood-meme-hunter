@@ -1,3 +1,4 @@
+// V1207 — Stripe webhook idempotency hardening only. Scanner/scoring/providers/OutcomeIntel unchanged.
 // V1206 — adds protected WebDiag route-grant link to Admin /outcomeintel response only. Evidence/collector logic unchanged.
 // V1205 — Outcome Intelligence presentation + provenance alignment only. No collector/scoring/provider changes.
 // V1204 — professional Outcome Intelligence access hardening + exact provenance display alignment. Diagnostic-only.
@@ -10015,7 +10016,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1206";
+const VERSION = "V1207";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -189930,6 +189931,40 @@ async function paymentGraceAdminMessageV1046(env) {
   }
 }
 
+
+const STRIPE_EVENT_DEDUPE_PREFIX_V1207 = "v1207:stripe:event:";
+const STRIPE_EVENT_DEDUPE_TTL_V1207 = 7 * 24 * 60 * 60;
+
+function stripeEventDedupeKeyV1207(eventId) {
+  return STRIPE_EVENT_DEDUPE_PREFIX_V1207 + String(eventId || "").trim();
+}
+
+async function stripeEventAlreadyProcessedV1207(env, eventId) {
+  const {kv}=getKV(env);
+  if(!kv || typeof kv.get!=="function") return {ok:false,processed:false,error:"KV_UNAVAILABLE_V1207"};
+  try {
+    const raw=await kv.get(stripeEventDedupeKeyV1207(eventId));
+    return {ok:true,processed:raw!==null};
+  } catch (e) {
+    return {ok:false,processed:false,error:"KV_READ_FAILED_V1207"};
+  }
+}
+
+async function stripeEventMarkProcessedV1207(env, eventId, eventType) {
+  const {kv}=getKV(env);
+  if(!kv || typeof kv.put!=="function") return {ok:false,error:"KV_UNAVAILABLE_V1207"};
+  try {
+    await kv.put(
+      stripeEventDedupeKeyV1207(eventId),
+      JSON.stringify({eventId:String(eventId),eventType:String(eventType),processedAt:Date.now()}),
+      {expirationTtl:STRIPE_EVENT_DEDUPE_TTL_V1207}
+    );
+    return {ok:true};
+  } catch (e) {
+    return {ok:false,error:"KV_WRITE_FAILED_V1207"};
+  }
+}
+
 async function stripeWebhookV1030(request, env) {
   const secret = String(env?.STRIPE_WEBHOOK_SECRET || "").trim();
   if (!secret) {
@@ -189975,6 +190010,26 @@ async function stripeWebhookV1030(request, env) {
   }
 
   const selected = STRIPE_WEBHOOK_EVENTS_V1030.has(eventType);
+
+  // V1207: selected payment/access events are fail-closed if the idempotency
+  // ledger cannot be checked. Duplicate verified Stripe deliveries are
+  // acknowledged without repeating any payment/access side effects.
+  if (selected) {
+    const dedupeV1207 = await stripeEventAlreadyProcessedV1207(env,eventId);
+    if (!dedupeV1207.ok) {
+      return jsonResponse(
+        {ok:false,version:VERSION,error:dedupeV1207.error,eventId,eventType,timestamp:now()},
+        503
+      );
+    }
+    if (dedupeV1207.processed) {
+      return jsonResponse(
+        {ok:true,version:VERSION,received:true,verified:true,selected:true,duplicate:true,eventId,eventType,sideEffectsRepeated:false,timestamp:now()},
+        200
+      );
+    }
+  }
+
   console.log("V1030 Stripe webhook verified", {
     eventId,
     eventType,
@@ -190017,10 +190072,24 @@ async function stripeWebhookV1030(request, env) {
     lifecycleV1036 = await recordStripeLifecycleV1036(env, event);
   }
 
+  // V1207: mark a selected event only after all selected handlers above
+  // completed. If persistence fails, return retryable 503 rather than falsely
+  // acknowledging an event whose idempotency state was not recorded.
+  if (selected) {
+    const markedV1207 = await stripeEventMarkProcessedV1207(env,eventId,eventType);
+    if (!markedV1207.ok) {
+      return jsonResponse(
+        {ok:false,version:VERSION,error:markedV1207.error,eventId,eventType,timestamp:now()},
+        503
+      );
+    }
+  }
+
   // V1036 remains diagnostic-only: no Telegram removal/revocation calls.
   return jsonResponse(
     {
       ok: true,
+      duplicate: false,
       version: VERSION,
       received: true,
       verified: true,
