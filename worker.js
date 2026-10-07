@@ -1,3 +1,4 @@
+// V1227 — Narrative Evidence Engine: free-first contract-bound project evidence, first-party website verification, D1 provenance/cache; no scoring changes.
 // V1226 — Free delivery durability: D1-isolated queue + per-call delivery provenance; no scanner/scoring changes.
 // V1225 — WebDiag Research & Reporting Suite: protected portal integration + copy/download/home for new owner diagnostics.
 // V1224 — Forward Research Capture: genuine-call 5s→7d horizon capture with target-aware sparse scheduling; scoring unchanged.
@@ -10035,7 +10036,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1226";
+const VERSION = "V1227";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -16735,6 +16736,511 @@ function customerNarrativeV1178(candidate) {
 }
 
 /* =========================================================
+   V1227 — PROFESSIONAL NARRATIVE EVIDENCE ENGINE
+   Free-first and evidence-tiered:
+   - Reuses project links already returned by the exact-contract DexScreener row.
+   - At most ONE bounded first-party HTTPS website fetch when a qualified call
+     still needs stronger narrative evidence.
+   - D1 caches provenance per contract so repeat alerts do not repeatedly fetch.
+   - No Opportunity/Momentum/Confidence/Risk/qualification changes.
+   - Narrative is presentation + research evidence only.
+   ========================================================= */
+
+const NARRATIVE_CACHE_VERIFIED_MS_V1227 = 24 * 60 * 60 * 1000;
+const NARRATIVE_CACHE_OTHER_MS_V1227 = 6 * 60 * 60 * 1000;
+const NARRATIVE_WEBSITE_TIMEOUT_MS_V1227 = 2500;
+const NARRATIVE_MAX_HTML_CHARS_V1227 = 120000;
+
+let narrativeSchemaReadyV1227 = false;
+
+function narrativeRulesV1227() {
+  return [
+    {label:"AI Agent", rx:/\b(ai agents?|autonomous agents?|agentic ai|ai assistant|intelligent agent)\b/i},
+    {label:"AI", rx:/\b(artificial intelligence|machine learning|generative ai|neural network|large language model|llm)\b/i},
+    {label:"Gaming", rx:/\b(gaming|gamefi|play[- ]to[- ]earn|p2e|gaming ecosystem|game token)\b/i},
+    {label:"DeFi", rx:/\b(decentralized finance|defi|yield protocol|lending protocol|dex protocol|liquidity protocol)\b/i},
+    {label:"RWA", rx:/\b(real[- ]world assets?|tokeni[sz]ed real assets?|rwa|real estate tokeni[sz]ation)\b/i},
+    {label:"SocialFi", rx:/\b(socialfi|social finance|social network token|creator economy)\b/i},
+    {label:"Infrastructure / DePIN", rx:/\b(depin|decentralized physical infrastructure|compute network|storage network|wireless network)\b/i},
+    {label:"Trading / Markets", rx:/\b(trading|trader|markets?|exchange|brokerage|portfolio|investing|investment platform)\b/i},
+    {label:"Robinhood Ecosystem", rx:/\b(robinhood|robinhood chain|hood chain)\b/i},
+    {label:"Political", rx:/\b(political|politics|president|election|government|senator|congress|prime minister)\b/i},
+    {label:"Meme / Culture", rx:/\b(meme coin|memecoin|meme culture|culture coin|community meme|viral meme)\b/i}
+  ];
+}
+
+function classifyNarrativeTextV1227(text) {
+  const body = String(text || "").toLowerCase().replace(/\s+/g, " ").slice(0, NARRATIVE_MAX_HTML_CHARS_V1227);
+  const hits = [];
+  for (const rule of narrativeRulesV1227()) {
+    if (rule.rx.test(body) && !hits.includes(rule.label)) hits.push(rule.label);
+  }
+  if (hits.includes("AI Agent") && !hits.includes("AI")) hits.unshift("AI");
+  return hits.slice(0, 3);
+}
+
+function safeNarrativeProjectUrlV1227(raw) {
+  try {
+    const u = new URL(String(raw || "").trim());
+    if (u.protocol !== "https:") return null;
+    if (u.username || u.password) return null;
+    const host = String(u.hostname || "").toLowerCase();
+    if (!host || !host.includes(".")) return null;
+    if (
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      host.endsWith(".local") ||
+      host.endsWith(".internal") ||
+      host.endsWith(".home") ||
+      /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) ||
+      host.includes(":")
+    ) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function htmlEvidenceTextV1227(html) {
+  const raw = String(html || "").slice(0, NARRATIVE_MAX_HTML_CHARS_V1227);
+  const meta = [];
+  const patterns = [
+    /<title[^>]*>([\s\S]{0,500}?)<\/title>/ig,
+    /<meta[^>]+name=["']description["'][^>]+content=["']([^"']{0,1200})["'][^>]*>/ig,
+    /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']{0,1200})["'][^>]*>/ig,
+    /<meta[^>]+content=["']([^"']{0,1200})["'][^>]+name=["']description["'][^>]*>/ig,
+    /<meta[^>]+content=["']([^"']{0,1200})["'][^>]+property=["']og:description["'][^>]*>/ig
+  ];
+  for (const rx of patterns) {
+    let match;
+    while ((match = rx.exec(raw)) && meta.length < 12) {
+      if (match[1]) meta.push(match[1]);
+    }
+  }
+  const visible = raw
+    .replace(/<script[\s\S]*?<\/script>/ig, " ")
+    .replace(/<style[\s\S]*?<\/style>/ig, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/ig, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/ig, " ")
+    .replace(/&amp;/ig, "&")
+    .replace(/&quot;|&#34;/ig, '"')
+    .replace(/&#39;|&apos;/ig, "'")
+    .replace(/\s+/g, " ")
+    .slice(0, 24000);
+  return [...meta, visible].join(" ").slice(0, 30000);
+}
+
+function narrativeIdentityMatchV1227(candidate, text) {
+  const hay = String(text || "").toLowerCase();
+  const address = normalize(candidate?.address || "");
+  const name = String(candidate?.name || "").trim().toLowerCase();
+  const symbol = String(candidate?.symbol || "").trim().toLowerCase();
+  if (address && hay.includes(address)) return {matched:true,source:"CONTRACT_ADDRESS"};
+  if (name.length >= 4 && hay.includes(name)) return {matched:true,source:"TOKEN_NAME"};
+  if (symbol.length >= 4 && new RegExp(`\\b${symbol.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")}\\b`,"i").test(hay)) {
+    return {matched:true,source:"TOKEN_SYMBOL"};
+  }
+  return {matched:false,source:null};
+}
+
+function narrativeExistingEvidenceV1227(candidate) {
+  const links = candidate?.market?.projectLinksV1227;
+  const exactLinked = links?.exactContractMatched === true;
+  const websites = exactLinked && Array.isArray(links?.websites)
+    ? links.websites.map(row => ({
+        label:String(row?.label || "").slice(0,80),
+        url:safeNarrativeProjectUrlV1227(row?.url)
+      })).filter(row => row.url)
+    : [];
+  const socials = exactLinked && Array.isArray(links?.socials)
+    ? links.socials.map(row => ({
+        type:String(row?.type || "").toLowerCase().slice(0,40),
+        url:safeNarrativeProjectUrlV1227(row?.url)
+      })).filter(row => row.url)
+    : [];
+  const nameHeuristic = customerNarrativeV1178(candidate);
+  return {
+    exactContractLinked: exactLinked,
+    websites: websites.slice(0, 3),
+    socials: socials.slice(0, 5),
+    nameHeuristic
+  };
+}
+
+async function ensureNarrativeSchemaV1227(env) {
+  const db = env?.CHAINVANTA_DB;
+  if (!db) return {ok:false,reason:"CHAINVANTA_DB_NOT_CONFIGURED_V1227"};
+  try {
+    if (!narrativeSchemaReadyV1227) {
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS narrative_evidence_v1227 (
+          address TEXT PRIMARY KEY,
+          symbol TEXT,
+          token_name TEXT,
+          narrative TEXT,
+          labels_json TEXT,
+          evidence_level TEXT NOT NULL,
+          verified INTEGER NOT NULL DEFAULT 0,
+          confidence INTEGER NOT NULL DEFAULT 0,
+          evidence_source TEXT,
+          website_host TEXT,
+          social_types TEXT,
+          identity_match TEXT,
+          website_http_status INTEGER,
+          checked_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          last_error TEXT,
+          external_requests INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        )
+      `).run();
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_narrative_recent_v1227
+        ON narrative_evidence_v1227(updated_at)
+      `).run();
+      narrativeSchemaReadyV1227 = true;
+    }
+    return {ok:true,db};
+  } catch (error) {
+    return {ok:false,reason:"NARRATIVE_SCHEMA_FAILED_V1227",error:errorString(error)};
+  }
+}
+
+function narrativeRowToEvidenceV1227(row, cacheHit=true) {
+  if (!row) return null;
+  let labels = [];
+  try { labels = JSON.parse(String(row.labels_json || "[]")); } catch {}
+  return {
+    version:"V1227",
+    narrative:String(row.narrative || "UNVERIFIED"),
+    labels:Array.isArray(labels)?labels.slice(0,3):[],
+    evidenceLevel:String(row.evidence_level || "UNVERIFIED"),
+    verified:Number(row.verified)===1,
+    confidence:Math.max(0,Math.min(100,safeNumber(row.confidence))),
+    evidenceSource:row.evidence_source || null,
+    websiteHost:row.website_host || null,
+    socialTypes:String(row.social_types || "").split(",").map(x=>x.trim()).filter(Boolean).slice(0,5),
+    identityMatch:row.identity_match || null,
+    websiteHttpStatus:Number(row.website_http_status)||null,
+    checkedAt:Number(row.checked_at)||null,
+    expiresAt:Number(row.expires_at)||null,
+    lastError:row.last_error || null,
+    externalRequests:safeNumber(row.external_requests),
+    cacheHit
+  };
+}
+
+async function loadNarrativeCacheV1227(env, address) {
+  const ready = await ensureNarrativeSchemaV1227(env);
+  if (!ready?.ok) return {ok:false,reason:ready?.reason||"SCHEMA_UNAVAILABLE"};
+  try {
+    const row = await ready.db.prepare(`
+      SELECT * FROM narrative_evidence_v1227
+      WHERE address=? AND expires_at>?
+      LIMIT 1
+    `).bind(normalize(address),Date.now()).first();
+    return {ok:true,evidence:narrativeRowToEvidenceV1227(row,true)};
+  } catch (error) {
+    return {ok:false,reason:"NARRATIVE_CACHE_READ_FAILED_V1227",error:errorString(error)};
+  }
+}
+
+async function saveNarrativeEvidenceV1227(env, candidate, evidence) {
+  const ready = await ensureNarrativeSchemaV1227(env);
+  if (!ready?.ok) return ready;
+  try {
+    const address = normalize(candidate?.address || "");
+    const nowMs = Date.now();
+    const ttl = evidence?.verified === true
+      ? NARRATIVE_CACHE_VERIFIED_MS_V1227
+      : NARRATIVE_CACHE_OTHER_MS_V1227;
+    const expiresAt = nowMs + ttl;
+    await ready.db.prepare(`
+      INSERT INTO narrative_evidence_v1227
+      (address,symbol,token_name,narrative,labels_json,evidence_level,verified,confidence,
+       evidence_source,website_host,social_types,identity_match,website_http_status,
+       checked_at,expires_at,last_error,external_requests,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(address) DO UPDATE SET
+        symbol=excluded.symbol,
+        token_name=excluded.token_name,
+        narrative=excluded.narrative,
+        labels_json=excluded.labels_json,
+        evidence_level=excluded.evidence_level,
+        verified=excluded.verified,
+        confidence=excluded.confidence,
+        evidence_source=excluded.evidence_source,
+        website_host=excluded.website_host,
+        social_types=excluded.social_types,
+        identity_match=excluded.identity_match,
+        website_http_status=excluded.website_http_status,
+        checked_at=excluded.checked_at,
+        expires_at=excluded.expires_at,
+        last_error=excluded.last_error,
+        external_requests=excluded.external_requests,
+        updated_at=excluded.updated_at
+    `).bind(
+      address,
+      candidate?.symbol||null,
+      candidate?.name||null,
+      evidence?.narrative||"UNVERIFIED",
+      JSON.stringify(Array.isArray(evidence?.labels)?evidence.labels.slice(0,3):[]),
+      evidence?.evidenceLevel||"UNVERIFIED",
+      evidence?.verified===true?1:0,
+      Math.max(0,Math.min(100,safeNumber(evidence?.confidence))),
+      evidence?.evidenceSource||null,
+      evidence?.websiteHost||null,
+      Array.isArray(evidence?.socialTypes)?evidence.socialTypes.join(","):null,
+      evidence?.identityMatch||null,
+      Number(evidence?.websiteHttpStatus)||null,
+      nowMs,
+      expiresAt,
+      evidence?.lastError?String(evidence.lastError).slice(0,500):null,
+      safeNumber(evidence?.externalRequests),
+      nowMs
+    ).run();
+    return {ok:true,expiresAt};
+  } catch (error) {
+    return {ok:false,reason:"NARRATIVE_CACHE_WRITE_FAILED_V1227",error:errorString(error)};
+  }
+}
+
+async function fetchNarrativeWebsiteV1227(url) {
+  const safeUrl = safeNarrativeProjectUrlV1227(url);
+  if (!safeUrl) return {ok:false,status:"UNSAFE_OR_UNSUPPORTED_URL_V1227",externalRequests:0};
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort("NARRATIVE_TIMEOUT_V1227"), NARRATIVE_WEBSITE_TIMEOUT_MS_V1227);
+  try {
+    const response = await fetch(safeUrl, {
+      method:"GET",
+      headers:{
+        "accept":"text/html,application/xhtml+xml;q=0.9,text/plain;q=0.7,*/*;q=0.2",
+        "user-agent":"ChainVanta-NarrativeVerifier/1.0"
+      },
+      redirect:"follow",
+      signal:controller.signal
+    });
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (!response.ok) {
+      return {ok:false,status:`HTTP_${response.status}`,httpStatus:response.status,externalRequests:1};
+    }
+    if (!contentType.includes("text/html") && !contentType.includes("text/plain") && !contentType.includes("application/xhtml")) {
+      return {ok:false,status:"UNSUPPORTED_CONTENT_TYPE_V1227",httpStatus:response.status,externalRequests:1};
+    }
+    const html = String(await response.text()).slice(0,NARRATIVE_MAX_HTML_CHARS_V1227);
+    const finalUrl = safeNarrativeProjectUrlV1227(response.url || safeUrl);
+    return {
+      ok:true,
+      status:"FIRST_PARTY_WEBSITE_FETCHED_V1227",
+      httpStatus:response.status,
+      finalUrl:finalUrl || safeUrl,
+      text:htmlEvidenceTextV1227(html),
+      externalRequests:1
+    };
+  } catch (error) {
+    return {
+      ok:false,
+      status:String(error?.name||"").toLowerCase().includes("abort") ? "WEBSITE_TIMEOUT_V1227" : "WEBSITE_FETCH_FAILED_V1227",
+      error:errorString(error),
+      externalRequests:1
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function enrichNarrativeEvidenceV1227(env, candidate) {
+  const address = normalize(candidate?.address || "");
+  if (!address) {
+    const fallback = customerNarrativeV1178(candidate);
+    return {
+      version:"V1227",narrative:fallback.display,labels:fallback.labels,
+      evidenceLevel:fallback.evidenceLevel,verified:false,confidence:fallback.labels?.length?25:0,
+      evidenceSource:fallback.source,externalRequests:0,cacheHit:false
+    };
+  }
+
+  const cached = await loadNarrativeCacheV1227(env,address);
+  if (cached?.ok && cached?.evidence) return cached.evidence;
+
+  const existing = narrativeExistingEvidenceV1227(candidate);
+  const website = existing.websites[0] || null;
+  const socialTypes = [...new Set(existing.socials.map(row => row.type).filter(Boolean))].slice(0,5);
+  const heuristic = existing.nameHeuristic || customerNarrativeV1178(candidate);
+
+  let evidence = {
+    version:"V1227",
+    narrative:heuristic?.display || "UNVERIFIED",
+    labels:Array.isArray(heuristic?.labels)?heuristic.labels.slice(0,3):[],
+    evidenceLevel:heuristic?.labels?.length ? "INDICATIVE_NAME_ONLY" : "UNVERIFIED",
+    verified:false,
+    confidence:heuristic?.labels?.length ? 25 : 0,
+    evidenceSource:heuristic?.source || null,
+    websiteHost:null,
+    socialTypes,
+    identityMatch:null,
+    websiteHttpStatus:null,
+    externalRequests:0,
+    cacheHit:false,
+    lastError:null
+  };
+
+  // Contract-bound project links alone verify identity linkage, not the narrative.
+  // A narrative is only promoted after first-party content is actually retrieved.
+  if (existing.exactContractLinked && website?.url) {
+    const fetched = await fetchNarrativeWebsiteV1227(website.url);
+    evidence.externalRequests = safeNumber(fetched?.externalRequests);
+    evidence.websiteHttpStatus = Number(fetched?.httpStatus)||null;
+    if (fetched?.ok === true) {
+      try { evidence.websiteHost = new URL(fetched.finalUrl || website.url).hostname.toLowerCase(); } catch {}
+      const labels = classifyNarrativeTextV1227(fetched.text);
+      const identity = narrativeIdentityMatchV1227(candidate,fetched.text);
+      evidence.identityMatch = identity?.source || null;
+
+      if (labels.length && identity?.matched === true) {
+        evidence.labels = labels;
+        evidence.narrative = labels.join(" + ");
+        if (socialTypes.length > 0) {
+          evidence.evidenceLevel = "VERIFIED_FIRST_PARTY_V1227";
+          evidence.verified = true;
+          evidence.confidence = 92;
+          evidence.evidenceSource = "EXACT_CONTRACT_DEX_LINKS_PLUS_FIRST_PARTY_WEBSITE_PLUS_SOCIAL_CORROBORATION_V1227";
+        } else {
+          evidence.evidenceLevel = "SUPPORTED_FIRST_PARTY_V1227";
+          evidence.verified = false;
+          evidence.confidence = 78;
+          evidence.evidenceSource = "EXACT_CONTRACT_DEX_LINK_PLUS_FIRST_PARTY_WEBSITE_V1227";
+        }
+      } else if (labels.length) {
+        evidence.labels = labels;
+        evidence.narrative = labels.join(" + ");
+        evidence.evidenceLevel = "SUPPORTED_WEBSITE_CONTEXT_V1227";
+        evidence.verified = false;
+        evidence.confidence = 62;
+        evidence.evidenceSource = "FIRST_PARTY_WEBSITE_CONTEXT_WITHOUT_TOKEN_IDENTITY_MATCH_V1227";
+      } else if (heuristic?.labels?.length) {
+        evidence.evidenceLevel = "INDICATIVE_NAME_PLUS_PROJECT_LINK_V1227";
+        evidence.confidence = 38;
+        evidence.evidenceSource = "TOKEN_NAME_PLUS_EXACT_CONTRACT_PROJECT_LINK_V1227";
+      } else {
+        evidence.evidenceLevel = "PROJECT_IDENTITY_LINKED_NARRATIVE_UNVERIFIED_V1227";
+        evidence.confidence = 20;
+        evidence.evidenceSource = "EXACT_CONTRACT_PROJECT_LINKS_NO_NARRATIVE_MATCH_V1227";
+      }
+    } else {
+      evidence.lastError = fetched?.status || fetched?.error || "WEBSITE_UNAVAILABLE_V1227";
+      if (heuristic?.labels?.length && existing.exactContractLinked) {
+        evidence.evidenceLevel = "INDICATIVE_NAME_PLUS_PROJECT_LINK_V1227";
+        evidence.confidence = 35;
+        evidence.evidenceSource = "TOKEN_NAME_PLUS_EXACT_CONTRACT_PROJECT_LINK_WEBSITE_UNAVAILABLE_V1227";
+      }
+    }
+  } else if (existing.exactContractLinked && (existing.websites.length || existing.socials.length)) {
+    if (heuristic?.labels?.length) {
+      evidence.evidenceLevel = "INDICATIVE_NAME_PLUS_PROJECT_LINK_V1227";
+      evidence.confidence = 35;
+      evidence.evidenceSource = "TOKEN_NAME_PLUS_EXACT_CONTRACT_PROJECT_LINK_V1227";
+    } else {
+      evidence.evidenceLevel = "PROJECT_IDENTITY_LINKED_NARRATIVE_UNVERIFIED_V1227";
+      evidence.confidence = 15;
+      evidence.evidenceSource = "EXACT_CONTRACT_PROJECT_LINKS_NO_SAFE_WEBSITE_V1227";
+    }
+  }
+
+  await saveNarrativeEvidenceV1227(env,candidate,evidence);
+  return evidence;
+}
+
+function customerNarrativeV1227(candidate) {
+  const e = candidate?.narrativeEvidenceV1227;
+  if (e && typeof e === "object") {
+    return {
+      labels:Array.isArray(e.labels)?e.labels.slice(0,3):[],
+      display:String(e.narrative || "UNVERIFIED"),
+      verified:e.verified===true,
+      evidenceLevel:String(e.evidenceLevel || "UNVERIFIED"),
+      source:e.evidenceSource || null,
+      confidence:Math.max(0,Math.min(100,safeNumber(e.confidence))),
+      externalRequests:safeNumber(e.externalRequests),
+      websiteHost:e.websiteHost || null,
+      socialTypes:Array.isArray(e.socialTypes)?e.socialTypes.slice(0,5):[],
+      identityMatch:e.identityMatch || null,
+      cacheHit:e.cacheHit===true
+    };
+  }
+  const legacy = customerNarrativeV1178(candidate);
+  return {
+    labels:legacy.labels,
+    display:legacy.display,
+    verified:false,
+    evidenceLevel:legacy.evidenceLevel,
+    source:legacy.source,
+    confidence:legacy.labels?.length?25:0,
+    externalRequests:0,
+    websiteHost:null,
+    socialTypes:[],
+    identityMatch:null,
+    cacheHit:false
+  };
+}
+
+function narrativeStatusSuffixV1227(call) {
+  if (call?.narrativeVerifiedV1178 === true || call?.narrativeEvidenceLevelV1178 === "VERIFIED_FIRST_PARTY_V1227") return " · VERIFIED";
+  const level = String(call?.narrativeEvidenceLevelV1178 || "");
+  if (level.startsWith("SUPPORTED_")) return " · SUPPORTED";
+  if (level.startsWith("INDICATIVE_")) return " · indicative";
+  return "";
+}
+
+async function narrativeAuditTelegramV1227(env, query=null) {
+  const ready = await ensureNarrativeSchemaV1227(env);
+  if (!ready?.ok) return `🧩 <b>Narrative Evidence Audit — V1227</b>\n\nStatus: <b>${escapeHtml(ready?.reason || "UNAVAILABLE")}</b>`;
+  try {
+    const q = String(query || "").trim().toLowerCase();
+    let rows;
+    if (q) {
+      rows = await ready.db.prepare(`
+        SELECT * FROM narrative_evidence_v1227
+        WHERE lower(address)=? OR lower(symbol)=?
+        ORDER BY updated_at DESC LIMIT 5
+      `).bind(normalize(q),q).all();
+    } else {
+      rows = await ready.db.prepare(`
+        SELECT * FROM narrative_evidence_v1227
+        ORDER BY updated_at DESC LIMIT 10
+      `).all();
+    }
+    const data = rows?.results || [];
+    const lines = [
+      "🧩 <b>Narrative Evidence Audit — V1227</b>",
+      "",
+      `Records shown: <b>${data.length}</b>`,
+      ""
+    ];
+    if (!data.length) {
+      lines.push("No V1227 narrative evidence recorded yet.");
+    } else {
+      for (const row of data) {
+        const e = narrativeRowToEvidenceV1227(row,false);
+        lines.push(
+          `• <b>${escapeHtml(row?.symbol || "UNKNOWN")}</b> · ${escapeHtml(e?.narrative || "UNVERIFIED")} · <b>${escapeHtml(e?.evidenceLevel || "UNVERIFIED")}</b>`,
+          `  confidence ${safeNumber(e?.confidence)}/100 · verified ${e?.verified===true?"YES":"NO"} · requests ${safeNumber(e?.externalRequests)}${e?.websiteHost?` · ${escapeHtml(e.websiteHost)}`:""}`
+        );
+      }
+    }
+    lines.push(
+      "",
+      "<i>Read-only. Narrative evidence never changes Opportunity, Momentum, Confidence, Risk or Telegram qualification.</i>"
+    );
+    return lines.join("\n");
+  } catch (error) {
+    return `🧩 <b>Narrative Evidence Audit — V1227</b>\n\nStatus: <b>READ_FAILED</b>\n<code>${escapeHtml(errorString(error))}</code>`;
+  }
+}
+
+
+/* =========================================================
    V1175 VERIFIED CUSTOMER CALL BASELINE + PRODUCTION RENDERER
    Presentation/persistence only. Zero external requests and no qualification,
    scoring, risk, threshold or provider-budget changes.
@@ -16804,7 +17310,7 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
     ? "Re-Alert"
     : String(alertClass?.title || "Qualified Call").replace(/\s+Alert$/i, "");
   const customerLaunchV1178 = customerLaunchAgeV1178(candidate, capturedAt);
-  const customerNarrativeLabelV1178 = customerNarrativeV1178(candidate);
+  const customerNarrativeLabelV1178 = customerNarrativeV1227(candidate);
 
   return {
     version:"V1175",
@@ -16812,16 +17318,22 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
     address:normalize(candidate?.address),
     symbol:candidate?.symbol || null,
     callType,
-    customerEnrichmentVersion:"V1178",
+    customerEnrichmentVersion:"V1227",
     launchAgeVerifiedV1178:customerLaunchV1178.verified,
     launchAgeDisplayV1178:customerLaunchV1178.display,
     verifiedLaunchTimestampV1178:customerLaunchV1178.launchedAt,
     launchAgeEvidenceSourceV1178:customerLaunchV1178.source,
     narrativeTagsV1178:customerNarrativeLabelV1178.labels,
     narrativeDisplayV1178:customerNarrativeLabelV1178.display,
-    narrativeVerifiedV1178:false,
+    narrativeVerifiedV1178:customerNarrativeLabelV1178.verified === true,
     narrativeEvidenceLevelV1178:customerNarrativeLabelV1178.evidenceLevel,
     narrativeSourceV1178:customerNarrativeLabelV1178.source,
+    narrativeConfidenceV1227:customerNarrativeLabelV1178.confidence ?? 0,
+    narrativeExternalRequestsV1227:customerNarrativeLabelV1178.externalRequests ?? 0,
+    narrativeWebsiteHostV1227:customerNarrativeLabelV1178.websiteHost || null,
+    narrativeSocialTypesV1227:customerNarrativeLabelV1178.socialTypes || [],
+    narrativeIdentityMatchV1227:customerNarrativeLabelV1178.identityMatch || null,
+    narrativeCacheHitV1227:customerNarrativeLabelV1178.cacheHit === true,
     firstCall:!(previousTimestamp > 0),
     reAlert:previousTimestamp > 0,
     priorSuccessfulAlertAt:previousTimestamp > 0 ? previousTimestamp : null,
@@ -16899,7 +17411,7 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
     `🎯 Opportunity <b>${safeNumber(candidate?.opportunity?.score)}/100</b> · Confidence <b>${safeNumber(candidate?.confidence?.score)}/100</b>`,
     `🚀 Momentum <b>${safeNumber(candidate?.momentum?.score)}/100 ${escapeHtml(candidate?.momentum?.label || "")}</b> · Risk <b>${escapeHtml(riskText)}</b>`,
     `🕒 Launch age: <b>${escapeHtml(call?.launchAgeDisplayV1178 || "UNVERIFIED")}</b>${call?.launchAgeVerifiedV1178===true?" · VERIFIED":""}`,
-    `🧩 Narrative: <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${call?.narrativeEvidenceLevelV1178==="INDICATIVE_NAME_ONLY"?" · indicative":""}`,
+    `🧩 Narrative: <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${narrativeStatusSuffixV1227(call)}`,
     `💵 Entry <b>${escapeHtml(entryText)}</b> · ${entryProof}`,
     `💰 MC <b>${market?.verified===true?money(market.marketCap):"UNVERIFIED"}</b> · Liquidity <b>${market?.verified===true?money(market.liquidityUsd):"UNVERIFIED"}</b>`,
     `📊 24h Vol <b>${market?.verified===true?money(market?.volume?.h24):"UNVERIFIED"}</b>`,
@@ -16921,7 +17433,7 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
     `🪙 <b>${escapeHtml(rawName)} (${escapeHtml(rawSymbol)})</b>`,
     `<code>${escapeHtml(candidate?.address || "UNVERIFIED")}</code>`,
     `🎯 Opp <b>${safeNumber(candidate?.opportunity?.score)}</b> · Conf <b>${safeNumber(candidate?.confidence?.score)}</b> · Mom <b>${safeNumber(candidate?.momentum?.score)}</b> · Risk <b>${candidate?.risk?.verified===true?safeNumber(candidate?.risk?.score):"UNVERIFIED"}</b>`,
-    `🕒 Age <b>${escapeHtml(call?.launchAgeDisplayV1178 || "UNVERIFIED")}</b> · Narrative <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${call?.narrativeEvidenceLevelV1178==="INDICATIVE_NAME_ONLY"?" (indicative)":""}`,
+    `🕒 Age <b>${escapeHtml(call?.launchAgeDisplayV1178 || "UNVERIFIED")}</b> · Narrative <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${narrativeStatusSuffixV1227(call)}`,
     `💵 Entry <b>${escapeHtml(entryText)}</b> · ${entryProof}`,
     `💰 MC <b>${market?.verified===true?money(market.marketCap):"UNVERIFIED"}</b> · Liq <b>${market?.verified===true?money(market.liquidityUsd):"UNVERIFIED"}</b>`,
     `🧭 ${escapeHtml(call?.triggerReason || "Qualified score + verified safety gates")}`,
@@ -70427,7 +70939,26 @@ async function marketData(
       imageUrl:
         pair?.info?.imageUrl ||
         pair?.info?.header ||
-        null
+        null,
+
+      // V1227: preserve only metadata already returned by the existing
+      // exact-contract DexScreener request. This adds zero provider requests.
+      projectLinksV1227: {
+        source: "DEXSCREENER_EXACT_CONTRACT_PAIR_INFO_V1227",
+        exactContractMatched: true,
+        websites: Array.isArray(pair?.info?.websites)
+          ? pair.info.websites.slice(0, 4).map(row => ({
+              label: String(row?.label || "").slice(0, 80),
+              url: String(row?.url || "").slice(0, 500)
+            })).filter(row => row.url)
+          : [],
+        socials: Array.isArray(pair?.info?.socials)
+          ? pair.info.socials.slice(0, 6).map(row => ({
+              type: String(row?.type || "").slice(0, 40).toLowerCase(),
+              url: String(row?.url || "").slice(0, 500)
+            })).filter(row => row.url)
+          : []
+      }
     };
 
     registerDexSuccessV147(
@@ -125635,6 +126166,13 @@ for (
       continue;
     }
 
+    // V1227: narrative enrichment runs only for a call that has already passed
+    // the existing alert gates/budget. It cannot make an unqualified token qualify.
+    // D1 cache is checked first; at most one bounded first-party website request
+    // is made from exact-contract project metadata.
+    candidate.narrativeEvidenceV1227 =
+      await enrichNarrativeEvidenceV1227(env, candidate);
+
     const customerCallBaselinePreSendV1175 =
       customerCallBaselineV1175(candidate, previous, Date.now());
 
@@ -125846,6 +126384,14 @@ for (
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.exactPoolId || null,
         customerNarrativeEvidenceV1178:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeEvidenceLevelV1178 || "UNVERIFIED",
+        customerNarrativeVerifiedV1227:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeVerifiedV1178 === true,
+        customerNarrativeConfidenceV1227:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeConfidenceV1227 ?? 0,
+        customerNarrativeExternalRequestsV1227:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeExternalRequestsV1227 ?? 0,
+        customerNarrativeCacheHitV1227:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeCacheHitV1227 === true,
         customerLaunchAgeVerifiedV1178:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.launchAgeVerifiedV1178 === true
       };
@@ -179678,6 +180224,7 @@ function telegramHelpV271() {
     "<code>/ownerprotection</code> — V1045 prove owner NEVER_REMOVE guards without Telegram action",
     "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
     "<code>/freequeue</code> — V1226 durable delayed Free-call queue + per-call delivery provenance (read-only)",
+    "<code>/narrativeaudit [SYMBOL|0xTOKEN]</code> — V1227 narrative evidence provenance/cache (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
@@ -181058,6 +181605,25 @@ async function telegramCommandReplyV271(
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
+  if (parsed.command === "/narrativeaudit") {
+    const replyV1227 = await narrativeAuditTelegramV1227(env, parsed.args?.[0] || null);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1227 = await sendTelegram(env, replyV1227, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1227?.success === true;
+      diagnosticV273.telegramStatus = sentV1227?.status || null;
+      diagnosticV273.telegramMode = sentV1227?.mode || null;
+      diagnosticV273.telegramError = sentV1227?.error || null;
+      diagnosticV273.result = sentV1227?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+      diagnosticV273.narrativeAuditV1227 = {
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0
+      };
+    }
+    return {success:sentV1227?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
   if (parsed.command === "/freequeue") {
     const replyV1226 = await freeQueueTelegramV1226(env);
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -199580,7 +200146,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
   "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel",
-  "/callquality","/calllab","/callresearch","/capturestatus","/freequeue","/stripereconcile-preview",
+  "/callquality","/calllab","/callresearch","/capturestatus","/freequeue","/narrativeaudit","/stripereconcile-preview",
 
   // V1210: legacy/internal diagnostic and operational inspection routes must
   // pass the same closed-by-default WebDiag authorization before their
@@ -199845,6 +200411,7 @@ function webDiagHomeHtmlV1190(auth){
     ]],
     ["Delivery & Subscription",[
       ["/freequeue","Free Delayed Queue","Pending, due, sent, failed and dropped Free-call deliveries"],
+      ["/narrativeaudit","Narrative Evidence","Verified/supported narrative provenance and cache status"],
       ["/stripereconcile-preview","Stripe Reconcile Preview","Read-only Stripe-authoritative subscription reconciliation preview"]
     ]],
     ["Performance",[
@@ -200160,6 +200727,7 @@ function webDiagRouteForCommandV1179(command){
     "/callresearch":"/callresearch",
     "/capturestatus":"/capturestatus",
     "/freequeue":"/freequeue",
+    "/narrativeaudit":"/narrativeaudit",
     "/stripereconcile":"/stripereconcile-preview"
   };
   return map[c]||null;
@@ -202334,6 +202902,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         return webDiagDownloadResponseV1184(outcomeWebV1203,"chainvanta-outcome-intelligence.txt");
       }
       return webDiagHtmlResponseV1184("ChainVanta Outcome Intelligence",outcomeWebV1203,url);
+    }
+
+    // V1227: protected Narrative Evidence report. Read-only D1 provenance.
+    if (path === "/narrativeaudit") {
+      const narrativeWebV1227 = await narrativeAuditTelegramV1227(env, url.searchParams.get("q") || null);
+      if (String(url.searchParams.get("download")||"") === "1") {
+        return webDiagDownloadResponseV1184(narrativeWebV1227,"chainvanta-narrative-evidence.txt");
+      }
+      return webDiagHtmlResponseV1184("ChainVanta Narrative Evidence",narrativeWebV1227,url);
     }
 
     // V1226: Free queue web report reads the isolated D1 queue/provenance.
