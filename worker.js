@@ -1,3 +1,4 @@
+// V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
 // V1228 — Customer Call Staging: distinguish Early Discovery from Verified Call using exact-pool entry proof; presentation/telemetry only, no scoring or provider-budget changes.
 // V1227 — Narrative Evidence Engine: free-first contract-bound project evidence, first-party website verification, D1 provenance/cache; no scoring changes.
@@ -10038,7 +10039,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1229";
+const VERSION = "V1230";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -17362,6 +17363,28 @@ function customerEntryEvidenceSnapshotV1229(candidate) {
   };
 }
 
+
+function persistImmediateCustomerEntryVerificationV1230(state, candidate, result) {
+  if (!result || typeof result !== "object") return result;
+
+  result.completedAt = result.completedAt || Date.now();
+
+  if (candidate && typeof candidate === "object") {
+    candidate.immediateCustomerEntryVerificationV1229 = {...result};
+  }
+
+  if (state && typeof state === "object") {
+    state.immediateCustomerEntryVerificationV1229 = {
+      ...result,
+      candidateSnapshotOmitted:true,
+      recordedAt:new Date().toISOString(),
+      provenancePersistenceVersion:"V1230"
+    };
+  }
+
+  return result;
+}
+
 async function immediateCustomerEntryVerificationV1229(
   env,
   state,
@@ -17404,13 +17427,22 @@ async function immediateCustomerEntryVerificationV1229(
   if (!isAddress(token)) {
     result.status = "INVALID_TOKEN_V1229";
     result.completedAt = Date.now();
-    return result;
+    return persistImmediateCustomerEntryVerificationV1230(
+      state,
+      candidate,
+      result
+    );
   }
 
   if (before.priceVerified === true) {
     result.after = before;
     result.completedAt = Date.now();
-    return result;
+    result.status = "ENTRY_ALREADY_VERIFIED_V1230";
+    return persistImmediateCustomerEntryVerificationV1230(
+      state,
+      candidate,
+      result
+    );
   }
 
   /*
@@ -17556,14 +17588,11 @@ async function immediateCustomerEntryVerificationV1229(
 
   result.completedAt = Date.now();
 
-  candidate.immediateCustomerEntryVerificationV1229 = {...result};
-  state.immediateCustomerEntryVerificationV1229 = {
-    ...result,
-    candidateSnapshotOmitted:true,
-    recordedAt:new Date().toISOString()
-  };
-
-  return result;
+  return persistImmediateCustomerEntryVerificationV1230(
+    state,
+    candidate,
+    result
+  );
 }
 
 function verifiedStageTransitionV1229(candidate, previousAlert) {
@@ -17707,7 +17736,9 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
             promotedFromUnverified:candidate.immediateCustomerEntryVerificationV1229.promotedFromUnverified === true,
             verifiedNow:candidate.immediateCustomerEntryVerificationV1229.verifiedNow === true,
             exactPoolId:candidate.immediateCustomerEntryVerificationV1229?.after?.poolId || null,
-            exactUsdSamples:safeNumber(candidate.immediateCustomerEntryVerificationV1229?.after?.exactUsdSamples)
+            exactUsdSamples:safeNumber(candidate.immediateCustomerEntryVerificationV1229?.after?.exactUsdSamples),
+            provenancePersistenceVersion:
+              candidate.immediateCustomerEntryVerificationV1229?.provenancePersistenceVersion || "V1230"
           }
         : null,
     launchAgeVerifiedV1178:customerLaunchV1178.verified,
@@ -180656,7 +180687,7 @@ function telegramHelpV271() {
     "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
     "<code>/freequeue</code> — V1226 durable delayed Free-call queue + per-call delivery provenance (read-only)",
     "<code>/narrativeaudit [SYMBOL|0xTOKEN]</code> — V1227 narrative evidence provenance/cache (read-only)",
-    "<code>/entryverify</code> — V1229 last immediate exact-pool/entry verification result (read-only)",
+    "<code>/entryverify</code> — V1230 last exact-pool/entry verification provenance, including already-verified outcomes (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
@@ -182042,7 +182073,7 @@ async function telegramCommandReplyV271(
     const rowV1229 = loadedV1229?.state?.immediateCustomerEntryVerificationV1229 || null;
     const replyV1229 = rowV1229
       ? [
-          "⚡ <b>Immediate Entry Verification — V1229</b>",
+          "⚡ <b>Immediate Entry Verification — V1230</b>",
           "",
           `Token: <b>${escapeHtml(rowV1229?.symbol || "UNKNOWN")}</b>`,
           `Address: <code>${escapeHtml(rowV1229?.tokenAddress || "UNVERIFIED")}</code>`,
@@ -182055,9 +182086,9 @@ async function telegramCommandReplyV271(
           `Exact-USD samples: <b>${safeNumber(rowV1229?.after?.exactUsdSamples)}</b>`,
           `Same-run promotion: <b>${rowV1229?.promotedFromUnverified===true?"YES":"NO"}</b>`,
           "",
-          "<i>Read-only. Uses the existing V4/V888/V179/V438 proof stack and existing request ceilings.</i>"
+          "<i>Read-only. V1230 persists every verification outcome, including already-verified entries. Uses the existing V4/V888/V179/V438 proof stack and existing request ceilings.</i>"
         ].join("\n")
-      : "⚡ <b>Immediate Entry Verification — V1229</b>\n\nNo V1229 customer-entry verification attempt recorded yet.";
+      : "⚡ <b>Immediate Entry Verification — V1230</b>\n\nNo customer-entry verification attempt recorded since V1230 deployment yet.";
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV1229 = await sendTelegram(env, replyV1229, null, null);
     if (diagnosticV273) {
