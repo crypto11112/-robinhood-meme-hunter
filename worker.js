@@ -1,3 +1,5 @@
+// V1223 — Professional Call Research Lab: microstructure-to-7d outcomes, data-quality gating, fast-spike/persistence classification, holdout-safe research plan.
+// V1222 — Call Quality Laboratory: read-only feature coverage, quartiles, timing and offline single-factor simulations.
 // V1221 — Call Quality Intelligence: read-only frozen-entry winner/failure comparison and evidence-backed tuning candidates.
 // V1220 — final public-surface hardening: root is static and never exposes/executes internal health diagnostics.
 // V1219 — Admin-only Stripe subscription reconciliation: authoritative dry-run + explicit apply.
@@ -10030,7 +10032,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1221";
+const VERSION = "V1223";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -145504,6 +145506,432 @@ function callQualityHorizonLineV1221(label,records,key) {
   return `• ${label}: n=${x.n} | median ${telegramMultipleV271(x.median)} | >1x ${x.positive}/${x.n} | ≥2x ${x.hit2}/${x.n}`;
 }
 
+
+function callLabQuantileV1222(values, q) {
+  const rows=(Array.isArray(values)?values:[])
+    .map(v=>Number(v))
+    .filter(v=>Number.isFinite(v))
+    .sort((a,b)=>a-b);
+  if(!rows.length) return null;
+  if(rows.length===1) return rows[0];
+  const pos=(rows.length-1)*Math.min(1,Math.max(0,Number(q)));
+  const lo=Math.floor(pos), hi=Math.ceil(pos);
+  if(lo===hi) return rows[lo];
+  const w=pos-lo;
+  return rows[lo]*(1-w)+rows[hi]*w;
+}
+
+function callLabMetricValuesV1222(records, extractor) {
+  const out=[];
+  for(const r of Array.isArray(records)?records:[]) {
+    const n=Number(extractor(r));
+    if(Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
+
+function callLabFeatureSummaryV1222(records,label,extractor,kind="number") {
+  const values=callLabMetricValuesV1222(records,extractor);
+  const n=values.length;
+  const coverage=records.length ? (n/records.length)*100 : 0;
+  if(!n) return {label,n,coverage,median:null,q1:null,q3:null,iqr:null,usable:false,kind};
+  const median=callQualityMedianV1221(values);
+  const q1=callLabQuantileV1222(values,0.25);
+  const q3=callLabQuantileV1222(values,0.75);
+  const iqr=Number.isFinite(q1)&&Number.isFinite(q3)?q3-q1:null;
+  const base=Math.max(Math.abs(median||0),1e-9);
+  const spreadRatio=Number.isFinite(iqr)?Math.abs(iqr)/base:0;
+  return {
+    label,n,coverage,median,q1,q3,iqr,spreadRatio,
+    usable:coverage>=70 && n>=20 && (Math.abs(iqr||0)>1e-9 || Math.abs(median||0)>1e-9),
+    kind
+  };
+}
+
+function callLabFormatFeatureV1222(row) {
+  if(!row || row.n===0) return `• ${row?.label||"Metric"}: coverage 0% · NO VERIFIED DATA`;
+  const f=v=>callQualityFmtV1221(v,row.kind);
+  return `• ${row.label}: coverage ${row.coverage.toFixed(1)}% (n=${row.n}) · Q1 ${f(row.q1)} · median ${f(row.median)} · Q3 ${f(row.q3)} · ${row.usable?"USABLE":"LOW INFORMATION"}`;
+}
+
+function callLabExistingOutcomeV1222(record,key) {
+  if(key==="m1"){
+    const one=record?.oneMinuteOutcomeV1096?.outcome;
+    if(one?.verified===true && one?.frozen===true) return one;
+  }
+  const growth=record?.growthOutcomesV620?.outcomes?.[key]?.price;
+  if(growth?.verified===true && growth?.frozen===true) return growth;
+  const fixed=record?.fixedHorizonOutcomesV317?.outcomes?.[key];
+  if(fixed?.verified===true && fixed?.frozen===true) return fixed;
+  return null;
+}
+
+function callLabOutcomeMultipleV1222(outcome) {
+  const direct=Number(outcome?.multipleByMarketCap);
+  if(Number.isFinite(direct)&&direct>0) return direct;
+  const growthPct=Number(outcome?.growthPct ?? outcome?.priceGrowthPct);
+  if(Number.isFinite(growthPct)) return 1+growthPct/100;
+  return null;
+}
+
+function callLabHorizonV1222(records,label,key) {
+  const values=[];
+  for(const r of Array.isArray(records)?records:[]) {
+    const x=callLabOutcomeMultipleV1222(callLabExistingOutcomeV1222(r,key));
+    if(Number.isFinite(x)&&x>0) values.push(x);
+  }
+  if(!values.length) return `• ${label}: n=0 — not enough frozen verified outcomes`;
+  const median=callQualityMedianV1221(values);
+  const positive=values.filter(x=>x>1.000001).length;
+  const doubled=values.filter(x=>x>=2).length;
+  return `• ${label}: n=${values.length} · median ${telegramMultipleV271(median)} · >1x ${positive}/${values.length} · ≥2x ${doubled}/${values.length}`;
+}
+
+function callLabMilestoneStatsV1222(records,threshold) {
+  const elapsed=[];
+  for(const r of Array.isArray(records)?records:[]) {
+    seedHistoricalPerformanceMilestonesV308(r);
+    const row=r?.performanceMilestonesV308?.[String(threshold)];
+    const ms=Number(row?.elapsedMs);
+    if(Number.isFinite(ms)&&ms>=0) elapsed.push(ms);
+  }
+  if(!elapsed.length) return null;
+  return {
+    n:elapsed.length,
+    median:callLabQuantileV1222(elapsed,0.5),
+    q1:callLabQuantileV1222(elapsed,0.25),
+    q3:callLabQuantileV1222(elapsed,0.75)
+  };
+}
+
+function callLabTimeV1222(ms) {
+  const n=Number(ms);
+  if(!Number.isFinite(n)||n<0) return "UNVERIFIED";
+  return compactCallAgeV307(n);
+}
+
+function callLabSingleFactorV1222(records,label,extractor,direction="higher") {
+  const rows=[];
+  for(const r of Array.isArray(records)?records:[]) {
+    const value=Number(extractor(r));
+    const ath=Number(r?.athMultipleByMarketCap);
+    if(Number.isFinite(value)&&Number.isFinite(ath)&&ath>0) rows.push({value,ath});
+  }
+  if(rows.length<20) return null;
+  const threshold=callLabMedianV1222(rows.map(x=>x.value));
+  if(!Number.isFinite(threshold)) return null;
+  const kept=rows.filter(x=>direction==="lower" ? x.value<=threshold : x.value>=threshold);
+  if(kept.length<10) return null;
+  const base2=rows.filter(x=>x.ath>=2).length/rows.length;
+  const kept2=kept.filter(x=>x.ath>=2).length/kept.length;
+  const baseFail=rows.filter(x=>x.ath<=1.000001).length/rows.length;
+  const keptFail=kept.filter(x=>x.ath<=1.000001).length/kept.length;
+  return {
+    label,direction,threshold,
+    total:rows.length,kept:kept.length,retention:kept.length/rows.length,
+    base2,kept2,uplift2:kept2-base2,
+    baseFail,keptFail,failDelta:keptFail-baseFail
+  };
+}
+
+function callLabMedianV1222(values) {
+  return callQualityMedianV1221(values);
+}
+
+function callLabSimulationLineV1222(row,kind="number") {
+  if(!row) return null;
+  const op=row.direction==="lower"?"≤":"≥";
+  const threshold=callQualityFmtV1221(row.threshold,kind);
+  const pct=v=>`${(v*100).toFixed(1)}%`;
+  const uplift=`${row.uplift2>=0?"+":""}${(row.uplift2*100).toFixed(1)}pp`;
+  const fail=`${row.failDelta>=0?"+":""}${(row.failDelta*100).toFixed(1)}pp`;
+  return `• ${row.label} ${op} ${threshold}: retain ${row.kept}/${row.total} (${pct(row.retention)}) · 2x rate ${pct(row.base2)} → ${pct(row.kept2)} (${uplift}) · failure rate ${pct(row.baseFail)} → ${pct(row.keptFail)} (${fail})`;
+}
+
+
+function callLabProOutcomeByKeyV1223(record,key) {
+  // Reuse the strongest frozen/verified sources already persisted by ChainVanta.
+  const direct=callLabExistingOutcomeV1222(record,key);
+  if(direct) return direct;
+
+  const oi=record?.outcomeIntelligenceV1192?.outcomes?.[key]
+    || record?.forwardOutcomeIntelligenceV1192?.outcomes?.[key]
+    || record?.forwardOutcomesV1192?.outcomes?.[key]
+    || null;
+  if(oi?.verified===true && oi?.frozen===true) return oi;
+  return null;
+}
+
+function callLabProHorizonStatsV1223(records,key) {
+  const values=[];
+  for(const r of Array.isArray(records)?records:[]) {
+    const out=callLabProOutcomeByKeyV1223(r,key);
+    const x=callLabOutcomeMultipleV1222(out);
+    if(Number.isFinite(x)&&x>0) values.push(x);
+  }
+  if(!values.length) return null;
+  return {
+    n:values.length,
+    median:callLabMedianV1222(values),
+    q1:callLabQuantileV1222(values,0.25),
+    q3:callLabQuantileV1222(values,0.75),
+    positive:values.filter(x=>x>1.000001).length,
+    doubled:values.filter(x=>x>=2).length
+  };
+}
+
+function callLabProHorizonLineV1223(records,label,key) {
+  const x=callLabProHorizonStatsV1223(records,key);
+  if(!x) return `• ${label}: n=0 · NOT CAPTURED / UNVERIFIED`;
+  return `• ${label}: n=${x.n} · Q1 ${telegramMultipleV271(x.q1)} · median ${telegramMultipleV271(x.median)} · Q3 ${telegramMultipleV271(x.q3)} · >1x ${x.positive}/${x.n} · ≥2x ${x.doubled}/${x.n}`;
+}
+
+function callLabProDataQualityV1223(records, featureRows, horizonStats) {
+  const featureCoverage=featureRows.length
+    ? featureRows.reduce((sum,x)=>sum+Math.min(100,Number(x?.coverage||0)),0)/featureRows.length
+    : 0;
+  const horizonCoverage=horizonStats.length
+    ? horizonStats.reduce((sum,x)=>sum+(x ? Math.min(100,(x.n/Math.max(1,records.length))*100) : 0),0)/horizonStats.length
+    : 0;
+  const sampleScore=Math.min(100,(records.length/100)*100);
+  const score=(featureCoverage*0.4)+(horizonCoverage*0.4)+(sampleScore*0.2);
+  let band="LOW";
+  if(score>=80) band="STRONG";
+  else if(score>=60) band="MODERATE";
+  else if(score>=40) band="LIMITED";
+  return {score,band,featureCoverage,horizonCoverage,sampleScore};
+}
+
+function callLabProClassifyV1223(records) {
+  let fastSpike=0, sustained=0, spikeThenFade=0, no2x=0, unknown=0;
+  for(const r of Array.isArray(records)?records:[]) {
+    const ath=Number(r?.athMultipleByMarketCap);
+    if(!Number.isFinite(ath)||ath<=0){ unknown++; continue; }
+    if(ath<2){ no2x++; continue; }
+
+    const h5=callLabOutcomeMultipleV1222(callLabProOutcomeByKeyV1223(r,"m5"));
+    const h30=callLabOutcomeMultipleV1222(callLabProOutcomeByKeyV1223(r,"m30"));
+    const h1=callLabOutcomeMultipleV1222(callLabProOutcomeByKeyV1223(r,"h1"));
+    const h6=callLabOutcomeMultipleV1222(callLabProOutcomeByKeyV1223(r,"h6"));
+
+    const early2=[h5,h30,h1].some(x=>Number.isFinite(x)&&x>=2);
+    const held=[h1,h6].some(x=>Number.isFinite(x)&&x>=1.25);
+
+    if(early2 && held) sustained++;
+    else if(early2 && !held) spikeThenFade++;
+    else if(!early2) fastSpike++;
+    else unknown++;
+  }
+  return {fastSpike,sustained,spikeThenFade,no2x,unknown};
+}
+
+function callLabProRecommendationV1223(quality,features,horizons,classes) {
+  const lines=[];
+  if(quality.band==="LOW" || quality.band==="LIMITED") {
+    lines.push("• <b>Primary action:</b> improve capture coverage before changing production thresholds.");
+  } else {
+    lines.push("• <b>Primary action:</b> begin offline simulations, but validate every candidate on newer holdout calls.");
+  }
+
+  const lowInfo=features.filter(x=>!x.usable).map(x=>x.label);
+  if(lowInfo.length) {
+    lines.push(`• Low-information entry features: <b>${escapeHtml(lowInfo.slice(0,6).join(", "))}</b>${lowInfo.length>6?" …":""}. Improve evidence quality before giving them more scoring weight.`);
+  }
+
+  const micro=horizons.slice(0,6).filter(Boolean);
+  const microN=micro.reduce((sum,x)=>sum+x.n,0);
+  if(microN<Math.max(20,Math.floor(quality.sampleScore/5))) {
+    lines.push("• 5s/10s/30s/1m/2m/5m coverage is still thin. Keep these as diagnostics; do not make them hard gates yet.");
+  } else {
+    lines.push("• Microstructure coverage is becoming usable. Test early-flow features offline before considering an entry-timing gate.");
+  }
+
+  if(classes.spikeThenFade>classes.sustained) {
+    lines.push("• More observed 2x calls appear to spike then fade than sustain. Prioritise entry timing and fast-exit intelligence before tightening long-horizon quality filters.");
+  } else if(classes.sustained>0) {
+    lines.push("• A sustained-winner cohort exists. Compare its frozen entry evidence separately from fast-spike winners before changing global thresholds.");
+  }
+
+  lines.push("• Never promote a rule from one retrospective sample. Use older calls for discovery and newer calls as a holdout set.");
+  lines.push("• Promote one production change at a time only when hit-rate improvement, failure-rate reduction and retained call volume all remain acceptable.");
+  return lines;
+}
+
+function professionalCallResearchLabMessageV1223(state) {
+  const all=callPerformanceEntriesV271(state);
+  const frozen=all.filter(record=>{
+    const snap=record?.entrySignalSnapshotV309;
+    const ath=Number(record?.athMultipleByMarketCap);
+    return snap?.frozenAtSuccessfulCall===true &&
+      snap?.laterEvidenceBackfillAllowed===false &&
+      Number.isFinite(ath)&&ath>0;
+  });
+  const snap=r=>r?.entrySignalSnapshotV309||{};
+
+  const features=[
+    callLabFeatureSummaryV1222(frozen,"Opportunity",r=>snap(r)?.opportunity?.score,"score"),
+    callLabFeatureSummaryV1222(frozen,"Momentum",r=>snap(r)?.momentum?.score,"score"),
+    callLabFeatureSummaryV1222(frozen,"Confidence",r=>snap(r)?.confidence?.score,"score"),
+    callLabFeatureSummaryV1222(frozen,"Market Quality",r=>snap(r)?.marketQuality?.verified===true?snap(r)?.marketQuality?.score:null,"score"),
+    callLabFeatureSummaryV1222(frozen,"Rug Risk",r=>snap(r)?.rugRisk?.verified===true?snap(r)?.rugRisk?.score:null,"score"),
+    callLabFeatureSummaryV1222(frozen,"Liquidity",r=>snap(r)?.market?.liquidityUsd,"usd"),
+    callLabFeatureSummaryV1222(frozen,"24h volume",r=>snap(r)?.market?.volume24hUsd,"usd"),
+    callLabFeatureSummaryV1222(frozen,"Holder count",r=>snap(r)?.holders?.holderCountVerified===true?snap(r)?.holders?.holderCount:null,"count"),
+    callLabFeatureSummaryV1222(frozen,"Top holder",r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.topHolderPct:null,"pct"),
+    callLabFeatureSummaryV1222(frozen,"Top 10",r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.top10Pct:null,"pct"),
+    callLabFeatureSummaryV1222(frozen,"Holder growth/hr",r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.holderGrowth,"holderVelocity"),"number"),
+    callLabFeatureSummaryV1222(frozen,"Liquidity growth",r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.liquidityGrowth,"liquidityPct"),"pct"),
+    callLabFeatureSummaryV1222(frozen,"Volume acceleration",r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.volumeAcceleration,"volumePct"),"pct"),
+    callLabFeatureSummaryV1222(frozen,"Transaction acceleration",r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.transactionAcceleration,"txPct"),"pct")
+  ];
+
+  const horizonDefs=[
+    ["5s","s5"],["10s","s10"],["30s","s30"],
+    ["1m","m1"],["2m","m2"],["5m","m5"],["10m","m10"],["15m","m15"],["30m","m30"],
+    ["1h","h1"],["2h","h2"],["4h","h4"],["6h","h6"],["12h","h12"],["24h","h24"],
+    ["48h","h48"],["7d","d7"]
+  ];
+  const horizonStats=horizonDefs.map(([,key])=>callLabProHorizonStatsV1223(frozen,key));
+  const quality=callLabProDataQualityV1223(frozen,features,horizonStats);
+  const classes=callLabProClassifyV1223(frozen);
+
+  const recommendations=callLabProRecommendationV1223(
+    quality,features,horizonStats,classes
+  );
+
+  return [
+    `🧠 <b>Professional Call Research Lab — ${VERSION}</b>`,
+    "",
+    "<b>Objective:</b> improve call quality using frozen entry evidence, outcome timing and holdout-safe research — without tuning production from hindsight.",
+    "",
+    "<b>📊 Research data quality</b>",
+    `Frozen comparable calls: <b>${frozen.length}</b> / ${all.length}`,
+    `Research readiness: <b>${quality.band}</b> (${quality.score.toFixed(1)}/100)`,
+    `Entry-feature coverage: <b>${quality.featureCoverage.toFixed(1)}%</b>`,
+    `Outcome-horizon coverage: <b>${quality.horizonCoverage.toFixed(1)}%</b>`,
+    "",
+    "<b>🔬 Entry feature quality</b>",
+    ...features.map(callLabFormatFeatureV1222),
+    "",
+    "<b>⚡ Microstructure — diagnostic only</b>",
+    ...horizonDefs.slice(0,6).map(([label,key])=>callLabProHorizonLineV1223(frozen,label,key)),
+    "",
+    "<b>📈 Development horizons</b>",
+    ...horizonDefs.slice(6,9).map(([label,key])=>callLabProHorizonLineV1223(frozen,label,key)),
+    "",
+    "<b>🧱 Persistence / commercial horizons</b>",
+    ...horizonDefs.slice(9).map(([label,key])=>callLabProHorizonLineV1223(frozen,label,key)),
+    "",
+    "<b>🚦 2x call behaviour</b>",
+    `Sustained winners: <b>${classes.sustained}</b>`,
+    `Spike-then-fade winners: <b>${classes.spikeThenFade}</b>`,
+    `2x ATH without captured early 2x: <b>${classes.fastSpike}</b>`,
+    `Never reached 2x: <b>${classes.no2x}</b>`,
+    `Unclassified: <b>${classes.unknown}</b>`,
+    "",
+    "<b>🎯 Professional next actions</b>",
+    ...recommendations,
+    "",
+    "<b>Research protocol</b>",
+    "1. Discovery set: older frozen calls identify candidate rules.",
+    "2. Holdout set: newer untouched calls validate those rules.",
+    "3. Require adequate evidence coverage and retained call volume.",
+    "4. Change one production rule at a time.",
+    "5. Measure 5m/30m/1h/6h/24h plus ATH after every change.",
+    "6. Roll back any change that only improves retrospective results.",
+    "",
+    "⚠️ <b>READ-ONLY RESEARCH</b> — no scanner score, threshold, provider budget, qualification rule, Telegram route or production alert setting is changed.",
+    "<i>Zero provider/RPC requests and zero state writes.</i>"
+  ].join("\n");
+}
+
+function callQualityLaboratoryMessageV1222(state) {
+  const all=callPerformanceEntriesV271(state);
+  const frozen=all.filter(record=>{
+    const snap=record?.entrySignalSnapshotV309;
+    const ath=Number(record?.athMultipleByMarketCap);
+    return snap?.frozenAtSuccessfulCall===true &&
+      snap?.laterEvidenceBackfillAllowed===false &&
+      Number.isFinite(ath)&&ath>0;
+  });
+  const snap=r=>r?.entrySignalSnapshotV309||{};
+
+  const features=[
+    callLabFeatureSummaryV1222(frozen,"Opportunity",r=>snap(r)?.opportunity?.score,"score"),
+    callLabFeatureSummaryV1222(frozen,"Momentum",r=>snap(r)?.momentum?.score,"score"),
+    callLabFeatureSummaryV1222(frozen,"Confidence",r=>snap(r)?.confidence?.score,"score"),
+    callLabFeatureSummaryV1222(frozen,"Market Quality",r=>snap(r)?.marketQuality?.verified===true?snap(r)?.marketQuality?.score:null,"score"),
+    callLabFeatureSummaryV1222(frozen,"Rug Risk",r=>snap(r)?.rugRisk?.verified===true?snap(r)?.rugRisk?.score:null,"score"),
+    callLabFeatureSummaryV1222(frozen,"Liquidity",r=>snap(r)?.market?.liquidityUsd,"usd"),
+    callLabFeatureSummaryV1222(frozen,"24h volume",r=>snap(r)?.market?.volume24hUsd,"usd"),
+    callLabFeatureSummaryV1222(frozen,"Holder count",r=>snap(r)?.holders?.holderCountVerified===true?snap(r)?.holders?.holderCount:null,"count"),
+    callLabFeatureSummaryV1222(frozen,"Top holder",r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.topHolderPct:null,"pct"),
+    callLabFeatureSummaryV1222(frozen,"Top 10",r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.top10Pct:null,"pct")
+  ];
+
+  const simulations=[
+    [callLabSingleFactorV1222(frozen,"Opportunity",r=>snap(r)?.opportunity?.score,"higher"),"score"],
+    [callLabSingleFactorV1222(frozen,"Market Quality",r=>snap(r)?.marketQuality?.verified===true?snap(r)?.marketQuality?.score:null,"higher"),"score"],
+    [callLabSingleFactorV1222(frozen,"Rug Risk",r=>snap(r)?.rugRisk?.verified===true?snap(r)?.rugRisk?.score:null,"lower"),"score"],
+    [callLabSingleFactorV1222(frozen,"Liquidity",r=>snap(r)?.market?.liquidityUsd,"higher"),"usd"],
+    [callLabSingleFactorV1222(frozen,"Holder count",r=>snap(r)?.holders?.holderCountVerified===true?snap(r)?.holders?.holderCount:null,"lower"),"count"],
+    [callLabSingleFactorV1222(frozen,"Top 10",r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.top10Pct:null,"lower"),"pct"]
+  ].map(([row,kind])=>({row,kind}));
+
+  const ranked=simulations
+    .filter(x=>x.row)
+    .sort((a,b)=>b.row.uplift2-a.row.uplift2);
+
+  const m2=callLabMilestoneStatsV1222(frozen,2);
+  const m5=callLabMilestoneStatsV1222(frozen,5);
+  const horizonRows=[
+    ["1m","m1"],["5m","m5"],["15m","m15"],["30m","m30"],
+    ["1h","h1"],["6h","h6"],["12h","h12"],["24h","h24"]
+  ].map(([label,key])=>callLabHorizonV1222(frozen,label,key));
+
+  const lines=[
+    `🧬 <b>Call Quality Laboratory — ${VERSION}</b>`,
+    "",
+    "<b>Purpose:</b> measure what actually separates stronger calls from weaker calls before any production scoring change.",
+    "",
+    `<b>Dataset</b>`,
+    `Tracked calls: <b>${all.length}</b>`,
+    `Frozen comparable entries: <b>${frozen.length}</b>`,
+    `2x+ ATH: <b>${frozen.filter(r=>Number(r?.athMultipleByMarketCap)>=2).length}</b>`,
+    `5x+ ATH: <b>${frozen.filter(r=>Number(r?.athMultipleByMarketCap)>=5).length}</b>`,
+    "",
+    "<b>📏 Feature coverage & spread</b>",
+    ...features.map(callLabFormatFeatureV1222),
+    "",
+    "<b>⚡ Verified milestone timing</b>",
+    m2
+      ? `• 2x verified-by timing: n=${m2.n} · Q1 ${callLabTimeV1222(m2.q1)} · median ${callLabTimeV1222(m2.median)} · Q3 ${callLabTimeV1222(m2.q3)}`
+      : "• 2x verified-by timing: UNVERIFIED",
+    m5
+      ? `• 5x verified-by timing: n=${m5.n} · Q1 ${callLabTimeV1222(m5.q1)} · median ${callLabTimeV1222(m5.median)} · Q3 ${callLabTimeV1222(m5.q3)}`
+      : "• 5x verified-by timing: UNVERIFIED",
+    "<i>Milestones are verified-by times, not claimed exact crossing timestamps.</i>",
+    "",
+    "<b>⏱ Professional outcome horizons</b>",
+    ...horizonRows,
+    "",
+    "<b>🧪 Offline single-factor simulations</b>",
+    ...(ranked.length
+      ? ranked.map(x=>callLabSimulationLineV1222(x.row,x.kind))
+      : ["• Insufficient verified variation for a meaningful simulation."]),
+    "",
+    "<b>How to use this professionally</b>",
+    "• Short horizons (1m/5m/15m/30m) diagnose entry timing and fast spikes.",
+    "• 1h/6h/12h/24h diagnose persistence and whether calls hold value.",
+    "• V1192 Outcome Intelligence separately tracks 5s/10s/30s/2m/10m/2h/4h/48h/7d forward horizons; those are useful context, but they should not all become production thresholds.",
+    "• Promote a candidate rule only if it improves 2x hit rate, does not materially worsen failure rate, retains useful call volume, and then passes on newer holdout calls.",
+    "",
+    "⚠️ <b>READ-ONLY LAB</b> — no score, threshold, weight, qualification rule, provider routing, scanner budget or Telegram behavior is changed.",
+    "<i>Uses stored frozen evidence only. Zero provider/RPC requests and zero state writes.</i>"
+  ];
+  return lines.join("\n");
+}
+
 function callQualityIntelligenceMessageV1221(state) {
   const all=callPerformanceEntriesV271(state);
   const frozen=all.filter(record=>{
@@ -178574,6 +179002,8 @@ function telegramHelpV271() {
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
     "<code>/signallearn</code> — compare frozen entry measurements: failures vs 2x+ winners",
     "<code>/callquality</code> — V1221 winner/failure intelligence + evidence-backed tuning candidates (read-only)",
+    "<code>/calllab</code> — V1222 feature spread, milestone timing, outcome horizons + offline threshold simulations (read-only)",
+    "<code>/callresearch</code> — V1223 professional microstructure-to-7d research lab + data-quality gating (read-only)",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
@@ -182017,6 +182447,22 @@ async function telegramCommandReplyV271(
       );
   } else if (
     parsed.command ===
+    "/calllab"
+  ) {
+    reply =
+      callQualityLaboratoryMessageV1222(
+        state
+      );
+  } else if (
+    parsed.command ===
+    "/callresearch"
+  ) {
+    reply =
+      professionalCallResearchLabMessageV1223(
+        state
+      );
+  } else if (
+    parsed.command ===
       "/help" ||
     parsed.command ===
       "/start"
@@ -182057,6 +182503,8 @@ async function telegramCommandReplyV271(
     parsed.command === "/learning" ||
     parsed.command === "/signallearn" ||
     parsed.command === "/callquality" ||
+    parsed.command === "/calllab" ||
+    parsed.command === "/callresearch" ||
     parsed.command === "/launchcoverage" ||
     parsed.command === "/coverage" ||
     parsed.command === "/poolmatch" ||
