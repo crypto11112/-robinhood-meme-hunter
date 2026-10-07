@@ -1,3 +1,4 @@
+// V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
 // V1228 — Customer Call Staging: distinguish Early Discovery from Verified Call using exact-pool entry proof; presentation/telemetry only, no scoring or provider-budget changes.
 // V1227 — Narrative Evidence Engine: free-first contract-bound project evidence, first-party website verification, D1 provenance/cache; no scoring changes.
 // V1226 — Free delivery durability: D1-isolated queue + per-call delivery provenance; no scanner/scoring changes.
@@ -10037,7 +10038,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1228";
+const VERSION = "V1229";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -17288,6 +17289,295 @@ function customerRiskReasonV1175(candidate) {
    - EARLY_DISCOVERY preserves speed when qualification passes before entry proof.
    - No qualification, scoring, risk, provider budget or routing change.
    ========================================================= */
+
+/* =========================================================
+   V1229 — IMMEDIATE CUSTOMER ENTRY VERIFICATION
+   =========================================================
+   Runs only AFTER the existing qualification, cooldown and notification-budget
+   gates have admitted a customer alert candidate.
+
+   Goal:
+     candidate qualifies -> same-run exact-pool/Swap evidence attempt ->
+     refresh exact execution price -> render Verified Call when proven.
+
+   It reuses the existing production V4 / V888 / V179 / V438 evidence stack.
+   It does not invent a price, weaken exact-pool proof, raise any request ceiling,
+   change scoring/risk/qualification, or bypass the real global/analysis budget.
+
+   If the broad V772 pass establishes exact identity but no usable exact-USD
+   execution price, one targeted exact-pool retry may use remaining EXISTING
+   analysis budget. If proof still fails, the alert remains Early Discovery.
+   ========================================================= */
+
+function customerEntryEvidenceSnapshotV1229(candidate) {
+  const poolId = normalize(
+    candidate?.market?.exactPoolIdV455 ||
+    candidate?.market?.onChainMarketFallbackV455?.poolId ||
+    candidate?.onChainVerifiedFlowV212?.exactPoolId ||
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.onChainPoolIdentityV153?.pairAddress ||
+    candidate?.exactPoolId ||
+    candidate?.poolId ||
+    ""
+  );
+
+  const poolVerified =
+    /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+    (
+      candidate?.onChainPoolIdentityV153?.verified === true ||
+      candidate?.market?.exactPoolIdV455 === poolId ||
+      candidate?.market?.onChainMarketFallbackV455?.poolId === poolId
+    );
+
+  const price = poolVerified
+    ? exactPoolPriceEvidenceV455(candidate, poolId)
+    : {verified:false};
+
+  const latest = Number(price?.latestPriceUsd);
+  const median = Number(price?.medianPriceUsd);
+  const entryPriceUsd = price?.verified === true
+    ? (
+        Number.isFinite(latest) && latest > 0
+          ? latest
+          : (Number.isFinite(median) && median > 0 ? median : null)
+      )
+    : null;
+
+  return {
+    poolId: poolVerified ? poolId : null,
+    poolVerified,
+    priceVerified:
+      price?.verified === true &&
+      Number.isFinite(entryPriceUsd) &&
+      entryPriceUsd > 0,
+    entryPriceUsd:
+      Number.isFinite(entryPriceUsd) && entryPriceUsd > 0
+        ? entryPriceUsd
+        : null,
+    priceSource:price?.source || null,
+    observedAt:safeNumber(price?.latestObservedAt) || null,
+    ageMs:price?.latestAgeMs ?? null,
+    sampleCount:safeNumber(price?.sampleCount),
+    exactUsdSamples:Array.isArray(price?.samples) ? price.samples.length : 0
+  };
+}
+
+async function immediateCustomerEntryVerificationV1229(
+  env,
+  state,
+  budget,
+  candidate,
+  latestNumber
+) {
+  const token = normalize(candidate?.address || "");
+  const before = customerEntryEvidenceSnapshotV1229(candidate);
+
+  const result = {
+    version:"V1229",
+    runtimeVersion:VERSION,
+    tokenAddress:isAddress(token) ? token : null,
+    symbol:candidate?.symbol || null,
+    startedAt:Date.now(),
+    completedAt:null,
+    needed:before.priceVerified !== true,
+    before,
+    broadAttempted:false,
+    broadResult:null,
+    targetedRetryEligible:false,
+    targetedRetryAttempted:false,
+    targetedRetryResult:null,
+    foundationRefreshes:0,
+    after:null,
+    verifiedNow:false,
+    promotedFromUnverified:false,
+    status:before.priceVerified === true
+      ? "ENTRY_ALREADY_VERIFIED_V1229"
+      : "NOT_STARTED_V1229",
+    externalRequestsUsed:0,
+    requestCeilingChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    riskChanged:false,
+    telegramThresholdChanged:false
+  };
+
+  if (!isAddress(token)) {
+    result.status = "INVALID_TOKEN_V1229";
+    result.completedAt = Date.now();
+    return result;
+  }
+
+  if (before.priceVerified === true) {
+    result.after = before;
+    result.completedAt = Date.now();
+    return result;
+  }
+
+  /*
+   * Broad immediate pass:
+   * Reuse V772's existing proof path. It can inspect the current live V4 window
+   * and, where supported by the existing implementation, establish exact pool
+   * identity and feed genuine Swap rows into the V179 exact-USD ledger.
+   *
+   * No special reserve is created here. The call proceeds only if the existing
+   * real analysis budget has enough headroom for V772 itself.
+   */
+  if (budgetAvailable(budget, "analysis", 3)) {
+    result.broadAttempted = true;
+    const beforeUsed = safeNumber(budget?.totalUsed);
+
+    const broad = await enrichCandidateWithProductionV4V772(
+      env,
+      state,
+      budget,
+      candidate,
+      latestNumber,
+      false,
+      false,
+      false
+    );
+
+    result.broadResult = {
+      attempted:broad?.attempted === true,
+      applied:broad?.applied === true,
+      status:broad?.status || null,
+      rpcProvider:broad?.rpcProvider || null,
+      recentSwapRows:safeNumber(broad?.recentSwapRows),
+      uniqueLivePoolIds:safeNumber(broad?.uniqueLivePoolIds),
+      matchingPoolIds:Array.isArray(broad?.matchingPoolIds)
+        ? broad.matchingPoolIds.slice(0,10)
+        : [],
+      matchingSwapRows:safeNumber(broad?.matchingSwapRows),
+      exactPoolBackfillStatus:
+        broad?.exactPoolTargetedBackfillV888?.status || null,
+      exactPoolBackfillAttempted:
+        broad?.exactPoolTargetedBackfillV888?.attempted === true,
+      exactPoolBackfillRows:
+        safeNumber(broad?.exactPoolTargetedBackfillV888?.returnedSwapRows)
+    };
+
+    result.externalRequestsUsed += Math.max(
+      0,
+      safeNumber(budget?.totalUsed) - beforeUsed
+    );
+
+    candidate.productionV4ImmediateEntryV1229 = broad;
+
+    const refreshed = refreshOnChainMarketFoundationV973(
+      state,
+      [candidate]
+    );
+    result.foundationRefreshes += safeNumber(refreshed?.refreshed);
+  } else {
+    result.broadResult = {
+      attempted:false,
+      status:"EXISTING_ANALYSIS_BUDGET_HEADROOM_UNAVAILABLE_V1229"
+    };
+  }
+
+  let afterBroad = customerEntryEvidenceSnapshotV1229(candidate);
+
+  /*
+   * If V772 established exact identity but the broad pass still did not leave a
+   * fresh exact execution price, allow ONE targeted exact-pool retry through the
+   * existing V888 path. This uses only remaining real budget and never broadens
+   * the request ceiling.
+   */
+  result.targetedRetryEligible =
+    afterBroad.poolVerified === true &&
+    afterBroad.priceVerified !== true &&
+    budgetAvailable(budget, "analysis", 1);
+
+  if (result.targetedRetryEligible) {
+    result.targetedRetryAttempted = true;
+    const beforeUsed = safeNumber(budget?.totalUsed);
+
+    const targeted = await enrichCandidateWithProductionV4V772(
+      env,
+      state,
+      budget,
+      candidate,
+      latestNumber,
+      false,
+      false,
+      true
+    );
+
+    result.targetedRetryResult = {
+      attempted:
+        targeted?.exactPoolTargetedBackfillV888?.attempted === true ||
+        targeted?.attempted === true,
+      status:targeted?.status || null,
+      exactPoolBackfillStatus:
+        targeted?.exactPoolTargetedBackfillV888?.status || null,
+      exactPoolBackfillRows:
+        safeNumber(targeted?.exactPoolTargetedBackfillV888?.returnedSwapRows),
+      rpcOk:
+        targeted?.targetedCollectorHandoffDiagnosticV895?.rpcOk === true,
+      exactTopicRows:
+        safeNumber(targeted?.targetedCollectorHandoffDiagnosticV895?.exactTopicRows),
+      decodedExactUsdRows:
+        safeNumber(targeted?.targetedCollectorHandoffDiagnosticV895?.decodedExactUsdRows)
+    };
+
+    result.externalRequestsUsed += Math.max(
+      0,
+      safeNumber(budget?.totalUsed) - beforeUsed
+    );
+
+    candidate.productionV4ImmediateTargetedV1229 = targeted;
+
+    const refreshed = refreshOnChainMarketFoundationV973(
+      state,
+      [candidate]
+    );
+    result.foundationRefreshes += safeNumber(refreshed?.refreshed);
+  }
+
+  const after = customerEntryEvidenceSnapshotV1229(candidate);
+  result.after = after;
+  result.verifiedNow = after.priceVerified === true;
+  result.promotedFromUnverified =
+    before.priceVerified !== true &&
+    after.priceVerified === true;
+
+  result.status =
+    after.priceVerified === true
+      ? (
+          result.promotedFromUnverified
+            ? "EXACT_POOL_ENTRY_VERIFIED_SAME_RUN_V1229"
+            : "ENTRY_VERIFIED_V1229"
+        )
+      : (
+          after.poolVerified === true
+            ? "EXACT_POOL_VERIFIED_ENTRY_PRICE_STILL_UNVERIFIED_V1229"
+            : "EXACT_POOL_IDENTITY_STILL_UNVERIFIED_V1229"
+        );
+
+  result.completedAt = Date.now();
+
+  candidate.immediateCustomerEntryVerificationV1229 = {...result};
+  state.immediateCustomerEntryVerificationV1229 = {
+    ...result,
+    candidateSnapshotOmitted:true,
+    recordedAt:new Date().toISOString()
+  };
+
+  return result;
+}
+
+function verifiedStageTransitionV1229(candidate, previousAlert) {
+  const previousStage =
+    previousAlert?.customerCallBaselineV1175?.customerAlertStageV1228 ||
+    previousAlert?.customerCallBaselineV1175?.customerAlertStageV1229 ||
+    previousAlert?.customerAlertStageV1228 ||
+    null;
+
+  if (previousStage !== "EARLY_DISCOVERY") return false;
+
+  const current = customerEntryEvidenceSnapshotV1229(candidate);
+  return current.poolVerified === true && current.priceVerified === true;
+}
 function customerCallStageV1228(candidate, baselineLike=null) {
   const exactPoolId = normalize(
     baselineLike?.exactPoolId ||
@@ -17399,12 +17689,27 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
     address:normalize(candidate?.address),
     symbol:candidate?.symbol || null,
     callType,
-    customerEnrichmentVersion:"V1228",
+    customerEnrichmentVersion:"V1229",
     customerCallStageV1228:provisionalStageV1228,
     customerAlertStageV1228:provisionalStageV1228.stage,
     customerVerifiedCallV1228:provisionalStageV1228.verifiedCall === true,
     customerStageReasonV1228:provisionalStageV1228.stageReason,
     customerPerformanceLabelV1228:provisionalStageV1228.performanceLabel,
+    customerAlertStageV1229:provisionalStageV1228.stage,
+    customerVerifiedCallV1229:provisionalStageV1228.verifiedCall === true,
+    immediateEntryVerificationV1229:
+      candidate?.immediateCustomerEntryVerificationV1229
+        ? {
+            status:candidate.immediateCustomerEntryVerificationV1229.status || null,
+            broadAttempted:candidate.immediateCustomerEntryVerificationV1229.broadAttempted === true,
+            targetedRetryAttempted:candidate.immediateCustomerEntryVerificationV1229.targetedRetryAttempted === true,
+            externalRequestsUsed:safeNumber(candidate.immediateCustomerEntryVerificationV1229.externalRequestsUsed),
+            promotedFromUnverified:candidate.immediateCustomerEntryVerificationV1229.promotedFromUnverified === true,
+            verifiedNow:candidate.immediateCustomerEntryVerificationV1229.verifiedNow === true,
+            exactPoolId:candidate.immediateCustomerEntryVerificationV1229?.after?.poolId || null,
+            exactUsdSamples:safeNumber(candidate.immediateCustomerEntryVerificationV1229?.after?.exactUsdSamples)
+          }
+        : null,
     launchAgeVerifiedV1178:customerLaunchV1178.verified,
     launchAgeDisplayV1178:customerLaunchV1178.display,
     verifiedLaunchTimestampV1178:customerLaunchV1178.launchedAt,
@@ -17500,7 +17805,7 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
     `🧩 Narrative: <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${narrativeStatusSuffixV1227(call)}`,
     `💵 Entry <b>${escapeHtml(entryText)}</b> · ${entryProof}`,
     call?.customerVerifiedCallV1228 === true
-      ? `✅ Call status: <b>VERIFIED ENTRY CALL</b>`
+      ? `✅ Call status: <b>VERIFIED ENTRY CALL</b>${call?.immediateEntryVerificationV1229?.promotedFromUnverified===true?" · same-run verification":""}`
       : `⏳ Status: <b>EARLY DISCOVERY</b> · awaiting exact-pool entry verification`,
     `💰 MC <b>${market?.verified===true?money(market.marketCap):"UNVERIFIED"}</b> · Liquidity <b>${market?.verified===true?money(market.liquidityUsd):"UNVERIFIED"}</b>`,
     `📊 24h Vol <b>${market?.verified===true?money(market?.volume?.h24):"UNVERIFIED"}</b>`,
@@ -126225,10 +126530,19 @@ for (
         ?.whaleFlow !==
         "NET_ACCUMULATION";
 
+    // V1229: if an earlier customer alert was explicitly Early Discovery and
+    // the current scan has now acquired genuine exact-pool + entry proof, allow
+    // the evidence-stage promotion through the normal cooldown. This does not
+    // lower any scoring/risk/qualification threshold; it is a state transition
+    // for a token that already qualified previously.
+    const verifiedStageTransitionV1229Now =
+      verifiedStageTransitionV1229(candidate, previous);
+
     if (
       !cooldownExpired &&
       !scoreImproved &&
-      !newAccumulation
+      !newAccumulation &&
+      !verifiedStageTransitionV1229Now
     ) {
       telegramResults.push({
         address,
@@ -126261,6 +126575,19 @@ for (
 
       continue;
     }
+
+    // V1229: once the candidate has passed all existing customer alert gates,
+    // immediately try to establish exact-pool execution evidence before rendering.
+    // This is the initial verification bridge; it does not wait for the later
+    // ~60-second monitoring cadence and it cannot make an unqualified token qualify.
+    candidate.immediateCustomerEntryVerificationV1229 =
+      await immediateCustomerEntryVerificationV1229(
+        env,
+        state,
+        budget,
+        candidate,
+        latestNumber
+      );
 
     // V1227: narrative enrichment runs only for a call that has already passed
     // the existing alert gates/budget. It cannot make an unqualified token qualify.
@@ -126484,6 +126811,8 @@ for (
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.customerVerifiedCallV1228 === true,
         customerStageReasonV1228:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.customerStageReasonV1228 || null,
+        immediateEntryVerificationV1229:
+          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.immediateEntryVerificationV1229 || null,
         customerNarrativeEvidenceV1178:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.narrativeEvidenceLevelV1178 || "UNVERIFIED",
         customerNarrativeVerifiedV1227:
@@ -180327,6 +180656,7 @@ function telegramHelpV271() {
     "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
     "<code>/freequeue</code> — V1226 durable delayed Free-call queue + per-call delivery provenance (read-only)",
     "<code>/narrativeaudit [SYMBOL|0xTOKEN]</code> — V1227 narrative evidence provenance/cache (read-only)",
+    "<code>/entryverify</code> — V1229 last immediate exact-pool/entry verification result (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
@@ -181707,6 +182037,39 @@ async function telegramCommandReplyV271(
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
+  if (parsed.command === "/entryverify") {
+    const loadedV1229 = await readState(env);
+    const rowV1229 = loadedV1229?.state?.immediateCustomerEntryVerificationV1229 || null;
+    const replyV1229 = rowV1229
+      ? [
+          "⚡ <b>Immediate Entry Verification — V1229</b>",
+          "",
+          `Token: <b>${escapeHtml(rowV1229?.symbol || "UNKNOWN")}</b>`,
+          `Address: <code>${escapeHtml(rowV1229?.tokenAddress || "UNVERIFIED")}</code>`,
+          `Status: <b>${escapeHtml(rowV1229?.status || "UNKNOWN")}</b>`,
+          `Broad same-run attempt: <b>${rowV1229?.broadAttempted===true?"YES":"NO"}</b>`,
+          `Targeted retry: <b>${rowV1229?.targetedRetryAttempted===true?"YES":"NO"}</b>`,
+          `Requests used: <b>${safeNumber(rowV1229?.externalRequestsUsed)}</b>`,
+          `Exact pool after: <code>${escapeHtml(rowV1229?.after?.poolId || "UNVERIFIED")}</code>`,
+          `Entry verified after: <b>${rowV1229?.after?.priceVerified===true?"YES":"NO"}</b>`,
+          `Exact-USD samples: <b>${safeNumber(rowV1229?.after?.exactUsdSamples)}</b>`,
+          `Same-run promotion: <b>${rowV1229?.promotedFromUnverified===true?"YES":"NO"}</b>`,
+          "",
+          "<i>Read-only. Uses the existing V4/V888/V179/V438 proof stack and existing request ceilings.</i>"
+        ].join("\n")
+      : "⚡ <b>Immediate Entry Verification — V1229</b>\n\nNo V1229 customer-entry verification attempt recorded yet.";
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1229 = await sendTelegram(env, replyV1229, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1229?.success === true;
+      diagnosticV273.telegramStatus = sentV1229?.status || null;
+      diagnosticV273.telegramMode = sentV1229?.mode || null;
+      diagnosticV273.telegramError = sentV1229?.error || null;
+      diagnosticV273.result = sentV1229?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1229?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
   if (parsed.command === "/narrativeaudit") {
     const replyV1227 = await narrativeAuditTelegramV1227(env, parsed.args?.[0] || null);
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
