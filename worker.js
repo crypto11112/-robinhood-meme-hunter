@@ -1,3 +1,4 @@
+// V1217 — explicit fail-closed Stripe environment mode control (test/live).
 // V1216 — Stripe production hardening: live-mode enforcement, stale-checkout ordering guard, truthful success page.
 // V1215 — Telegram webhook authentication fail-closed. Requires configured TELEGRAM_WEBHOOK_SECRET.
 // V1214 — propagate V1213 scan-relay secret from the Durable Object relay to /scan. Security-only fix.
@@ -10025,7 +10026,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1216";
+const VERSION = "V1217";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -190184,11 +190185,26 @@ async function stripeWebhookV1030(request, env) {
 
   const selected = STRIPE_WEBHOOK_EVENTS_V1030.has(eventType);
 
-  // V1216: production state accepts Stripe live-mode events only.
-  if (event?.livemode !== true) {
-    console.warn("V1216 Stripe non-live event rejected", {eventId,eventType});
+  // V1217: Stripe mode is explicit and fail-closed. Test and live events
+  // can never be accepted by the same configuration.
+  const stripeModeV1217 = String(env?.STRIPE_MODE || "").trim().toLowerCase();
+  if (stripeModeV1217 !== "test" && stripeModeV1217 !== "live") {
     return jsonResponse(
-      {ok:false,version:VERSION,error:"STRIPE_LIVEMODE_REQUIRED_V1216",eventId,eventType,timestamp:now()},
+      {ok:false,version:VERSION,error:"STRIPE_MODE_NOT_CONFIGURED_V1217",eventId,eventType,timestamp:now()},
+      503
+    );
+  }
+
+  const expectedLivemodeV1217 = stripeModeV1217 === "live";
+  if ((event?.livemode === true) !== expectedLivemodeV1217) {
+    console.warn("V1217 Stripe environment mismatch rejected", {
+      eventId,
+      eventType,
+      configuredMode:stripeModeV1217,
+      eventLivemode:event?.livemode === true
+    });
+    return jsonResponse(
+      {ok:false,version:VERSION,error:"STRIPE_MODE_MISMATCH_V1217",eventId,eventType,configuredMode:stripeModeV1217,timestamp:now()},
       400
     );
   }
