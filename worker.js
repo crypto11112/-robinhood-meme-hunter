@@ -1,3 +1,4 @@
+// V1219 — Admin-only Stripe subscription reconciliation: authoritative dry-run + explicit apply.
 // V1218 — fresh Stripe subscription replacement clears stale cancellation/expiry; user-level checkout ordering guard.
 // V1217 — explicit fail-closed Stripe environment mode control (test/live).
 // V1216 — Stripe production hardening: live-mode enforcement, stale-checkout ordering guard, truthful success page.
@@ -10027,7 +10028,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1218";
+const VERSION = "V1219";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -178425,6 +178426,8 @@ function telegramHelpV271() {
     "<code>/subscribers</code> — Stripe↔Telegram subscriber mappings (read-only)",
      "<code>/accessexpiry</code> — cancellation/paid-through removal diagnostic (read-only)",
     "<code>/stripetrace</code> — V1040 latest Stripe subscription lifecycle event trace (read-only)",
+    "<code>/stripereconcile [telegramUserId]</code> — V1219 compare mapped subscription against Stripe (dry-run)",
+    "<code>/stripereconcile apply [telegramUserId]</code> — V1219 apply Stripe-authoritative lifecycle state to D1 only",
     "<code>/expirycheck</code> — V1042 Premium expiry dry run; add 'simulate' to test after-expiry decision",
     "<code>/expiryenforce</code> — V1044 enforce genuinely expired Premium memberships; owner permanently exempt",
     "<code>/ownerprotection</code> — V1045 prove owner NEVER_REMOVE guards without Telegram action",
@@ -179751,6 +179754,36 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = sentV1038?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:sentV1038?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
+  // V1219: Admin-only authoritative Stripe subscription reconciliation.
+  // Dry-run is default; "apply" updates D1 lifecycle fields only.
+  if (parsed.command === "/stripereconcile") {
+    const fallbackUidV1219 =
+      message?.from?.id !== undefined && message?.from?.id !== null
+        ? String(message.from.id)
+        : CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044;
+    const applyV1219=String(parsed.argument||"").trim().toLowerCase().startsWith("apply");
+    const replyV1219 = await stripeSubscriptionReconcileAdminMessageV1219(
+      env,
+      parsed.argument,
+      fallbackUidV1219
+    );
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1219 = await sendTelegram(env, replyV1219, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1219?.success === true;
+      diagnosticV273.result = sentV1219?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {
+      success:sentV1219?.success===true,
+      ignored:false,
+      command:parsed.command,
+      scannerBudgetConsumed:false,
+      externalProviderRequests:1,
+      stateWrites:applyV1219?1:0,
+      telegramMembershipCalls:0
+    };
   }
 
   // V1036: read-only cancellation/access-expiry diagnostic.
@@ -189563,6 +189596,307 @@ async function expiryEnforcementDryRunAdminMessageV1041(env, simulateAfterExpiry
     return `🧯 <b>Premium Expiry Dry Run — V1046</b>\n\nD1 query failed: ${escapeHtml(errorString(error).slice(0,500))}`;
   }
 }
+
+
+function stripeSubscriptionStateV1219(obj) {
+  const stripeStatus=String(obj?.status||"").trim().toLowerCase();
+  const nowSec=Math.floor(Date.now()/1000);
+  const cancelAt=
+    Number.isFinite(Number(obj?.cancel_at)) && Number(obj.cancel_at)>0
+      ? Math.trunc(Number(obj.cancel_at))
+      : null;
+  const cancellationReason=String(obj?.cancellation_details?.reason||"").trim().toLowerCase();
+  const scheduledCancellation =
+    obj?.cancel_at_period_end===true ||
+    (cancelAt!==null && cancelAt>nowSec && cancellationReason==="cancellation_requested");
+
+  const itemEnds=Array.isArray(obj?.items?.data)
+    ? obj.items.data
+        .map(item=>Number(item?.current_period_end))
+        .filter(value=>Number.isFinite(value)&&value>0)
+        .map(value=>Math.trunc(value))
+    : [];
+  const itemPeriodEnd=itemEnds.length ? Math.max(...itemEnds) : null;
+  const topLevelPeriodEnd =
+    Number.isFinite(Number(obj?.current_period_end)) && Number(obj.current_period_end)>0
+      ? Math.trunc(Number(obj.current_period_end))
+      : null;
+  const endedAt =
+    Number.isFinite(Number(obj?.ended_at)) && Number(obj.ended_at)>0
+      ? Math.trunc(Number(obj.ended_at))
+      : null;
+  const canceledAt =
+    Number.isFinite(Number(obj?.canceled_at)) && Number(obj.canceled_at)>0
+      ? Math.trunc(Number(obj.canceled_at))
+      : null;
+
+  let localStatus=null;
+  if(stripeStatus==="canceled") localStatus="ENDED";
+  else if(stripeStatus==="active" || stripeStatus==="trialing")
+    localStatus=scheduledCancellation ? "CANCEL_SCHEDULED" : "ACTIVE";
+  else if(stripeStatus==="past_due" || stripeStatus==="unpaid")
+    localStatus="PAYMENT_ATTENTION";
+  else if(stripeStatus==="incomplete")
+    localStatus="PENDING";
+  else if(stripeStatus==="incomplete_expired")
+    localStatus="ENDED";
+  else if(stripeStatus==="paused")
+    localStatus="PAYMENT_ATTENTION";
+
+  const effectiveEnd =
+    (scheduledCancellation && cancelAt ? cancelAt : null) ||
+    itemPeriodEnd ||
+    topLevelPeriodEnd ||
+    endedAt ||
+    canceledAt ||
+    null;
+
+  return {
+    supported:Boolean(localStatus),
+    stripeStatus:stripeStatus||null,
+    localStatus,
+    cancelAtPeriodEnd:scheduledCancellation,
+    currentPeriodEnd:effectiveEnd,
+    rawCancelAtPeriodEnd:obj?.cancel_at_period_end===true,
+    cancelAt,
+    itemPeriodEnds:itemEnds,
+    topLevelPeriodEnd,
+    endedAt,
+    canceledAt
+  };
+}
+
+async function stripeSubscriptionReconcileV1219(env, telegramUserId, apply=false) {
+  const db=env?.CHAINVANTA_DB;
+  const secret=String(env?.STRIPE_SECRET_KEY||"").trim();
+  const stripeMode=String(env?.STRIPE_MODE||"").trim().toLowerCase();
+  const uid=String(telegramUserId||"").trim();
+
+  if(!db) return {ok:false,reason:"CHAINVANTA_DB_NOT_CONFIGURED_V1219"};
+  if(!secret) return {ok:false,reason:"STRIPE_SECRET_KEY_NOT_CONFIGURED_V1219"};
+  if(stripeMode!=="test" && stripeMode!=="live")
+    return {ok:false,reason:"STRIPE_MODE_NOT_CONFIGURED_V1219"};
+  if(!/^\d+$/.test(uid))
+    return {ok:false,reason:"TELEGRAM_USER_ID_INVALID_V1219"};
+
+  let row;
+  try {
+    row=await db.prepare(
+      `SELECT telegram_user_id,telegram_username,stripe_customer_id,stripe_subscription_id,
+              status,current_period_end,cancel_at_period_end,grace_until
+       FROM subscribers WHERE telegram_user_id=? LIMIT 1`
+    ).bind(uid).first();
+  } catch(error) {
+    return {ok:false,reason:"SUBSCRIBER_LOOKUP_FAILED_V1219",error:errorString(error)};
+  }
+  if(!row) return {ok:false,reason:"SUBSCRIBER_NOT_FOUND_V1219"};
+
+  const subscriptionId=String(row.stripe_subscription_id||"").trim();
+  const mappedCustomerId=String(row.stripe_customer_id||"").trim();
+  if(!/^sub_/.test(subscriptionId))
+    return {ok:false,reason:"STRIPE_SUBSCRIPTION_ID_INVALID_V1219"};
+
+  let response;
+  let stripeSubscription;
+  try {
+    response=await fetch(
+      `https://api.stripe.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}?expand%5B%5D=items.data.price`,
+      {
+        method:"GET",
+        headers:{
+          "authorization":`Bearer ${secret}`,
+          "accept":"application/json"
+        }
+      }
+    );
+    stripeSubscription=await response.json().catch(()=>({}));
+  } catch(error) {
+    return {ok:false,reason:"STRIPE_SUBSCRIPTION_RETRIEVE_FAILED_V1219",error:errorString(error),externalRequestsUsed:1};
+  }
+
+  if(!response?.ok || !stripeSubscription?.id) {
+    return {
+      ok:false,
+      reason:"STRIPE_SUBSCRIPTION_RETRIEVE_HTTP_FAILED_V1219",
+      httpStatus:response?.status||null,
+      stripeType:stripeSubscription?.error?.type||null,
+      stripeCode:stripeSubscription?.error?.code||null,
+      externalRequestsUsed:1
+    };
+  }
+
+  if(String(stripeSubscription.id)!==subscriptionId)
+    return {ok:false,reason:"STRIPE_SUBSCRIPTION_ID_MISMATCH_V1219",externalRequestsUsed:1};
+
+  const stripeCustomerId=String(
+    typeof stripeSubscription?.customer==="string"
+      ? stripeSubscription.customer
+      : stripeSubscription?.customer?.id||""
+  ).trim();
+  if(mappedCustomerId && stripeCustomerId && mappedCustomerId!==stripeCustomerId) {
+    return {ok:false,reason:"STRIPE_CUSTOMER_MISMATCH_V1219",externalRequestsUsed:1};
+  }
+
+  const expectedLivemode=stripeMode==="live";
+  if((stripeSubscription?.livemode===true)!==expectedLivemode) {
+    return {
+      ok:false,
+      reason:"STRIPE_MODE_MISMATCH_V1219",
+      configuredMode:stripeMode,
+      stripeLivemode:stripeSubscription?.livemode===true,
+      externalRequestsUsed:1
+    };
+  }
+
+  const derived=stripeSubscriptionStateV1219(stripeSubscription);
+  if(!derived.supported) {
+    return {
+      ok:false,
+      reason:"STRIPE_STATUS_UNSUPPORTED_FOR_RECONCILE_V1219",
+      stripeStatus:derived.stripeStatus,
+      externalRequestsUsed:1
+    };
+  }
+
+  const before={
+    status:String(row.status||""),
+    cancelAtPeriodEnd:Number(row.cancel_at_period_end)===1,
+    currentPeriodEnd:
+      Number.isFinite(Number(row.current_period_end)) && Number(row.current_period_end)>0
+        ? Math.trunc(Number(row.current_period_end))
+        : null,
+    graceUntil:
+      Number.isFinite(Number(row.grace_until)) && Number(row.grace_until)>0
+        ? Math.trunc(Number(row.grace_until))
+        : null
+  };
+
+  const after={
+    status:derived.localStatus,
+    cancelAtPeriodEnd:derived.cancelAtPeriodEnd,
+    currentPeriodEnd:derived.currentPeriodEnd,
+    graceUntil:
+      ["ACTIVE","CANCEL_SCHEDULED"].includes(derived.localStatus)
+        ? null
+        : before.graceUntil
+  };
+
+  const changed=
+    before.status!==after.status ||
+    before.cancelAtPeriodEnd!==after.cancelAtPeriodEnd ||
+    before.currentPeriodEnd!==after.currentPeriodEnd ||
+    before.graceUntil!==after.graceUntil;
+
+  if(apply && changed) {
+    try {
+      await db.prepare(
+        `UPDATE subscribers
+         SET status=?,cancel_at_period_end=?,current_period_end=?,grace_until=?,updated_at=?
+         WHERE telegram_user_id=? AND stripe_subscription_id=?`
+      ).bind(
+        after.status,
+        after.cancelAtPeriodEnd?1:0,
+        after.currentPeriodEnd,
+        after.graceUntil,
+        Math.floor(Date.now()/1000),
+        uid,
+        subscriptionId
+      ).run();
+    } catch(error) {
+      return {
+        ok:false,
+        reason:"STRIPE_RECONCILE_D1_UPDATE_FAILED_V1219",
+        error:errorString(error),
+        externalRequestsUsed:1
+      };
+    }
+  }
+
+  return {
+    ok:true,
+    apply:Boolean(apply),
+    changed,
+    telegramUserId:uid,
+    telegramUsername:row.telegram_username?String(row.telegram_username):null,
+    subscriptionIdSuffix:subscriptionId.slice(-6),
+    configuredMode:stripeMode,
+    stripeStatus:derived.stripeStatus,
+    before,
+    after,
+    externalRequestsUsed:1,
+    telegramMembershipCalls:0,
+    scannerBudgetConsumed:false
+  };
+}
+
+function stripeReconcileFormatTimeV1219(value) {
+  const n=Number(value);
+  return Number.isFinite(n)&&n>0 ? new Date(n*1000).toISOString() : "NONE";
+}
+
+async function stripeSubscriptionReconcileAdminMessageV1219(env, argument, fallbackTelegramUserId) {
+  const parts=String(argument||"").trim().split(/\s+/).filter(Boolean);
+  const apply=String(parts[0]||"").toLowerCase()==="apply";
+  const suppliedId=apply ? parts[1] : parts[0];
+  const uid=String(suppliedId||fallbackTelegramUserId||"").trim();
+
+  if(!/^\d+$/.test(uid)) {
+    return [
+      "🔄 <b>Stripe Subscription Reconciliation — V1219</b>",
+      "",
+      "Usage:",
+      "<code>/stripereconcile [telegramUserId]</code> — dry-run",
+      "<code>/stripereconcile apply [telegramUserId]</code> — apply D1 correction",
+      "",
+      "<i>Admin-only. Apply updates D1 lifecycle fields only; it never changes Telegram membership.</i>"
+    ].join("\n");
+  }
+
+  const result=await stripeSubscriptionReconcileV1219(env,uid,apply);
+  if(!result?.ok) {
+    return [
+      "🔄 <b>Stripe Subscription Reconciliation — V1219</b>",
+      "",
+      `Mode: <b>${apply?"APPLY":"DRY-RUN"}</b>`,
+      `Result: <b>FAILED SAFELY</b>`,
+      `Reason: <code>${escapeHtml(String(result?.reason||"UNKNOWN"))}</code>`,
+      result?.httpStatus?`Stripe HTTP: <code>${escapeHtml(String(result.httpStatus))}</code>`:null,
+      "",
+      "<i>No Telegram membership action was performed.</i>"
+    ].filter(Boolean).join("\n");
+  }
+
+  const b=result.before||{};
+  const a=result.after||{};
+  const lines=[
+    "🔄 <b>Stripe Subscription Reconciliation — V1219</b>",
+    "",
+    `Mode: <b>${result.apply?"APPLY":"DRY-RUN"}</b>`,
+    `Telegram: <code>${escapeHtml(String(result.telegramUserId))}</code>${result.telegramUsername?` · @${escapeHtml(result.telegramUsername)}`:""}`,
+    `Mapped subscription: <code>…${escapeHtml(String(result.subscriptionIdSuffix||""))}</code>`,
+    `Stripe environment: <b>${escapeHtml(String(result.configuredMode||"UNKNOWN").toUpperCase())}</b>`,
+    `Stripe status: <b>${escapeHtml(String(result.stripeStatus||"UNKNOWN"))}</b>`,
+    "",
+    "<b>Stored D1 → Stripe-authoritative</b>",
+    `Status: <code>${escapeHtml(String(b.status||"UNKNOWN"))}</code> → <code>${escapeHtml(String(a.status||"UNKNOWN"))}</code>`,
+    `Scheduled cancellation: <b>${b.cancelAtPeriodEnd?"YES":"NO"}</b> → <b>${a.cancelAtPeriodEnd?"YES":"NO"}</b>`,
+    `Paid-through/end: <code>${escapeHtml(stripeReconcileFormatTimeV1219(b.currentPeriodEnd))}</code> → <code>${escapeHtml(stripeReconcileFormatTimeV1219(a.currentPeriodEnd))}</code>`,
+    `Payment grace: <code>${escapeHtml(stripeReconcileFormatTimeV1219(b.graceUntil))}</code> → <code>${escapeHtml(stripeReconcileFormatTimeV1219(a.graceUntil))}</code>`,
+    "",
+    `Difference detected: <b>${result.changed?"YES":"NO"}</b>`,
+    result.apply
+      ? `D1 correction applied: <b>${result.changed?"YES":"NOT NEEDED"}</b>`
+      : `D1 writes: <b>0 — preview only</b>`,
+    "Telegram membership calls: <b>0</b>",
+    "Scanner budget consumed: <b>NO</b>",
+    "",
+    result.apply
+      ? "<i>D1 now reflects the currently mapped Stripe subscription. No Telegram member was removed or added.</i>"
+      : "<i>Review this preview. Use /stripereconcile apply with the same Telegram ID only if the Stripe-authoritative state is correct.</i>"
+  ];
+  return lines.join("\n");
+}
+
 
 async function accessExpiryAdminMessageV1036(env) {
   if (!env?.CHAINVANTA_DB) return "🧪 <b>Premium Access Expiry — V1046</b>\n\nD1 binding: MISSING";
