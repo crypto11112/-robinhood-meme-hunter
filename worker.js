@@ -1,4 +1,3 @@
-// V1231 — Immediate Launch Verification: qualified customer alerts reuse strict verified launch telemetry immediately before rendering; already-verified launches cost 0 requests; unresolved timestamp may use one existing budgeted block-timestamp recovery. No scoring/threshold/request-ceiling changes.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
 // V1228 — Customer Call Staging: distinguish Early Discovery from Verified Call using exact-pool entry proof; presentation/telemetry only, no scoring or provider-budget changes.
@@ -10040,7 +10039,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1231";
+const VERSION = "V1230";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -17608,193 +17607,6 @@ function verifiedStageTransitionV1229(candidate, previousAlert) {
   const current = customerEntryEvidenceSnapshotV1229(candidate);
   return current.poolVerified === true && current.priceVerified === true;
 }
-
-/* =========================================================
-   V1231 — IMMEDIATE LAUNCH VERIFICATION
-   Same evidence discipline as the entry-verification path:
-   1) reuse authoritative launch proof first (0 requests when already verified);
-   2) if unresolved, run the existing strict V258 exact-token completion;
-   3) if a verified launch block exists without timestamp, V258 may use its one
-      existing budgeted eth_getBlockByNumber recovery;
-   4) never substitute scanner age, pair age, token deployment or generic V4
-      Initialize time for protocol launch age.
-   ========================================================= */
-
-function persistImmediateCustomerLaunchVerificationV1231(state, candidate, result) {
-  if (!result || typeof result !== "object") return result;
-  result.completedAt = result.completedAt || Date.now();
-
-  if (candidate && typeof candidate === "object") {
-    candidate.immediateCustomerLaunchVerificationV1231 = {...result};
-  }
-
-  if (state && typeof state === "object") {
-    state.immediateCustomerLaunchVerificationV1231 = {
-      ...result,
-      candidateSnapshotOmitted:true,
-      recordedAt:new Date().toISOString(),
-      provenancePersistenceVersion:"V1231"
-    };
-  }
-
-  return result;
-}
-
-async function immediateCustomerLaunchVerificationV1231(
-  env,
-  state,
-  budget,
-  candidate
-) {
-  const token = normalize(candidate?.address || "");
-  const watched = findWatched(state, token);
-
-  const before = watched
-    ? verifiedLaunchAgeV223(watched)
-    : {verified:false, launchAgeDisplay:"UNVERIFIED"};
-
-  const result = {
-    version:"V1231",
-    runtimeVersion:VERSION,
-    tokenAddress:isAddress(token) ? token : null,
-    symbol:candidate?.symbol || null,
-    startedAt:Date.now(),
-    completedAt:null,
-    needed:before?.verified !== true,
-    before,
-    completion:null,
-    recoveryStateUpdate:null,
-    after:null,
-    verifiedNow:false,
-    promotedFromUnverified:false,
-    externalRequestsUsed:0,
-    status:before?.verified === true
-      ? "LAUNCH_ALREADY_VERIFIED_V1231"
-      : "NOT_STARTED_V1231",
-    scannerAgeUsedAsLaunchAge:false,
-    pairAgeUsedAsLaunchAge:false,
-    genericInitializeUsedAsLaunchAge:false,
-    requestCeilingChanged:false,
-    scoringChanged:false,
-    qualificationChanged:false,
-    riskChanged:false,
-    telegramThresholdChanged:false
-  };
-
-  if (!isAddress(token) || !watched) {
-    result.status = "WATCHED_TOKEN_UNAVAILABLE_V1231";
-    return persistImmediateCustomerLaunchVerificationV1231(
-      state,
-      candidate,
-      result
-    );
-  }
-
-  if (before?.verified === true) {
-    result.after = before;
-    candidate.verifiedLaunchAgeV223 = before;
-    return persistImmediateCustomerLaunchVerificationV1231(
-      state,
-      candidate,
-      result
-    );
-  }
-
-  const completion = await verifiedLaunchAgeCompletionPassV258(
-    candidate,
-    state,
-    budget,
-    env
-  );
-
-  result.completion = {
-    status:completion?.status || null,
-    eligible:completion?.eligible === true,
-    attempted:completion?.attempted === true,
-    recovered:completion?.recovered === true,
-    evidenceProtocol:
-      completion?.after?.protocol ||
-      completion?.evidence?.protocol ||
-      null,
-    evidenceSource:
-      completion?.evidence?.source ||
-      completion?.after?.source ||
-      null,
-    launchBlock:
-      safeNumber(completion?.evidence?.blockNumber) ||
-      null,
-    launchTime:
-      completion?.after?.launchTime ||
-      completion?.evidence?.launchTime ||
-      null,
-    blockTimestampStatus:
-      completion?.blockTimestampRecovery?.status ||
-      null,
-    blockTimestampProvider:
-      completion?.blockTimestampRecovery?.provider ||
-      null,
-    externalRequestsUsed:
-      safeNumber(completion?.externalRequestsUsed)
-  };
-
-  result.externalRequestsUsed =
-    safeNumber(completion?.externalRequestsUsed);
-
-  result.recoveryStateUpdate =
-    recordLaunchAgeRecoveryResultV260(
-      state,
-      token,
-      completion
-    );
-
-  const after = watched
-    ? verifiedLaunchAgeV223(watched)
-    : candidate?.verifiedLaunchAgeV223 || {verified:false};
-
-  candidate.verifiedLaunchAgeV223 = after;
-
-  result.after = after;
-  result.verifiedNow = after?.verified === true;
-  result.promotedFromUnverified =
-    before?.verified !== true &&
-    after?.verified === true;
-
-  if (after?.verified === true) {
-    result.status = result.promotedFromUnverified
-      ? "LAUNCH_VERIFIED_SAME_RUN_V1231"
-      : "LAUNCH_VERIFIED_V1231";
-  } else if (completion?.status === "NO_VERIFIED_LAUNCH_EVENT_EVIDENCE") {
-    result.status = "LAUNCH_EVENT_EVIDENCE_UNAVAILABLE_V1231";
-  } else if (
-    completion?.evidence?.blockNumber &&
-    completion?.blockTimestampRecovery?.verified !== true
-  ) {
-    result.status = "LAUNCH_SOURCE_VERIFIED_TIMESTAMP_UNRESOLVED_V1231";
-  } else {
-    result.status =
-      completion?.status ||
-      "LAUNCH_STILL_UNVERIFIED_V1231";
-  }
-
-  return persistImmediateCustomerLaunchVerificationV1231(
-    state,
-    candidate,
-    result
-  );
-}
-
-function customerLaunchCallTypeV1231(call) {
-  const type = String(call?.callType || "Qualified Call").trim();
-  const launchVerified =
-    call?.launchAgeVerifiedV1178 === true ||
-    call?.immediateLaunchVerificationV1231?.verifiedNow === true;
-
-  if (/new launch/i.test(type) && launchVerified !== true) {
-    return "New-Launch Candidate";
-  }
-
-  return type;
-}
 function customerCallStageV1228(candidate, baselineLike=null) {
   const exactPoolId = normalize(
     baselineLike?.exactPoolId ||
@@ -17837,14 +17649,13 @@ function customerCallStageV1228(candidate, baselineLike=null) {
 function customerCallTitleV1228(call) {
   const stage = call?.customerCallStageV1228 || {};
   if (stage?.verifiedCall === true) {
-    const type = customerLaunchCallTypeV1231(call);
-    return `🚨 <b>${escapeHtml(stage.premiumHeader || "ChainVanta Verified Call")}</b> · ${escapeHtml(type)}`;
+    return `🚨 <b>${escapeHtml(stage.premiumHeader || "ChainVanta Verified Call")}</b> · ${escapeHtml(call?.callType || "Qualified Call")}`;
   }
 
-  let type = customerLaunchCallTypeV1231(call);
-  if (/new-launch candidate/i.test(type)) type = "New-Launch Candidate";
+  let type = String(call?.callType || "Qualified").trim();
+  if (/new launch/i.test(type)) type = "New-Launch Candidate";
   else if (/re-alert/i.test(type)) type = "Candidate Re-Alert";
-  else if (!/candidate/i.test(type)) type = `${type} Candidate`;
+  else type = `${type} Candidate`;
 
   return `🔎 <b>${escapeHtml(stage?.premiumHeader || "ChainVanta Early Discovery")}</b> · ${escapeHtml(type)}`;
 }
@@ -17852,14 +17663,13 @@ function customerCallTitleV1228(call) {
 function customerFreeTitleV1228(call) {
   const stage = call?.customerCallStageV1228 || {};
   if (stage?.verifiedCall === true) {
-    const type = customerLaunchCallTypeV1231(call);
-    return `🚨 <b>${escapeHtml(stage.freeHeader || "ChainVanta Free Alert")}</b> · ${escapeHtml(type)}`;
+    return `🚨 <b>${escapeHtml(stage.freeHeader || "ChainVanta Free Alert")}</b> · ${escapeHtml(call?.callType || "Qualified Call")}`;
   }
 
-  let type = customerLaunchCallTypeV1231(call);
-  if (/new-launch candidate/i.test(type)) type = "New-Launch Candidate";
+  let type = String(call?.callType || "Qualified").trim();
+  if (/new launch/i.test(type)) type = "New-Launch Candidate";
   else if (/re-alert/i.test(type)) type = "Candidate Re-Alert";
-  else if (!/candidate/i.test(type)) type = `${type} Candidate`;
+  else type = `${type} Candidate`;
 
   return `🔎 <b>${escapeHtml(stage?.freeHeader || "ChainVanta Free Discovery")}</b> · ${escapeHtml(type)}`;
 }
@@ -17908,7 +17718,7 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
     address:normalize(candidate?.address),
     symbol:candidate?.symbol || null,
     callType,
-    customerEnrichmentVersion:"V1231",
+    customerEnrichmentVersion:"V1229",
     customerCallStageV1228:provisionalStageV1228,
     customerAlertStageV1228:provisionalStageV1228.stage,
     customerVerifiedCallV1228:provisionalStageV1228.verifiedCall === true,
@@ -17916,25 +17726,6 @@ function customerCallBaselineV1175(candidate, previousAlert = null, capturedAt =
     customerPerformanceLabelV1228:provisionalStageV1228.performanceLabel,
     customerAlertStageV1229:provisionalStageV1228.stage,
     customerVerifiedCallV1229:provisionalStageV1228.verifiedCall === true,
-    immediateLaunchVerificationV1231:
-      candidate?.immediateCustomerLaunchVerificationV1231
-        ? {
-            status:candidate.immediateCustomerLaunchVerificationV1231.status || null,
-            externalRequestsUsed:safeNumber(candidate.immediateCustomerLaunchVerificationV1231.externalRequestsUsed),
-            verifiedNow:candidate.immediateCustomerLaunchVerificationV1231.verifiedNow === true,
-            promotedFromUnverified:candidate.immediateCustomerLaunchVerificationV1231.promotedFromUnverified === true,
-            protocol:
-              candidate.immediateCustomerLaunchVerificationV1231?.after?.protocol ||
-              candidate.immediateCustomerLaunchVerificationV1231?.completion?.evidenceProtocol ||
-              null,
-            launchTime:
-              candidate.immediateCustomerLaunchVerificationV1231?.after?.launchTime ||
-              candidate.immediateCustomerLaunchVerificationV1231?.completion?.launchTime ||
-              null,
-            launchBlock:
-              safeNumber(candidate.immediateCustomerLaunchVerificationV1231?.completion?.launchBlock) || null
-          }
-        : null,
     immediateEntryVerificationV1229:
       candidate?.immediateCustomerEntryVerificationV1229
         ? {
@@ -18042,9 +17833,6 @@ function telegramProductionMessageV1175(candidate, baseline = null) {
     `🎯 Opportunity <b>${safeNumber(candidate?.opportunity?.score)}/100</b> · Confidence <b>${safeNumber(candidate?.confidence?.score)}/100</b>`,
     `🚀 Momentum <b>${safeNumber(candidate?.momentum?.score)}/100 ${escapeHtml(candidate?.momentum?.label || "")}</b> · Risk <b>${escapeHtml(riskText)}</b>`,
     `🕒 Launch age: <b>${escapeHtml(call?.launchAgeDisplayV1178 || "UNVERIFIED")}</b>${call?.launchAgeVerifiedV1178===true?" · VERIFIED":""}`,
-    call?.launchAgeVerifiedV1178===true
-      ? `✅ Launch status: <b>VERIFIED</b>${call?.immediateLaunchVerificationV1231?.promotedFromUnverified===true?" · same-run verification":""}`
-      : `⏳ Launch status: <b>CANDIDATE</b> · exact launch timestamp not yet proven`,
     `🧩 Narrative: <b>${escapeHtml(call?.narrativeDisplayV1178 || "UNVERIFIED")}</b>${narrativeStatusSuffixV1227(call)}`,
     `💵 Entry <b>${escapeHtml(entryText)}</b> · ${entryProof}`,
     call?.customerVerifiedCallV1228 === true
@@ -126819,17 +126607,6 @@ for (
       continue;
     }
 
-    // V1231: resolve strict protocol launch evidence for this exact customer
-    // candidate before rendering. Already-verified launch age is reused with
-    // zero extra requests; unresolved candidates reuse the existing V258 path.
-    candidate.immediateCustomerLaunchVerificationV1231 =
-      await immediateCustomerLaunchVerificationV1231(
-        env,
-        state,
-        budget,
-        candidate
-      );
-
     // V1229: once the candidate has passed all existing customer alert gates,
     // immediately try to establish exact-pool execution evidence before rendering.
     // This is the initial verification bridge; it does not wait for the later
@@ -127065,8 +126842,6 @@ for (
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.customerVerifiedCallV1228 === true,
         customerStageReasonV1228:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.customerStageReasonV1228 || null,
-        immediateLaunchVerificationV1231:
-          callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.immediateLaunchVerificationV1231 || null,
         immediateEntryVerificationV1229:
           callPerformanceRegistrationV270?.latestCustomerCallBaselineV1175?.immediateEntryVerificationV1229 || null,
         customerNarrativeEvidenceV1178:
@@ -180912,7 +180687,6 @@ function telegramHelpV271() {
     "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
     "<code>/freequeue</code> — V1226 durable delayed Free-call queue + per-call delivery provenance (read-only)",
     "<code>/narrativeaudit [SYMBOL|0xTOKEN]</code> — V1227 narrative evidence provenance/cache (read-only)",
-    "<code>/launchverify</code> — V1231 last immediate strict launch verification result (read-only)",
     "<code>/entryverify</code> — V1230 last exact-pool/entry verification provenance, including already-verified outcomes (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -182294,40 +182068,6 @@ async function telegramCommandReplyV271(
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
-  if (parsed.command === "/launchverify") {
-    const loadedV1231 = await readState(env);
-    const rowV1231 = loadedV1231?.state?.immediateCustomerLaunchVerificationV1231 || null;
-    const replyV1231 = rowV1231
-      ? [
-          "🕒 <b>Immediate Launch Verification — V1231</b>",
-          "",
-          `Token: <b>${escapeHtml(rowV1231?.symbol || "UNKNOWN")}</b>`,
-          `Address: <code>${escapeHtml(rowV1231?.tokenAddress || "UNVERIFIED")}</code>`,
-          `Status: <b>${escapeHtml(rowV1231?.status || "UNKNOWN")}</b>`,
-          `Already verified before pass: <b>${rowV1231?.before?.verified===true?"YES":"NO"}</b>`,
-          `Launch verified after: <b>${rowV1231?.after?.verified===true?"YES":"NO"}</b>`,
-          `Same-run promotion: <b>${rowV1231?.promotedFromUnverified===true?"YES":"NO"}</b>`,
-          `Protocol: <b>${escapeHtml(rowV1231?.after?.protocol || rowV1231?.completion?.evidenceProtocol || "UNVERIFIED")}</b>`,
-          `Launch block: <code>${rowV1231?.completion?.launchBlock || "UNVERIFIED"}</code>`,
-          `Launch time: <code>${escapeHtml(rowV1231?.after?.launchTime || rowV1231?.completion?.launchTime || "UNVERIFIED")}</code>`,
-          `Block timestamp recovery: <b>${escapeHtml(rowV1231?.completion?.blockTimestampStatus || "NOT_NEEDED_OR_NOT_RUN")}</b>`,
-          `Requests used: <b>${safeNumber(rowV1231?.externalRequestsUsed)}</b>`,
-          "",
-          "<i>Read-only. Scanner age, pair age and generic V4 Initialize time are never promoted to protocol launch age.</i>"
-        ].join("\n")
-      : "🕒 <b>Immediate Launch Verification — V1231</b>\n\nNo V1231 customer launch-verification attempt recorded yet.";
-    if (diagnosticV273) diagnosticV273.replyAttempted = true;
-    const sentV1231 = await sendTelegram(env, replyV1231, null, null);
-    if (diagnosticV273) {
-      diagnosticV273.replySuccess = sentV1231?.success === true;
-      diagnosticV273.telegramStatus = sentV1231?.status || null;
-      diagnosticV273.telegramMode = sentV1231?.mode || null;
-      diagnosticV273.telegramError = sentV1231?.error || null;
-      diagnosticV273.result = sentV1231?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
-    }
-    return {success:sentV1231?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
-  }
-
   if (parsed.command === "/entryverify") {
     const loadedV1229 = await readState(env);
     const rowV1229 = loadedV1229?.state?.immediateCustomerEntryVerificationV1229 || null;
