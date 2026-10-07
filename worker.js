@@ -1,3 +1,4 @@
+// V1215 — Telegram webhook authentication fail-closed. Requires configured TELEGRAM_WEBHOOK_SECRET.
 // V1214 — propagate V1213 scan-relay secret from the Durable Object relay to /scan. Security-only fix.
 // V1213 — scan relay authentication hardening only. Scheduled relay requires a dedicated secret; manual /scan requires WebDiag.
 // V1212 — internal API surface lockdown. Customer/webhook/WebDiag bootstrap routes remain public as required.
@@ -10023,7 +10024,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1214";
+const VERSION = "V1215";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -198618,24 +198619,41 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     request.method ===
       "POST"
   ) {
-    if (
-      env.TELEGRAM_WEBHOOK_SECRET &&
-      request.headers.get(
-        "x-telegram-bot-api-secret-token"
-      ) !==
-        String(
-          env.TELEGRAM_WEBHOOK_SECRET
-        )
-    ) {
+    const telegramWebhookSecretV1215 =
+      String(env?.TELEGRAM_WEBHOOK_SECRET || "").trim();
+
+    // V1215: fail closed. Missing server-side configuration must never
+    // turn into permission to accept an unauthenticated Telegram update.
+    if (!telegramWebhookSecretV1215) {
       return jsonResponse(
         {
-          ok: true,
+          ok: false,
           version: VERSION,
           ignored: true,
           reason:
-            "WEBHOOK_SECRET_MISMATCH",
+            "TELEGRAM_WEBHOOK_SECRET_NOT_CONFIGURED_V1215",
           timestamp: now()
-        }
+        },
+        503
+      );
+    }
+
+    if (
+      request.headers.get(
+        "x-telegram-bot-api-secret-token"
+      ) !==
+        telegramWebhookSecretV1215
+    ) {
+      return jsonResponse(
+        {
+          ok: false,
+          version: VERSION,
+          ignored: true,
+          reason:
+            "TELEGRAM_WEBHOOK_SECRET_MISMATCH_V1215",
+          timestamp: now()
+        },
+        401
       );
     }
 
