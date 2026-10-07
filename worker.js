@@ -1,3 +1,4 @@
+// V1225 — WebDiag Research & Reporting Suite: protected portal integration + copy/download/home for new owner diagnostics.
 // V1224 — Forward Research Capture: genuine-call 5s→7d horizon capture with target-aware sparse scheduling; scoring unchanged.
 // V1223 — Professional Call Research Lab: microstructure-to-7d outcomes, data-quality gating, fast-spike/persistence classification, holdout-safe research plan.
 // V1222 — Call Quality Laboratory: read-only feature coverage, quartiles, timing and offline single-factor simulations.
@@ -10033,7 +10034,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1224";
+const VERSION = "V1225";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -199049,6 +199050,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
   "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel",
+  "/callquality","/calllab","/callresearch","/capturestatus","/freequeue","/stripereconcile-preview",
 
   // V1210: legacy/internal diagnostic and operational inspection routes must
   // pass the same closed-by-default WebDiag authorization before their
@@ -199305,6 +199307,16 @@ function webDiagHomeHtmlV1190(auth){
     ["Outcome Intelligence",[
       ["/webdiag-outcomeintel","Outcome Intelligence","Forward-only 5s→7d outcome audit, observer backlog and provenance"]
     ]],
+    ["Call Research & Learning",[
+      ["/callquality","Call Quality","Winner/failure comparison and evidence-backed tuning candidates"],
+      ["/calllab","Call Laboratory","Feature spread, milestone timing, horizons and offline simulations"],
+      ["/callresearch","Professional Call Research","Microstructure-to-7d research, data-quality gating and holdout protocol"],
+      ["/capturestatus","Forward Capture Status","V1224 genuine-call 5s→7d forward capture coverage"]
+    ]],
+    ["Delivery & Subscription",[
+      ["/freequeue","Free Delayed Queue","Pending, due, sent, failed and dropped Free-call deliveries"],
+      ["/stripereconcile-preview","Stripe Reconcile Preview","Read-only Stripe-authoritative subscription reconciliation preview"]
+    ]],
     ["Performance",[
       ["/performance?period=24h","Performance — 24h","Recent performance window"],
       ["/performance?period=7d","Performance — 7d","Seven-day performance"],
@@ -199319,7 +199331,7 @@ function webDiagHomeHtmlV1190(auth){
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ChainVanta Admin Diagnostics</title>
 <style>
 :root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1040px;margin:0 auto;padding:18px 16px 40px}.top{background:#101828;color:#fff;border-radius:18px;padding:20px;margin-bottom:16px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#98a2b3}.top h1{font-size:26px;margin:7px 0 8px}.top p{margin:0;color:#d0d5dd;line-height:1.5}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px}.status{background:#1d2939;border-radius:12px;padding:12px}.status b{display:block;color:#fff;font-size:14px}.status span{display:block;color:#98a2b3;font-size:12px;margin-top:4px;line-height:1.35}.group{background:#fff;border:1px solid #e4e7ec;border-radius:16px;padding:16px;margin-top:14px}.group h2{font-size:17px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tool{position:relative;display:block;text-decoration:none;color:#101828;border:1px solid #e4e7ec;border-radius:13px;padding:14px 38px 14px 14px;min-height:78px;background:#fff}.tool:active{background:#f9fafb}.tool-title{display:block;font-size:15px;font-weight:750}.tool-desc{display:block;font-size:12px;color:#667085;line-height:1.4;margin-top:5px}.arrow{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:24px;color:#98a2b3}.utility{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.utility a,.utility button{width:100%;appearance:none;border-radius:12px;padding:13px 14px;font:inherit;font-weight:750;cursor:pointer;text-align:center}.secondary{border:1px solid #d0d5dd;background:#fff;color:#101828;text-decoration:none}.danger{border:1px solid #fda29b;background:#fff5f4;color:#b42318}.note{font-size:12px;color:#667085;line-height:1.5;margin-top:14px;padding:0 2px}.token-note{background:#fff;border:1px dashed #d0d5dd;border-radius:14px;padding:14px;margin-top:14px;font-size:13px;color:#475467;line-height:1.55}.launcher-copy{margin:0 0 12px;color:#667085;font-size:13px;line-height:1.5}.token-launcher{display:grid;grid-template-columns:1fr 220px auto;gap:10px;align-items:end}.token-launcher label{font-size:12px;font-weight:700;color:#475467;grid-row:1}.token-launcher input,.token-launcher select{width:100%;border:1px solid #d0d5dd;border-radius:11px;background:#fff;color:#101828;padding:12px 12px;font:inherit;min-height:46px}.token-launcher input{grid-column:1}.token-launcher select{grid-column:2}.token-launcher .primary{grid-column:3;appearance:none;border:0;border-radius:11px;background:#101828;color:#fff;padding:12px 16px;font:inherit;font-weight:750;min-height:46px}.utility.single{grid-template-columns:1fr}.utility.single form{width:100%}code{word-break:break-all}@media(max-width:680px){.status-grid{grid-template-columns:1fr}.grid,.utility,.token-launcher{grid-template-columns:1fr}.token-launcher label,.token-launcher input,.token-launcher select,.token-launcher .primary{grid-column:1;grid-row:auto}.top h1{font-size:23px}.wrap{padding:12px 12px 32px}}
-</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>${webDiagHtmlEscapeV1184(cfDetail)}</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<section class="group"><h2>Token-specific diagnostics</h2><p class="launcher-copy">Paste a token contract address and open one of the existing protected token reports directly.</p><form class="token-launcher" method="post" action="/webdiag-token-open"><label for="token-v1190">Token contract</label><input id="token-v1190" name="token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x…" required pattern="0x[0-9a-fA-F]{40}"><label for="tool-v1190">Diagnostic</label><select id="tool-v1190" name="tool"><option value="telegramwhy">Telegram why</option><option value="marketwhy">Market why</option><option value="sendwhy">Send why</option></select><button class="primary" type="submit">Open token diagnostic</button></form></section><div class="utility single"><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
+</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>${webDiagHtmlEscapeV1184(cfDetail)}</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<section class="group"><h2>Token-specific diagnostics</h2><p class="launcher-copy">Paste a token contract address and open one of the existing protected token reports directly.</p><form class="token-launcher" method="post" action="/webdiag-token-open"><label for="token-v1190">Token contract</label><input id="token-v1190" name="token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x…" required pattern="0x[0-9a-fA-F]{40}"><label for="tool-v1190">Diagnostic</label><select id="tool-v1190" name="tool"><option value="telegramwhy">Telegram why</option><option value="marketwhy">Market why</option><option value="sendwhy">Send why</option></select><button class="primary" type="submit">Open token diagnostic</button></form></section><div class="utility single"><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Report controls:</b> protected long-form reports use the same owner UX throughout — <b>Copy full diagnostic</b>, <b>Download .txt</b> and <b>Diagnostics home</b>.</p><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
 }
 
 function webDiagRouteCookieValueV1188(request){
@@ -199596,6 +199608,11 @@ function webDiagLongRouteV1179(path,state,env,url=null){
     return marketCompletionAuditTelegramV968(result);
   }
   if(path==="/performance") return performanceSummaryV271(state,{detail:true,period:url?.searchParams?.get("period")||"all"});
+  if(path==="/callquality") return callQualityIntelligenceMessageV1221(state);
+  if(path==="/calllab") return callQualityLaboratoryMessageV1222(state);
+  if(path==="/callresearch") return professionalCallResearchLabMessageV1223(state);
+  if(path==="/capturestatus") return researchCaptureStatusMessageV1224(state);
+  if(path==="/freequeue") return freeQueueTelegramV1029(state);
   return null;
 }
 
@@ -199608,7 +199625,13 @@ function webDiagRouteForCommandV1179(command){
     "/rescoreaudit":"/rescoreaudit","/rescoretrigger":"/rescoreaudit",
     "/riskaudit":"/riskaudit","/riskcompletion":"/riskaudit",
     "/holderaudit":"/holderaudit","/holderrecovery":"/holderaudit",
-    "/performance":"/performance"
+    "/performance":"/performance",
+    "/callquality":"/callquality",
+    "/calllab":"/calllab",
+    "/callresearch":"/callresearch",
+    "/capturestatus":"/capturestatus",
+    "/freequeue":"/freequeue",
+    "/stripereconcile":"/stripereconcile-preview"
   };
   return map[c]||null;
 }
@@ -201782,6 +201805,23 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         return webDiagDownloadResponseV1184(outcomeWebV1203,"chainvanta-outcome-intelligence.txt");
       }
       return webDiagHtmlResponseV1184("ChainVanta Outcome Intelligence",outcomeWebV1203,url);
+    }
+
+    // V1225: protected Stripe reconciliation is PREVIEW-ONLY on the web.
+    // No "apply" action is exposed through WebDiag.
+    if (path === "/stripereconcile-preview") {
+      const requestedUidV1225 = String(url.searchParams.get("telegramUserId")||"").trim();
+      const fallbackUidV1225 = String(CHAINVANTA_OWNER_TELEGRAM_USER_ID_V1044||"").trim();
+      const uidV1225 = /^\d+$/.test(requestedUidV1225) ? requestedUidV1225 : fallbackUidV1225;
+      const previewV1225 = await stripeSubscriptionReconcileAdminMessageV1219(
+        env,
+        uidV1225,
+        uidV1225
+      );
+      if (String(url.searchParams.get("download")||"") === "1") {
+        return webDiagDownloadResponseV1184(previewV1225,"chainvanta-stripe-reconcile-preview.txt");
+      }
+      return webDiagHtmlResponseV1184("ChainVanta Stripe Reconcile Preview",previewV1225,url);
     }
 
     const longV1179 = webDiagLongRouteV1179(path,stateAuthV1179,env,url);
