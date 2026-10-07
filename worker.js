@@ -1,3 +1,4 @@
+// V1226 — Free delivery durability: D1-isolated queue + per-call delivery provenance; no scanner/scoring changes.
 // V1225 — WebDiag Research & Reporting Suite: protected portal integration + copy/download/home for new owner diagnostics.
 // V1224 — Forward Research Capture: genuine-call 5s→7d horizon capture with target-aware sparse scheduling; scoring unchanged.
 // V1223 — Professional Call Research Lab: microstructure-to-7d outcomes, data-quality gating, fast-spike/persistence classification, holdout-safe research plan.
@@ -10034,7 +10035,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1225";
+const VERSION = "V1226";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -83148,6 +83149,533 @@ function freeQueueTelegramV1029(state) {
 }
 
 /* =========================================================
+   V1226 — DURABLE FREE-CALL DELIVERY QUEUE + PROVENANCE
+   D1 isolates delayed Free delivery from whole-state KV writes so a concurrent
+   scanner/state checkpoint cannot erase a newly queued Premium call.
+   ========================================================= */
+let freeQueueSchemaReadyV1226 = false;
+
+async function ensureFreeQueueSchemaV1226(env, legacyState=null) {
+  const db=env?.CHAINVANTA_DB;
+  if(!db) return {ok:false,reason:"CHAINVANTA_DB_NOT_CONFIGURED_V1226"};
+
+  try {
+    if(!freeQueueSchemaReadyV1226){
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS free_delivery_queue_v1226 (
+          key TEXT PRIMARY KEY,
+          address TEXT,
+          symbol TEXT,
+          message TEXT NOT NULL,
+          image_url TEXT,
+          premium_message_id INTEGER,
+          enqueued_at INTEGER NOT NULL,
+          due_at INTEGER NOT NULL,
+          next_attempt_at INTEGER NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_attempt_at INTEGER,
+          last_error TEXT,
+          message_mode TEXT,
+          status TEXT NOT NULL DEFAULT 'PENDING',
+          claim_token TEXT,
+          claim_until INTEGER,
+          updated_at INTEGER NOT NULL
+        )
+      `).run();
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_free_delivery_due_v1226
+        ON free_delivery_queue_v1226(status,next_attempt_at)
+      `).run();
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS free_delivery_audit_v1226 (
+          key TEXT PRIMARY KEY,
+          address TEXT,
+          symbol TEXT,
+          premium_message_id INTEGER,
+          message_mode TEXT,
+          status TEXT NOT NULL,
+          reason TEXT,
+          enqueued_at INTEGER,
+          due_at INTEGER,
+          sent_at INTEGER,
+          dropped_at INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          updated_at INTEGER NOT NULL
+        )
+      `).run();
+      await db.prepare(`
+        CREATE TABLE IF NOT EXISTS free_delivery_meta_v1226 (
+          id INTEGER PRIMARY KEY,
+          total_enqueued INTEGER NOT NULL DEFAULT 0,
+          total_sent INTEGER NOT NULL DEFAULT 0,
+          total_failed_attempts INTEGER NOT NULL DEFAULT 0,
+          total_dropped INTEGER NOT NULL DEFAULT 0,
+          last_sent_at INTEGER,
+          last_updated_at INTEGER NOT NULL
+        )
+      `).run();
+      freeQueueSchemaReadyV1226=true;
+    }
+
+    const legacy=legacyState?.freeCallQueueV1028;
+    const nowMs=Date.now();
+    await db.prepare(`
+      INSERT OR IGNORE INTO free_delivery_meta_v1226
+      (id,total_enqueued,total_sent,total_failed_attempts,total_dropped,last_sent_at,last_updated_at)
+      VALUES (1,?,?,?,?,?,?)
+    `).bind(
+      safeNumber(legacy?.totalEnqueued),
+      safeNumber(legacy?.totalSent),
+      safeNumber(legacy?.totalFailedAttempts),
+      safeNumber(legacy?.totalDropped),
+      Number(legacy?.lastSentAt)||null,
+      nowMs
+    ).run();
+
+    return {ok:true,db};
+  } catch(error) {
+    return {ok:false,reason:"FREE_QUEUE_SCHEMA_FAILED_V1226",error:errorString(error)};
+  }
+}
+
+async function migrateLegacyFreeQueueV1226(env, legacyState) {
+  const ready=await ensureFreeQueueSchemaV1226(env,legacyState);
+  if(!ready?.ok) return {...ready,migrated:0};
+  const db=ready.db;
+  const entries=Array.isArray(legacyState?.freeCallQueueV1028?.entries)
+    ? legacyState.freeCallQueueV1028.entries
+    : [];
+  let migrated=0;
+  for(const row of entries){
+    const key=String(row?.key||"").trim();
+    const message=String(row?.message||"");
+    const enqueuedAt=Number(row?.enqueuedAt||0);
+    const dueAt=Number(row?.dueAt||0);
+    const nextAttemptAt=Number(row?.nextAttemptAt||dueAt||0);
+    if(!key || !message || !enqueuedAt || !dueAt || !nextAttemptAt) continue;
+    const nowMs=Date.now();
+    const ins=await db.prepare(`
+      INSERT OR IGNORE INTO free_delivery_queue_v1226
+      (key,address,symbol,message,image_url,premium_message_id,enqueued_at,due_at,next_attempt_at,
+       attempts,last_attempt_at,last_error,message_mode,status,claim_token,claim_until,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,NULL,?)
+    `).bind(
+      key,
+      row?.address||null,
+      row?.symbol||null,
+      message,
+      row?.imageUrl||null,
+      Number(row?.premiumMessageId)||null,
+      enqueuedAt,
+      dueAt,
+      nextAttemptAt,
+      safeNumber(row?.attempts),
+      Number(row?.lastAttemptAt)||null,
+      row?.lastError||null,
+      String(row?.messageMode||"LEGACY_FULL_COPY_V1028"),
+      nowMs
+    ).run();
+    if(safeNumber(ins?.meta?.changes)>0){
+      migrated++;
+      await db.prepare(`
+        INSERT OR IGNORE INTO free_delivery_audit_v1226
+        (key,address,symbol,premium_message_id,message_mode,status,reason,enqueued_at,due_at,
+         sent_at,dropped_at,attempts,last_error,updated_at)
+        VALUES (?,?,?,?,?,'PENDING','MIGRATED_FROM_V1028',?,?,NULL,NULL,?,?,?)
+      `).bind(
+        key,
+        row?.address||null,
+        row?.symbol||null,
+        Number(row?.premiumMessageId)||null,
+        String(row?.messageMode||"LEGACY_FULL_COPY_V1028"),
+        enqueuedAt,
+        dueAt,
+        safeNumber(row?.attempts),
+        row?.lastError||null,
+        nowMs
+      ).run();
+    }
+  }
+  return {ok:true,migrated};
+}
+
+async function recordFreeDeliveryAuditOnlyV1226(env, {
+  key,address,symbol,premiumMessageId,messageMode,status,reason,enqueuedAt,dueAt
+}) {
+  const ready=await ensureFreeQueueSchemaV1226(env,null);
+  if(!ready?.ok) return ready;
+  try{
+    await ready.db.prepare(`
+      INSERT INTO free_delivery_audit_v1226
+      (key,address,symbol,premium_message_id,message_mode,status,reason,enqueued_at,due_at,
+       sent_at,dropped_at,attempts,last_error,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,NULL,NULL,0,NULL,?)
+      ON CONFLICT(key) DO UPDATE SET
+        status=excluded.status,
+        reason=excluded.reason,
+        updated_at=excluded.updated_at
+    `).bind(
+      key,address||null,symbol||null,premiumMessageId||null,messageMode||null,
+      status,reason||null,enqueuedAt||null,dueAt||null,Date.now()
+    ).run();
+    return {ok:true};
+  }catch(error){
+    return {ok:false,reason:"FREE_QUEUE_AUDIT_WRITE_FAILED_V1226",error:errorString(error)};
+  }
+}
+
+async function enqueueFreeCallV1226(
+  env,state,candidate,renderedMessage,premiumResult,imageUrl=null,messageMode="FREE_TEASER_V1176"
+) {
+  const nowMs=Date.now();
+  const premiumMessageId=Number(premiumResult?.data?.result?.message_id);
+  const address=normalize(candidate?.address||"");
+  const key=Number.isFinite(premiumMessageId)&&premiumMessageId>0
+    ? `premium:${premiumMessageId}`
+    : `${address||"unknown"}:${nowMs}`;
+  const freeConfigured=Boolean(String(env?.TELEGRAM_FREE_CHAT_ID||"").trim());
+  const premiumConfigured=Boolean(String(env?.TELEGRAM_PREMIUM_CHAT_ID||"").trim());
+
+  if(premiumResult?.success!==true){
+    return {queued:false,status:"PREMIUM_SEND_NOT_SUCCESSFUL_V1226",key};
+  }
+
+  if(!freeConfigured || !premiumConfigured){
+    await recordFreeDeliveryAuditOnlyV1226(env,{
+      key,address,symbol:candidate?.symbol||null,premiumMessageId,
+      messageMode,status:"NOT_QUEUED",reason:"FREE_OR_PREMIUM_CHAT_NOT_CONFIGURED_V1226",
+      enqueuedAt:nowMs,dueAt:null
+    });
+    return {queued:false,status:"FREE_OR_PREMIUM_CHAT_NOT_CONFIGURED_V1226",key};
+  }
+
+  if(!renderedMessage){
+    await recordFreeDeliveryAuditOnlyV1226(env,{
+      key,address,symbol:candidate?.symbol||null,premiumMessageId,
+      messageMode,status:"NOT_QUEUED",reason:"FREE_TEASER_EMPTY_V1226",
+      enqueuedAt:nowMs,dueAt:null
+    });
+    return {queued:false,status:"FREE_TEASER_EMPTY_V1226",key};
+  }
+
+  const ready=await ensureFreeQueueSchemaV1226(env,state);
+  if(!ready?.ok){
+    const fallback=enqueueFreeCallV1028(
+      state,candidate,renderedMessage,premiumResult,imageUrl,messageMode
+    );
+    return {
+      ...fallback,
+      status:fallback?.queued===true
+        ? "KV_FALLBACK_QUEUED_V1226"
+        : "D1_UNAVAILABLE_AND_FALLBACK_FAILED_V1226",
+      durable:false,
+      d1Error:ready?.reason||ready?.error||null
+    };
+  }
+
+  try{
+    await migrateLegacyFreeQueueV1226(env,state);
+    const dueAt=nowMs+V1028_FREE_DELAY_MS;
+    const ins=await ready.db.prepare(`
+      INSERT OR IGNORE INTO free_delivery_queue_v1226
+      (key,address,symbol,message,image_url,premium_message_id,enqueued_at,due_at,next_attempt_at,
+       attempts,last_attempt_at,last_error,message_mode,status,claim_token,claim_until,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,0,NULL,NULL,?,'PENDING',NULL,NULL,?)
+    `).bind(
+      key,address||null,candidate?.symbol||null,String(renderedMessage),
+      imageUrl?String(imageUrl):null,
+      Number.isFinite(premiumMessageId)?premiumMessageId:null,
+      nowMs,dueAt,dueAt,String(messageMode||"FREE_TEASER_V1176"),nowMs
+    ).run();
+
+    const inserted=safeNumber(ins?.meta?.changes)>0;
+    if(inserted){
+      await ready.db.prepare(`
+        INSERT INTO free_delivery_audit_v1226
+        (key,address,symbol,premium_message_id,message_mode,status,reason,enqueued_at,due_at,
+         sent_at,dropped_at,attempts,last_error,updated_at)
+        VALUES (?,?,?,?,?,'QUEUED','D1_DURABLE_QUEUE_V1226',?,?,NULL,NULL,0,NULL,?)
+        ON CONFLICT(key) DO UPDATE SET
+          status='QUEUED',
+          reason='D1_DURABLE_QUEUE_V1226',
+          enqueued_at=excluded.enqueued_at,
+          due_at=excluded.due_at,
+          attempts=0,
+          last_error=NULL,
+          updated_at=excluded.updated_at
+      `).bind(
+        key,address||null,candidate?.symbol||null,
+        Number.isFinite(premiumMessageId)?premiumMessageId:null,
+        String(messageMode||"FREE_TEASER_V1176"),
+        nowMs,dueAt,nowMs
+      ).run();
+      await ready.db.prepare(`
+        UPDATE free_delivery_meta_v1226
+        SET total_enqueued=total_enqueued+1,last_updated_at=?
+        WHERE id=1
+      `).bind(nowMs).run();
+      return {
+        queued:true,status:"QUEUED_DURABLE_D1_V1226",key,dueAt,
+        durable:true,messageMode:String(messageMode||"FREE_TEASER_V1176")
+      };
+    }
+
+    const existing=await ready.db.prepare(`
+      SELECT status,due_at FROM free_delivery_audit_v1226 WHERE key=? LIMIT 1
+    `).bind(key).first();
+    return {
+      queued:false,status:"ALREADY_QUEUED_OR_DELIVERED_V1226",key,
+      dueAt:Number(existing?.due_at)||null,
+      deliveryStatus:existing?.status||null,
+      durable:true
+    };
+  }catch(error){
+    const fallback=enqueueFreeCallV1028(
+      state,candidate,renderedMessage,premiumResult,imageUrl,messageMode
+    );
+    return {
+      ...fallback,
+      status:fallback?.queued===true
+        ? "KV_FALLBACK_QUEUED_AFTER_D1_ERROR_V1226"
+        : "D1_ENQUEUE_FAILED_V1226",
+      durable:false,
+      error:errorString(error)
+    };
+  }
+}
+
+async function processDueFreeCallsV1226(env) {
+  const freeChatId=String(env?.TELEGRAM_FREE_CHAT_ID||"").trim();
+  if(!freeChatId){
+    return {enabled:false,status:"FREE_CHAT_NOT_CONFIGURED_V1226",providerRequests:0};
+  }
+
+  const loaded=await readState(env);
+  const legacyState=loaded?.state||newState();
+  const ready=await ensureFreeQueueSchemaV1226(env,legacyState);
+  if(!ready?.ok){
+    const fallback=await processDueFreeCallsV1028(env);
+    return {...fallback,status:"D1_UNAVAILABLE_KV_FALLBACK_V1226",durable:false};
+  }
+
+  const db=ready.db;
+  const nowMs=Date.now();
+  await migrateLegacyFreeQueueV1226(env,legacyState);
+
+  // Recover interrupted claims without duplicate parallel sends.
+  await db.prepare(`
+    UPDATE free_delivery_queue_v1226
+    SET status='PENDING',claim_token=NULL,claim_until=NULL,updated_at=?
+    WHERE status='SENDING' AND claim_until IS NOT NULL AND claim_until<=?
+  `).bind(nowMs,nowMs).run();
+
+  let dropped=0,attempted=0,sent=0,failed=0;
+
+  const expired=await db.prepare(`
+    SELECT key,attempts FROM free_delivery_queue_v1226
+    WHERE (enqueued_at<? OR attempts>=?)
+    LIMIT 100
+  `).bind(nowMs-V1028_FREE_MAX_AGE_MS,V1028_FREE_MAX_ATTEMPTS).all();
+
+  for(const row of expired?.results||[]){
+    const key=String(row?.key||"");
+    if(!key) continue;
+    await db.prepare(`
+      UPDATE free_delivery_audit_v1226
+      SET status='DROPPED',reason='MAX_AGE_OR_ATTEMPTS_V1226',dropped_at=?,updated_at=?
+      WHERE key=?
+    `).bind(nowMs,nowMs,key).run();
+    const del=await db.prepare(`DELETE FROM free_delivery_queue_v1226 WHERE key=?`).bind(key).run();
+    if(safeNumber(del?.meta?.changes)>0) dropped++;
+  }
+  if(dropped){
+    await db.prepare(`
+      UPDATE free_delivery_meta_v1226
+      SET total_dropped=total_dropped+?,last_updated_at=? WHERE id=1
+    `).bind(dropped,nowMs).run();
+  }
+
+  const due=await db.prepare(`
+    SELECT key FROM free_delivery_queue_v1226
+    WHERE status='PENDING' AND next_attempt_at<=?
+    ORDER BY next_attempt_at ASC
+    LIMIT ?
+  `).bind(nowMs,V1028_FREE_SENDS_PER_RUN).all();
+
+  for(const candidateRow of due?.results||[]){
+    const key=String(candidateRow?.key||"");
+    if(!key) continue;
+    const claimToken=(globalThis.crypto?.randomUUID?.()||`${nowMs}-${Math.random()}`).slice(0,80);
+    const claimUntil=Date.now()+2*60*1000;
+
+    await db.prepare(`
+      UPDATE free_delivery_queue_v1226
+      SET status='SENDING',claim_token=?,claim_until=?,updated_at=?
+      WHERE key=? AND status='PENDING' AND next_attempt_at<=?
+    `).bind(claimToken,claimUntil,Date.now(),key,Date.now()).run();
+
+    const row=await db.prepare(`
+      SELECT * FROM free_delivery_queue_v1226
+      WHERE key=? AND status='SENDING' AND claim_token=? LIMIT 1
+    `).bind(key,claimToken).first();
+    if(!row) continue;
+
+    attempted++;
+    const delivery=await sendTelegram(
+      env,String(row.message||""),null,row.image_url||null,freeChatId
+    );
+    const eventAt=Date.now();
+
+    if(delivery?.success===true){
+      const del=await db.prepare(`
+        DELETE FROM free_delivery_queue_v1226 WHERE key=? AND claim_token=?
+      `).bind(key,claimToken).run();
+      if(safeNumber(del?.meta?.changes)>0){
+        sent++;
+        await db.prepare(`
+          UPDATE free_delivery_audit_v1226
+          SET status='SENT_TO_FREE',reason='TELEGRAM_SUCCESS_V1226',
+              sent_at=?,attempts=?,last_error=NULL,updated_at=?
+          WHERE key=?
+        `).bind(eventAt,safeNumber(row?.attempts),eventAt,key).run();
+        await db.prepare(`
+          UPDATE free_delivery_meta_v1226
+          SET total_sent=total_sent+1,last_sent_at=?,last_updated_at=?
+          WHERE id=1
+        `).bind(eventAt,eventAt).run();
+      }
+      continue;
+    }
+
+    failed++;
+    const attempts=safeNumber(row?.attempts)+1;
+    const lastError=
+      delivery?.data?.description||delivery?.error||delivery?.reason||
+      `HTTP_${delivery?.status||"UNKNOWN"}`;
+
+    if(attempts>=V1028_FREE_MAX_ATTEMPTS){
+      await db.prepare(`
+        DELETE FROM free_delivery_queue_v1226 WHERE key=? AND claim_token=?
+      `).bind(key,claimToken).run();
+      dropped++;
+      await db.prepare(`
+        UPDATE free_delivery_audit_v1226
+        SET status='DROPPED',reason='MAX_ATTEMPTS_V1226',dropped_at=?,
+            attempts=?,last_error=?,updated_at=?
+        WHERE key=?
+      `).bind(eventAt,attempts,String(lastError).slice(0,500),eventAt,key).run();
+      await db.prepare(`
+        UPDATE free_delivery_meta_v1226
+        SET total_failed_attempts=total_failed_attempts+1,
+            total_dropped=total_dropped+1,last_updated_at=?
+        WHERE id=1
+      `).bind(eventAt).run();
+    }else{
+      await db.prepare(`
+        UPDATE free_delivery_queue_v1226
+        SET status='PENDING',attempts=?,last_attempt_at=?,next_attempt_at=?,
+            last_error=?,claim_token=NULL,claim_until=NULL,updated_at=?
+        WHERE key=? AND claim_token=?
+      `).bind(
+        attempts,eventAt,eventAt+V1028_FREE_RETRY_MS,
+        String(lastError).slice(0,500),eventAt,key,claimToken
+      ).run();
+      await db.prepare(`
+        UPDATE free_delivery_audit_v1226
+        SET status='RETRY_PENDING',reason='TELEGRAM_SEND_FAILED_V1226',
+            attempts=?,last_error=?,updated_at=?
+        WHERE key=?
+      `).bind(attempts,String(lastError).slice(0,500),eventAt,key).run();
+      await db.prepare(`
+        UPDATE free_delivery_meta_v1226
+        SET total_failed_attempts=total_failed_attempts+1,last_updated_at=?
+        WHERE id=1
+      `).bind(eventAt).run();
+    }
+  }
+
+  const pendingRow=await db.prepare(`
+    SELECT COUNT(*) AS n, MIN(next_attempt_at) AS next_due
+    FROM free_delivery_queue_v1226
+    WHERE status IN ('PENDING','SENDING')
+  `).first();
+
+  return {
+    enabled:true,
+    status:"FREE_DELAY_QUEUE_D1_PROCESSED_V1226",
+    durable:true,
+    delayMinutes:30,
+    queuedRemaining:safeNumber(pendingRow?.n),
+    nextDue:Number(pendingRow?.next_due)||null,
+    attempted,sent,failed,dropped,
+    providerRequests:0,
+    scannerBudgetConsumed:false,
+    wholeStateKvWrites:0
+  };
+}
+
+async function freeQueueTelegramV1226(env) {
+  const db=env?.CHAINVANTA_DB;
+  if(!db){
+    const loaded=await readState(env);
+    return freeQueueTelegramV1029(loaded?.state||newState());
+  }
+  try{
+    const meta=await db.prepare(`SELECT * FROM free_delivery_meta_v1226 WHERE id=1`).first();
+    const pending=await db.prepare(`
+      SELECT key,symbol,message_mode,attempts,next_attempt_at,due_at,status
+      FROM free_delivery_queue_v1226
+      WHERE status IN ('PENDING','SENDING')
+      ORDER BY next_attempt_at ASC LIMIT 10
+    `).all();
+    const dueRow=await db.prepare(`
+      SELECT COUNT(*) AS n FROM free_delivery_queue_v1226
+      WHERE status='PENDING' AND next_attempt_at<=?
+    `).bind(Date.now()).first();
+    const recent=await db.prepare(`
+      SELECT symbol,status,reason,premium_message_id,updated_at,last_error
+      FROM free_delivery_audit_v1226
+      ORDER BY updated_at DESC LIMIT 8
+    `).all();
+
+    const rows=pending?.results||[];
+    const lines=[
+      "🕒 <b>Free Delayed-Call Queue — V1226</b>",
+      "",
+      "Authority: <b>D1 DURABLE QUEUE</b>",
+      "Delay: <b>30 minutes</b>",
+      `Pending: <b>${rows.length}</b> · due now: <b>${safeNumber(dueRow?.n)}</b>`,
+      `Total enqueued: <b>${safeNumber(meta?.total_enqueued)}</b>`,
+      `Total sent to Free: <b>${safeNumber(meta?.total_sent)}</b>`,
+      `Failed attempts: <b>${safeNumber(meta?.total_failed_attempts)}</b> · dropped: <b>${safeNumber(meta?.total_dropped)}</b>`,
+      `Last sent: <code>${meta?.last_sent_at?escapeHtml(new Date(Number(meta.last_sent_at)).toISOString()):"NONE"}</code>`,
+      `Next due: <code>${rows[0]?.next_attempt_at?escapeHtml(new Date(Number(rows[0].next_attempt_at)).toISOString()):"NONE"}</code>`,
+      ""
+    ];
+    if(rows.length){
+      lines.push("<b>Pending calls</b>");
+      for(const row of rows){
+        lines.push(`• <b>${escapeHtml(row?.symbol||"UNKNOWN")}</b> · ${escapeHtml(row?.message_mode||"UNKNOWN")} · ${escapeHtml(row?.status||"PENDING")} · attempts ${safeNumber(row?.attempts)} · ${row?.next_attempt_at?escapeHtml(new Date(Number(row.next_attempt_at)).toISOString()):"NO_DUE_TIME"}`);
+      }
+      lines.push("");
+    }
+    lines.push("<b>Recent delivery provenance</b>");
+    for(const row of recent?.results||[]){
+      lines.push(`• <b>${escapeHtml(row?.symbol||"UNKNOWN")}</b> · ${escapeHtml(row?.status||"UNKNOWN")} · ${escapeHtml(row?.reason||"NONE")}${row?.last_error?` · ${escapeHtml(String(row.last_error).slice(0,100))}`:""}`);
+    }
+    lines.push("");
+    lines.push("<i>Read-only. D1 queue is isolated from scanner whole-state KV writes. Zero provider requests and zero state writes.</i>");
+    return lines.join("\\n");
+  }catch(error){
+    const loaded=await readState(env);
+    const fallback=freeQueueTelegramV1029(loaded?.state||newState());
+    return `${fallback}\\n\\n⚠️ V1226 D1 queue diagnostic unavailable: ${escapeHtml(errorString(error))}`;
+  }
+}
+
+
+/* =========================================================
    V412 — TELEGRAM DELIVERY PROVENANCE
    ========================================================= */
 function telegramDeliveryProofV412(result, fallbackChatId = null) {
@@ -125144,12 +125672,13 @@ for (
       // unchanged, so Free cannot gain information through a fresh recalculation.
       // Persistence/retry timing remains the proven V1028 path and adds zero
       // provider/scanner requests.
-      if (String(env.TELEGRAM_PREMIUM_CHAT_ID || "").trim() && String(env.TELEGRAM_FREE_CHAT_ID || "").trim()) {
+      {
         const freeTelegramMessageV1176 =
           telegramFreeTeaserMessageV1176(candidate, customerCallBaselinePreSendV1175);
 
-        telegramResults[telegramResults.length - 1].freeDelayQueueV1028 =
-          enqueueFreeCallV1028(
+        telegramResults[telegramResults.length - 1].freeDelayQueueV1226 =
+          await enqueueFreeCallV1226(
+            env,
             state,
             candidate,
             freeTelegramMessageV1176,
@@ -125157,11 +125686,16 @@ for (
             candidate.market?.imageUrl || null,
             "FREE_TEASER_V1176"
           );
+        // Keep the historical field for compatibility, but V1226 is authoritative.
+        telegramResults[telegramResults.length - 1].freeDelayQueueV1028 =
+          telegramResults[telegramResults.length - 1].freeDelayQueueV1226;
         telegramResults[telegramResults.length - 1].freeRendererV1176 = {
           mode:"FREE_TEASER_V1176",
           chars:freeTelegramMessageV1176.length,
           sameUnderlyingCall:true,
           recalculatedAtFreeSend:false,
+          durableQueueV1226:
+            telegramResults[telegramResults.length - 1].freeDelayQueueV1226?.durable === true,
           providerRequestsAdded:0
         };
       }
@@ -125227,7 +125761,7 @@ for (
           Number.isFinite(successfulPremiumMessageIdV1174) && successfulPremiumMessageIdV1174 > 0
             ? successfulPremiumMessageIdV1174
             : null,
-        freeQueueMutationIncluded: true,
+        freeQueueDurabilityV1226: telegramResults[telegramResults.length - 1].freeDelayQueueV1226?.status || null,
         providerRequestsAdded: 0
       };
 
@@ -179143,7 +179677,7 @@ function telegramHelpV271() {
     "<code>/expiryenforce</code> — V1044 enforce genuinely expired Premium memberships; owner permanently exempt",
     "<code>/ownerprotection</code> — V1045 prove owner NEVER_REMOVE guards without Telegram action",
     "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
-    "<code>/freequeue</code> — V1029 delayed Free-call queue status (read-only)",
+    "<code>/freequeue</code> — V1226 durable delayed Free-call queue + per-call delivery provenance (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
@@ -180525,27 +181059,23 @@ async function telegramCommandReplyV271(
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
   if (parsed.command === "/freequeue") {
-    const loadedV1029 = await readState(env);
-    const stateV1029 = loadedV1029?.state || newState();
-    const replyV1029 = freeQueueTelegramV1029(stateV1029);
+    const replyV1226 = await freeQueueTelegramV1226(env);
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
-    const sentV1029 = await sendTelegram(env, replyV1029, null, null);
+    const sentV1226 = await sendTelegram(env, replyV1226, null, null);
     if (diagnosticV273) {
-      diagnosticV273.replySuccess = sentV1029?.success === true;
-      diagnosticV273.telegramStatus = sentV1029?.status || null;
-      diagnosticV273.telegramMode = sentV1029?.mode || null;
-      diagnosticV273.telegramError = sentV1029?.error || null;
-      diagnosticV273.result = sentV1029?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
-      diagnosticV273.freeQueueV1029 = {
-        pending:Array.isArray(stateV1029?.freeCallQueueV1028?.entries) ? stateV1029.freeCallQueueV1028.entries.length : 0,
-        totalEnqueued:safeNumber(stateV1029?.freeCallQueueV1028?.totalEnqueued),
-        totalSent:safeNumber(stateV1029?.freeCallQueueV1028?.totalSent),
+      diagnosticV273.replySuccess = sentV1226?.success === true;
+      diagnosticV273.telegramStatus = sentV1226?.status || null;
+      diagnosticV273.telegramMode = sentV1226?.mode || null;
+      diagnosticV273.telegramError = sentV1226?.error || null;
+      diagnosticV273.result = sentV1226?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+      diagnosticV273.freeQueueV1226 = {
+        authority:"D1_DURABLE_QUEUE_V1226",
         scannerBudgetConsumed:false,
         externalProviderRequests:0,
         stateWrites:0
       };
     }
-    return {success:sentV1029?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    return {success:sentV1226?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
   }
 
   // V404: read-only account-wide bot-side Durable Object usage estimate.
@@ -199612,7 +200142,6 @@ function webDiagLongRouteV1179(path,state,env,url=null){
   if(path==="/calllab") return callQualityLaboratoryMessageV1222(state);
   if(path==="/callresearch") return professionalCallResearchLabMessageV1223(state);
   if(path==="/capturestatus") return researchCaptureStatusMessageV1224(state);
-  if(path==="/freequeue") return freeQueueTelegramV1029(state);
   return null;
 }
 
@@ -201807,6 +202336,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       return webDiagHtmlResponseV1184("ChainVanta Outcome Intelligence",outcomeWebV1203,url);
     }
 
+    // V1226: Free queue web report reads the isolated D1 queue/provenance.
+    if (path === "/freequeue") {
+      const freeQueueWebV1226 = await freeQueueTelegramV1226(env);
+      if (String(url.searchParams.get("download")||"") === "1") {
+        return webDiagDownloadResponseV1184(freeQueueWebV1226,"chainvanta-free-queue.txt");
+      }
+      return webDiagHtmlResponseV1184("ChainVanta Free Delayed Queue",freeQueueWebV1226,url);
+    }
+
     // V1225: protected Stripe reconciliation is PREVIEW-ONLY on the web.
     // No "apply" action is exposed through WebDiag.
     if (path === "/stripereconcile-preview") {
@@ -202848,7 +203386,8 @@ async function scheduledScan(
   // V1028: drain due delayed Free alerts only after the normal scan has fully
   // completed. Fail-open and isolated from scanner/provider request accounting.
   try {
-    result.freeDelayedDeliveryV1028 = await processDueFreeCallsV1028(env);
+    result.freeDelayedDeliveryV1028 = await processDueFreeCallsV1226(env);
+    result.freeDelayedDeliveryV1226 = result.freeDelayedDeliveryV1028;
   } catch (error) {
     result.freeDelayedDeliveryV1028 = {
       enabled:Boolean(String(env.TELEGRAM_FREE_CHAT_ID || "").trim()),
