@@ -1,3 +1,4 @@
+// V1218 — fresh Stripe subscription replacement clears stale cancellation/expiry; user-level checkout ordering guard.
 // V1217 — explicit fail-closed Stripe environment mode control (test/live).
 // V1216 — Stripe production hardening: live-mode enforcement, stale-checkout ordering guard, truthful success page.
 // V1215 — Telegram webhook authentication fail-closed. Requires configured TELEGRAM_WEBHOOK_SECRET.
@@ -10026,7 +10027,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1217";
+const VERSION = "V1218";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -188924,6 +188925,17 @@ async function saveStripeCheckoutMappingV1031(env, event) {
     return {ok:true,stale:true,ignored:true,status:"STALE_STRIPE_CHECKOUT_IGNORED_V1216",entitlementVerified:true,premiumPriceMatched:true};
   }
 
+  // V1218: a customer can begin a genuinely new subscription while an old
+  // cancelled subscription is still persisted for this Telegram user.
+  // Use a user-level ordering stream too: an older Checkout event belonging
+  // to another subscription must not later restore that old subscription.
+  const userOrderingKeyV1218 = `subscriber:${telegramUserId}`;
+  const userOrderingV1218 = await stripeOrderingCheckV1209(env,event,userOrderingKeyV1218);
+  if (!userOrderingV1218?.ok) return {ok:false,reason:userOrderingV1218?.reason || "SUBSCRIBER_ORDERING_FAILED_V1218"};
+  if (userOrderingV1218.stale) {
+    return {ok:true,stale:true,ignored:true,status:"STALE_SUBSCRIBER_CHECKOUT_IGNORED_V1218"};
+  }
+
   const email = String(session?.customer_details?.email || session?.customer_email || "").trim() || null;
   const paymentStatus = String(session?.payment_status || "").toLowerCase();
   const status = paymentStatus === "paid" || paymentStatus === "no_payment_required" ? "ACTIVE" : "PENDING";
@@ -188940,7 +188952,20 @@ async function saveStripeCheckoutMappingV1031(env, event) {
         stripe_customer_id=excluded.stripe_customer_id,
         stripe_subscription_id=excluded.stripe_subscription_id,
         email=excluded.email,
-        status=excluded.status,
+        status=CASE
+          WHEN COALESCE(subscribers.stripe_subscription_id,'') <> COALESCE(excluded.stripe_subscription_id,'')
+          THEN excluded.status ELSE subscribers.status END,
+        -- Only a truly new subscription clears legacy expiry/cancellation;
+        -- a replay of the same subscription must retain lifecycle state.
+        cancel_at_period_end=CASE
+          WHEN COALESCE(subscribers.stripe_subscription_id,'') <> COALESCE(excluded.stripe_subscription_id,'')
+          THEN 0 ELSE subscribers.cancel_at_period_end END,
+        current_period_end=CASE
+          WHEN COALESCE(subscribers.stripe_subscription_id,'') <> COALESCE(excluded.stripe_subscription_id,'')
+          THEN NULL ELSE subscribers.current_period_end END,
+        grace_until=CASE
+          WHEN COALESCE(subscribers.stripe_subscription_id,'') <> COALESCE(excluded.stripe_subscription_id,'')
+          THEN NULL ELSE subscribers.grace_until END,
         updated_at=excluded.updated_at
     `).bind(
       telegramUserId, telegramUsername, customerId, subscriptionId,
@@ -188949,6 +188974,10 @@ async function saveStripeCheckoutMappingV1031(env, event) {
     const orderCommitV1216 = await stripeOrderingCommitV1209(env,event,orderingKeyV1216);
     if (!orderCommitV1216?.ok) {
       return {ok:false,reason:orderCommitV1216?.reason || "STRIPE_CHECKOUT_ORDERING_COMMIT_FAILED_V1216",mappingWritten:true};
+    }
+    const userOrderCommitV1218 = await stripeOrderingCommitV1209(env,event,userOrderingKeyV1218);
+    if (!userOrderCommitV1218?.ok) {
+      return {ok:false,reason:userOrderCommitV1218?.reason || "SUBSCRIBER_ORDERING_COMMIT_FAILED_V1218",mappingWritten:true};
     }
     return { ok:true, telegramUserId, status, customerId:Boolean(customerId), subscriptionId:Boolean(subscriptionId), entitlementVerified:true, premiumPriceMatched:true, orderingCommitted:true };
   } catch (error) {
