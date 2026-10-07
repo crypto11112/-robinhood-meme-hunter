@@ -1,3 +1,4 @@
+// V1224 — Forward Research Capture: genuine-call 5s→7d horizon capture with target-aware sparse scheduling; scoring unchanged.
 // V1223 — Professional Call Research Lab: microstructure-to-7d outcomes, data-quality gating, fast-spike/persistence classification, holdout-safe research plan.
 // V1222 — Call Quality Laboratory: read-only feature coverage, quartiles, timing and offline single-factor simulations.
 // V1221 — Call Quality Intelligence: read-only frozen-entry winner/failure comparison and evidence-backed tuning candidates.
@@ -10032,7 +10033,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1223";
+const VERSION = "V1224";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -108051,6 +108052,49 @@ const GROWTH_HORIZONS_V620 = Object.freeze({
   h24:24*60*60*1000
 });
 
+// V1224: comprehensive forward-only research horizons for genuine successful
+// Telegram calls. These are measurement-only and never alter qualification,
+// scoring, risk, Telegram routing or provider selection.
+const CALL_RESEARCH_HORIZONS_V1224 = Object.freeze({
+  s5:5*1000,
+  s10:10*1000,
+  s30:30*1000,
+  m1:60*1000,
+  m2:2*60*1000,
+  m5:5*60*1000,
+  m10:10*60*1000,
+  m15:15*60*1000,
+  m30:30*60*1000,
+  h1:60*60*1000,
+  h2:2*60*60*1000,
+  h4:4*60*60*1000,
+  h6:6*60*60*1000,
+  h12:12*60*60*1000,
+  h24:24*60*60*1000,
+  h48:48*60*60*1000,
+  d7:7*24*60*60*1000
+});
+
+function initialiseResearchOutcomesV1224(entryTimestamp) {
+  const entryAt=Number(entryTimestamp);
+  return {
+    version:"V1224",
+    forwardOnly:true,
+    hindsightBackfillAllowed:false,
+    entryTimestamp:entryAt,
+    outcomes:Object.fromEntries(
+      Object.entries(CALL_RESEARCH_HORIZONS_V1224).map(([key,delay])=>[
+        key,
+        {
+          status:"PENDING",
+          targetAt:entryAt+delay,
+          outcome:null
+        }
+      ])
+    )
+  };
+}
+
 function verifiedHolderCountV620(candidate){
   const presentation=telegramHolderPresentationV269(candidate);
   const n=Number(presentation?.holderCount?.count);
@@ -108372,6 +108416,15 @@ function buildCallPerformanceRecordV270(
         : null
     );
 
+  const researchOutcomesV1224 =
+    existing?.researchOutcomesV1224 ??
+    (
+      successfulAlert &&
+      !existing?.entryTimestamp
+        ? initialiseResearchOutcomesV1224(entryTimestamp||nowMs)
+        : null
+    );
+
   let athPriceUsd =
     existing?.athPriceUsd ??
     entryPriceUsd ??
@@ -108510,6 +108563,7 @@ function buildCallPerformanceRecordV270(
     fixedHorizonOutcomesV317,
     entryTimingOutcomesV411,
     growthOutcomesV620,
+    researchOutcomesV1224,
     drawdownTrackerV407,
 
     entryMarketVerified:
@@ -145650,7 +145704,11 @@ function callLabSimulationLineV1222(row,kind="number") {
 
 
 function callLabProOutcomeByKeyV1223(record,key) {
-  // Reuse the strongest frozen/verified sources already persisted by ChainVanta.
+  // V1224 genuine-call forward research outcomes are authoritative when present.
+  const researchV1224=record?.researchOutcomesV1224?.outcomes?.[key]?.outcome||null;
+  if(researchV1224?.verified===true && researchV1224?.frozen===true) return researchV1224;
+
+  // Reuse the strongest frozen/verified legacy sources when V1224 is not yet available.
   const direct=callLabExistingOutcomeV1222(record,key);
   if(direct) return direct;
 
@@ -145738,12 +145796,14 @@ function callLabProRecommendationV1223(quality,features,horizons,classes) {
     lines.push(`• Low-information entry features: <b>${escapeHtml(lowInfo.slice(0,6).join(", "))}</b>${lowInfo.length>6?" …":""}. Improve evidence quality before giving them more scoring weight.`);
   }
 
-  const micro=horizons.slice(0,6).filter(Boolean);
-  const microN=micro.reduce((sum,x)=>sum+x.n,0);
-  if(microN<Math.max(20,Math.floor(quality.sampleScore/5))) {
-    lines.push("• 5s/10s/30s/1m/2m/5m coverage is still thin. Keep these as diagnostics; do not make them hard gates yet.");
+  const micro=horizons.slice(0,6);
+  const microCounts=micro.map(x=>x?.n||0);
+  const microMin=Math.min(...microCounts);
+  const microMedian=callLabMedianV1222(microCounts);
+  if(microMin<10 || microMedian<20) {
+    lines.push("• Microstructure coverage is INSUFFICIENT. 5s/10s/30s/1m/2m/5m remain diagnostic only until each core short horizon has a meaningful forward sample.");
   } else {
-    lines.push("• Microstructure coverage is becoming usable. Test early-flow features offline before considering an entry-timing gate.");
+    lines.push("• Microstructure coverage is usable for offline research. Test early-flow features on a holdout set before considering any entry-timing gate.");
   }
 
   if(classes.spikeThenFade>classes.sustained) {
@@ -145755,6 +145815,33 @@ function callLabProRecommendationV1223(quality,features,horizons,classes) {
   lines.push("• Never promote a rule from one retrospective sample. Use older calls for discovery and newer calls as a holdout set.");
   lines.push("• Promote one production change at a time only when hit-rate improvement, failure-rate reduction and retained call volume all remain acceptable.");
   return lines;
+}
+
+
+function researchCaptureStatusMessageV1224(state) {
+  const all=callPerformanceEntriesV271(state);
+  const rows=all.filter(r=>r?.researchOutcomesV1224?.version==="V1224");
+  const counts={};
+  for(const key of Object.keys(CALL_RESEARCH_HORIZONS_V1224)){
+    counts[key]=rows.filter(r=>
+      r?.researchOutcomesV1224?.outcomes?.[key]?.outcome?.verified===true &&
+      r?.researchOutcomesV1224?.outcomes?.[key]?.outcome?.frozen===true
+    ).length;
+  }
+  const labels={s5:"5s",s10:"10s",s30:"30s",m1:"1m",m2:"2m",m5:"5m",m10:"10m",m15:"15m",m30:"30m",h1:"1h",h2:"2h",h4:"4h",h6:"6h",h12:"12h",h24:"24h",h48:"48h",d7:"7d"};
+  return [
+    `📡 <b>Forward Research Capture — ${VERSION}</b>`,
+    "",
+    `V1224 genuine-call trackers: <b>${rows.length}</b>`,
+    ...Object.keys(CALL_RESEARCH_HORIZONS_V1224).map(key=>
+      `• ${labels[key]||key}: <b>${counts[key]}/${rows.length}</b> frozen`
+    ),
+    "",
+    "Capture policy: target-aware 5s→7d forward-only observations; fast cadence only while useful, then sparse wake-ups at due horizons.",
+    "Scoring/qualification changes: <b>NONE</b>",
+    "Historical backfill: <b>DISABLED</b>",
+    "<i>Read-only status. Zero provider requests and zero state writes.</i>"
+  ].join("\\n");
 }
 
 function professionalCallResearchLabMessageV1223(state) {
@@ -179003,7 +179090,8 @@ function telegramHelpV271() {
     "<code>/signallearn</code> — compare frozen entry measurements: failures vs 2x+ winners",
     "<code>/callquality</code> — V1221 winner/failure intelligence + evidence-backed tuning candidates (read-only)",
     "<code>/calllab</code> — V1222 feature spread, milestone timing, outcome horizons + offline threshold simulations (read-only)",
-    "<code>/callresearch</code> — V1223 professional microstructure-to-7d research lab + data-quality gating (read-only)",
+    "<code>/callresearch</code> — V1223/V1224 professional microstructure-to-7d research lab + data-quality gating (read-only)",
+    "<code>/capturestatus</code> — V1224 genuine-call forward capture coverage from 5s to 7d (read-only)",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
@@ -182463,6 +182551,14 @@ async function telegramCommandReplyV271(
       );
   } else if (
     parsed.command ===
+    "/capturestatus"
+  ) {
+    reply =
+      researchCaptureStatusMessageV1224(
+        state
+      );
+  } else if (
+    parsed.command ===
       "/help" ||
     parsed.command ===
       "/start"
@@ -182505,6 +182601,7 @@ async function telegramCommandReplyV271(
     parsed.command === "/callquality" ||
     parsed.command === "/calllab" ||
     parsed.command === "/callresearch" ||
+    parsed.command === "/capturestatus" ||
     parsed.command === "/launchcoverage" ||
     parsed.command === "/coverage" ||
     parsed.command === "/poolmatch" ||
@@ -204202,7 +204299,7 @@ function priorityLiveFlowSummaryV1112(trades, nowMs=Date.now()) {
 const PRIORITY_LIVE_MAX_POINTS_V1109 = 75;
 const HORIZON_LIVE_MAX_ACTIVE_V413 = 60;
 const HORIZON_LIVE_MAX_BATCH_V413 = 30;
-const HORIZON_LIVE_RETENTION_MS_V413 = 25 * 60 * 60 * 1000;
+const HORIZON_LIVE_RETENTION_MS_V413 = (7 * 24 * 60 * 60 * 1000) + (6 * 60 * 60 * 1000); // V1224 research retention through 7d + lag margin
 const HORIZON_LIVE_WINDOWS_V413 = Object.freeze({
   m5: 5 * 60 * 1000,
   m15: 15 * 60 * 1000,
@@ -204212,6 +204309,35 @@ const HORIZON_LIVE_WINDOWS_V413 = Object.freeze({
   h12: 12 * 60 * 60 * 1000,
   h24: 24 * 60 * 60 * 1000
 });
+
+const CALL_RESEARCH_FAST_WINDOW_MS_V1224 = 75 * 60 * 1000;
+const CALL_RESEARCH_RETRY_MS_V1224 = 2 * 60 * 1000;
+
+function researchOutcomeNextWakeV1224(entries, nowMs=Date.now()) {
+  let next=null;
+  for(const row of Object.values(entries&&typeof entries==="object"?entries:{})){
+    const entryAt=Number(row?.entryTimestamp);
+    if(!Number.isFinite(entryAt)||entryAt<=0) continue;
+    const tracker=row?.researchOutcomesV1224;
+    const outcomes=tracker?.outcomes&&typeof tracker.outcomes==="object"
+      ? tracker.outcomes
+      : {};
+    for(const [key,delay] of Object.entries(CALL_RESEARCH_HORIZONS_V1224)){
+      const slot=outcomes[key];
+      if(slot?.outcome?.verified===true && slot?.outcome?.frozen===true) continue;
+      const targetAt=Number(slot?.targetAt)||entryAt+delay;
+      const candidate=targetAt<=nowMs ? nowMs+CALL_RESEARCH_RETRY_MS_V1224 : targetAt;
+      if(next===null||candidate<next) next=candidate;
+    }
+    // While the V414 live-signal window is still useful, retain its established
+    // ~minute cadence even when no research target is immediately due.
+    if(nowMs-entryAt<CALL_RESEARCH_FAST_WINDOW_MS_V1224){
+      const minuteCandidate=nowMs+HORIZON_LIVE_POLL_MS_V413;
+      if(next===null||minuteCandidate<next) next=minuteCandidate;
+    }
+  }
+  return next;
+}
 
 // V414 rolling-signal layer. These points are derived only from the same fresh
 // DexScreener response already required by V413, so no extra provider request
@@ -205982,6 +206108,57 @@ async function mergeLiveHorizonSnapshotsV413(state, env) {
 
     const liveOutcomes = live?.outcomes && typeof live.outcomes === "object" ? live.outcomes : {};
     let touched = false;
+
+    const liveResearchV1224 =
+      live?.researchOutcomesV1224 &&
+      typeof live.researchOutcomesV1224 === "object"
+        ? live.researchOutcomesV1224
+        : null;
+    if(
+      liveResearchV1224?.version==="V1224" &&
+      liveResearchV1224?.forwardOnly===true &&
+      liveResearchV1224?.hindsightBackfillAllowed===false
+    ){
+      let durableResearchV1224 =
+        record?.researchOutcomesV1224 &&
+        typeof record.researchOutcomesV1224 === "object"
+          ? record.researchOutcomesV1224
+          : initialiseResearchOutcomesV1224(Number(record.entryTimestamp));
+
+      durableResearchV1224.outcomes =
+        durableResearchV1224?.outcomes &&
+        typeof durableResearchV1224.outcomes === "object"
+          ? durableResearchV1224.outcomes
+          : {};
+
+      for(const [key,delay] of Object.entries(CALL_RESEARCH_HORIZONS_V1224)){
+        const liveSlot=liveResearchV1224?.outcomes?.[key]||null;
+        const currentSlot=
+          durableResearchV1224.outcomes[key] &&
+          typeof durableResearchV1224.outcomes[key] === "object"
+            ? durableResearchV1224.outcomes[key]
+            : {
+                status:"PENDING",
+                targetAt:Number(record.entryTimestamp)+delay,
+                outcome:null
+              };
+        currentSlot.targetAt=Number(record.entryTimestamp)+delay;
+        if(
+          !currentSlot.outcome &&
+          liveSlot?.outcome?.verified===true &&
+          liveSlot?.outcome?.frozen===true
+        ){
+          currentSlot.outcome={...liveSlot.outcome};
+          currentSlot.status="FROZEN";
+          outcomesMerged++;
+          touched=true;
+        }
+        durableResearchV1224.outcomes[key]=currentSlot;
+      }
+      durableResearchV1224.lastUpdatedAt=
+        liveResearchV1224?.lastUpdatedAt||durableResearchV1224?.lastUpdatedAt||null;
+      record.researchOutcomesV1224=durableResearchV1224;
+    }
 
     for (const key of ["m5", "m15", "m30"]) {
       const outcome = liveOutcomes[key];
@@ -208369,6 +208546,7 @@ export class V3LiveCollectorV363 {
               }
             : null,
         outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h12:null,h24:null},
+        researchOutcomesV1224:initialiseResearchOutcomesV1224(entryTimestamp),
         growthOutcomesV620:{
           version:"V620",
           forwardOnly:true,
@@ -208405,7 +208583,10 @@ export class V3LiveCollectorV363 {
     const pruned = Object.fromEntries(rows.map(row=>[normalize(row.address),row]));
     await this.doPutV404(HORIZON_LIVE_ENTRIES_KEY_V413, pruned);
     await this.doPutV404(HORIZON_LIVE_ENABLED_KEY_V413, true);
-    await this.doSetAlarmV404(Date.now()+1000);
+    const firstResearchWakeV1224 =
+      researchOutcomeNextWakeV1224(pruned,Date.now()) ||
+      (Date.now()+HORIZON_LIVE_POLL_MS_V413);
+    await this.doSetAlarmV404(Math.max(Date.now()+1000,firstResearchWakeV1224));
     return Response.json({version:VERSION,registered:true,status:"LIVE_HORIZON_REGISTERED_V413",address,entryTimestamp,entryMarketCap,telegramMessageId,activeEntries:Object.keys(pruned).length});
   }
 
@@ -208705,6 +208886,82 @@ export class V3LiveCollectorV363 {
           row.growthOutcomesV620.lastUpdatedAt=observedAt;
         }
 
+        // V1224 genuine-call research capture. Freeze the first verified
+        // post-target observation for every research horizon. Observation lag
+        // is persisted so later analysis can reject imprecise samples.
+        row.researchOutcomesV1224 =
+          row?.researchOutcomesV1224 &&
+          typeof row.researchOutcomesV1224 === "object"
+            ? row.researchOutcomesV1224
+            : initialiseResearchOutcomesV1224(Number(row.entryTimestamp));
+        row.researchOutcomesV1224.outcomes =
+          row.researchOutcomesV1224?.outcomes &&
+          typeof row.researchOutcomesV1224.outcomes === "object"
+            ? row.researchOutcomesV1224.outcomes
+            : {};
+
+        for(const [key,delay] of Object.entries(CALL_RESEARCH_HORIZONS_V1224)){
+          const targetAt=Number(row.entryTimestamp)+delay;
+          const slot =
+            row.researchOutcomesV1224.outcomes[key] &&
+            typeof row.researchOutcomesV1224.outcomes[key] === "object"
+              ? row.researchOutcomesV1224.outcomes[key]
+              : {status:"PENDING",targetAt,outcome:null};
+          slot.targetAt=targetAt;
+          if(
+            !slot.outcome &&
+            observedAt>=targetAt
+          ){
+            const entryMc=Number(row.entryMarketCap);
+            const entryPrice=Number(row.entryPriceUsd);
+            slot.outcome={
+              verified:true,
+              frozen:true,
+              targetAt,
+              observedAt,
+              observationLagMs:Math.max(0,observedAt-targetAt),
+              marketCap,
+              multipleByMarketCap:
+                Number.isFinite(entryMc)&&entryMc>0
+                  ? marketCap/entryMc
+                  : null,
+              entryPriceUsd:
+                Number.isFinite(entryPrice)&&entryPrice>0
+                  ? entryPrice
+                  : null,
+              priceUsd:observedPriceV620,
+              priceGrowthPct:
+                observedPriceV620!==null &&
+                Number.isFinite(entryPrice) &&
+                entryPrice>0
+                  ? ((observedPriceV620-entryPrice)/entryPrice)*100
+                  : null,
+              liquidityUsd:finiteV414(pair?.liquidity?.usd),
+              volumeM5:finiteV414(pair?.volume?.m5),
+              volumeH1:finiteV414(pair?.volume?.h1),
+              volumeH24:finiteV414(pair?.volume?.h24),
+              txM5:
+                finiteV414(txM5?.buys)!==null &&
+                finiteV414(txM5?.sells)!==null
+                  ? finiteV414(txM5?.buys)+finiteV414(txM5?.sells)
+                  : null,
+              txH1:
+                finiteV414(txH1?.buys)!==null &&
+                finiteV414(txH1?.sells)!==null
+                  ? finiteV414(txH1?.buys)+finiteV414(txH1?.sells)
+                  : null,
+              pairAddress:normalize(pair?.pairAddress||"")||null,
+              source:"DEXSCREENER_GENUINE_CALL_RESEARCH_V1224",
+              forwardOnly:true,
+              hindsightBackfillAllowed:false
+            };
+            slot.status="FROZEN";
+            captures++;
+          }
+          row.researchOutcomesV1224.outcomes[key]=slot;
+        }
+        row.researchOutcomesV1224.lastUpdatedAt=observedAt;
+
         row.outcomes = row.outcomes && typeof row.outcomes === "object" ? row.outcomes : {m5:null,m15:null,m30:null,h1:null,h6:null,h12:null,h24:null};
         for (const [key,horizonMs] of Object.entries(HORIZON_LIVE_WINDOWS_V413)) {
           if (row.outcomes[key]) continue;
@@ -208722,7 +208979,12 @@ export class V3LiveCollectorV363 {
           };
           captures++;
         }
-        row.completed = ["m5","m15","m30","h1","h6","h12","h24"].every(key=>row.outcomes[key]?.verified===true&&row.outcomes[key]?.frozen===true);
+        const researchCompleteV1224 =
+          Object.keys(CALL_RESEARCH_HORIZONS_V1224).every(key=>
+            row?.researchOutcomesV1224?.outcomes?.[key]?.outcome?.verified===true &&
+            row?.researchOutcomesV1224?.outcomes?.[key]?.outcome?.frozen===true
+          );
+        row.completed = researchCompleteV1224;
         entries[address]=row;
         anyChanged = true;
       }
@@ -208748,7 +209010,8 @@ export class V3LiveCollectorV363 {
       captures,
       error:lastError
     });
-    return {active:true,requests,verifiedObservations,captures,lastHttpStatus,lastError};
+    const nextWakeAtV1224=researchOutcomeNextWakeV1224(entries,Date.now());
+    return {active:true,requests,verifiedObservations,captures,lastHttpStatus,lastError,nextWakeAtV1224};
   }
 
   async ensureProductionCollectorSelfHealV591(trigger="DO_FETCH_V591") {
@@ -209470,10 +209733,30 @@ if (url.pathname === "/reconcile-v374") {
     if (decisionObserverEnabledV1120 === true) {
       decisionObserverPollV1120 = await this.priorityDecisionOutcomeObserverV1120();
     }
-    if (horizonPollV413?.active === true || priorityPollV1109?.active === true) {
-      await this.doSetAlarmV404(Date.now()+HORIZON_LIVE_POLL_MS_V413);
-    } else if (decisionObserverPollV1120?.active === true && safeNumber(decisionObserverPollV1120?.nextWakeAt)>0) {
-      await this.doSetAlarmV404(Math.max(Date.now()+1000,safeNumber(decisionObserverPollV1120.nextWakeAt)));
+    const alarmCandidatesV1224=[];
+    if(
+      horizonPollV413?.active===true &&
+      safeNumber(horizonPollV413?.nextWakeAtV1224)>0
+    ){
+      alarmCandidatesV1224.push(
+        Math.max(Date.now()+1000,safeNumber(horizonPollV413.nextWakeAtV1224))
+      );
+    }else if(horizonPollV413?.active===true){
+      alarmCandidatesV1224.push(Date.now()+HORIZON_LIVE_POLL_MS_V413);
+    }
+    if(priorityPollV1109?.active===true){
+      alarmCandidatesV1224.push(Date.now()+HORIZON_LIVE_POLL_MS_V413);
+    }
+    if(
+      decisionObserverPollV1120?.active===true &&
+      safeNumber(decisionObserverPollV1120?.nextWakeAt)>0
+    ){
+      alarmCandidatesV1224.push(
+        Math.max(Date.now()+1000,safeNumber(decisionObserverPollV1120.nextWakeAt))
+      );
+    }
+    if(alarmCandidatesV1224.length){
+      await this.doSetAlarmV404(Math.min(...alarmCandidatesV1224));
     }
 
     const productionEnabled = await this.state.storage.get("enabled");
