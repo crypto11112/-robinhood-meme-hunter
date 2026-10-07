@@ -1,3 +1,4 @@
+// V1221 — Call Quality Intelligence: read-only frozen-entry winner/failure comparison and evidence-backed tuning candidates.
 // V1220 — final public-surface hardening: root is static and never exposes/executes internal health diagnostics.
 // V1219 — Admin-only Stripe subscription reconciliation: authoritative dry-run + explicit apply.
 // V1218 — fresh Stripe subscription replacement clears stale cancellation/expiry; user-level checkout ordering guard.
@@ -10029,7 +10030,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1220";
+const VERSION = "V1221";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -145409,6 +145410,195 @@ function signalLearningMetricLineV548(label, failures, winners, extractor, kind)
   return `• ${label}: ${failText} | ${winText} | ${comparison}`;
 }
 
+
+function callQualityMedianV1221(values) {
+  const rows=(Array.isArray(values)?values:[])
+    .map(v=>Number(v))
+    .filter(v=>Number.isFinite(v))
+    .sort((a,b)=>a-b);
+  if(!rows.length) return null;
+  const i=Math.floor(rows.length/2);
+  return rows.length%2 ? rows[i] : (rows[i-1]+rows[i])/2;
+}
+
+function callQualityMetricStatsV1221(records, extractor) {
+  const values=[];
+  for(const record of Array.isArray(records)?records:[]) {
+    const value=extractor(record);
+    const n=Number(value);
+    if(Number.isFinite(n)) values.push(n);
+  }
+  if(!values.length) return null;
+  return {
+    n:values.length,
+    median:callQualityMedianV1221(values),
+    min:Math.min(...values),
+    max:Math.max(...values)
+  };
+}
+
+function callQualityFmtV1221(value, kind="number") {
+  const n=Number(value);
+  if(!Number.isFinite(n)) return "UNVERIFIED";
+  if(kind==="usd") return telegramMoneyV271(n);
+  if(kind==="pct") return `${n.toFixed(2)}%`;
+  if(kind==="score") return `${n.toFixed(1)}/100`;
+  if(kind==="count") return `${Math.round(n)}`;
+  return n.toFixed(2);
+}
+
+function callQualityMetricV1221(label, failures, winners, extractor, kind, direction="higher") {
+  const fail=callQualityMetricStatsV1221(failures,extractor);
+  const win=callQualityMetricStatsV1221(winners,extractor);
+  if(!fail && !win) {
+    return {line:`• ${label}: DATA UNVERIFIED`, candidate:null};
+  }
+  const failText=fail ? `${callQualityFmtV1221(fail.median,kind)} (n=${fail.n})` : "UNVERIFIED (n=0)";
+  const winText=win ? `${callQualityFmtV1221(win.median,kind)} (n=${win.n})` : "UNVERIFIED (n=0)";
+  let deltaText="Δ UNVERIFIED";
+  let candidate=null;
+
+  if(fail && win) {
+    const delta=win.median-fail.median;
+    deltaText=`Δ ${delta>=0?"+":""}${callQualityFmtV1221(delta,kind)}`;
+    const enough=fail.n>=10 && win.n>=10;
+    const desired = direction==="lower" ? delta<0 : delta>0;
+    const baseline=Math.max(Math.abs(fail.median),1e-9);
+    const relative=Math.abs(delta)/baseline;
+    if(enough && desired && relative>=0.15) {
+      candidate={
+        label,
+        failMedian:fail.median,
+        winMedian:win.median,
+        failN:fail.n,
+        winN:win.n,
+        direction,
+        relative
+      };
+    }
+  }
+
+  return {
+    line:`• ${label}: failures ${failText} | 2x+ ${winText} | ${deltaText}`,
+    candidate
+  };
+}
+
+function callQualityHorizonStatsV1221(records,key) {
+  const values=[];
+  for(const record of Array.isArray(records)?records:[]) {
+    const out=record?.fixedHorizonOutcomesV317?.outcomes?.[key];
+    const x=Number(out?.multipleByMarketCap);
+    if(out?.verified===true && out?.frozen===true && Number.isFinite(x) && x>0) values.push(x);
+  }
+  if(!values.length) return null;
+  const median=callQualityMedianV1221(values);
+  const hit2=values.filter(x=>x>=2).length;
+  const positive=values.filter(x=>x>1).length;
+  return {n:values.length,median,hit2,positive};
+}
+
+function callQualityHorizonLineV1221(label,records,key) {
+  const x=callQualityHorizonStatsV1221(records,key);
+  if(!x) return `• ${label}: n=0 — no frozen verified outcomes`;
+  return `• ${label}: n=${x.n} | median ${telegramMultipleV271(x.median)} | >1x ${x.positive}/${x.n} | ≥2x ${x.hit2}/${x.n}`;
+}
+
+function callQualityIntelligenceMessageV1221(state) {
+  const all=callPerformanceEntriesV271(state);
+  const frozen=all.filter(record=>{
+    const snap=record?.entrySignalSnapshotV309;
+    const ath=Number(record?.athMultipleByMarketCap);
+    return snap?.frozenAtSuccessfulCall===true &&
+      snap?.laterEvidenceBackfillAllowed===false &&
+      Number.isFinite(ath) && ath>0;
+  });
+
+  const failures=frozen.filter(r=>Number(r?.athMultipleByMarketCap)<=1.000001);
+  const middles=frozen.filter(r=>{
+    const x=Number(r?.athMultipleByMarketCap);
+    return x>1.000001 && x<2;
+  });
+  const winners=frozen.filter(r=>Number(r?.athMultipleByMarketCap)>=2);
+  const bigWinners=frozen.filter(r=>Number(r?.athMultipleByMarketCap)>=5);
+
+  const snap=r=>r?.entrySignalSnapshotV309||{};
+  const metrics=[
+    callQualityMetricV1221("Opportunity",failures,winners,r=>snap(r)?.opportunity?.score,"score","higher"),
+    callQualityMetricV1221("Momentum",failures,winners,r=>snap(r)?.momentum?.score,"score","higher"),
+    callQualityMetricV1221("Confidence",failures,winners,r=>snap(r)?.confidence?.score,"score","higher"),
+    callQualityMetricV1221("Market Quality",failures,winners,r=>snap(r)?.marketQuality?.verified===true?snap(r)?.marketQuality?.score:null,"score","higher"),
+    callQualityMetricV1221("Rug Risk",failures,winners,r=>snap(r)?.rugRisk?.verified===true?snap(r)?.rugRisk?.score:null,"score","lower"),
+    callQualityMetricV1221("Entry liquidity",failures,winners,r=>snap(r)?.market?.liquidityUsd,"usd","higher"),
+    callQualityMetricV1221("Entry 24h volume",failures,winners,r=>snap(r)?.market?.volume24hUsd,"usd","higher"),
+    callQualityMetricV1221("Holder count",failures,winners,r=>snap(r)?.holders?.holderCountVerified===true?snap(r)?.holders?.holderCount:null,"count","higher"),
+    callQualityMetricV1221("Top holder",failures,winners,r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.topHolderPct:null,"pct","lower"),
+    callQualityMetricV1221("Top 10 concentration",failures,winners,r=>snap(r)?.holders?.concentrationVerified===true?snap(r)?.holders?.top10Pct:null,"pct","lower"),
+    callQualityMetricV1221("Holder growth/hr",failures,winners,r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.holderGrowth,"holderVelocity"),"number","higher"),
+    callQualityMetricV1221("Liquidity growth",failures,winners,r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.liquidityGrowth,"liquidityPct"),"pct","higher"),
+    callQualityMetricV1221("Volume acceleration",failures,winners,r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.volumeAcceleration,"volumePct"),"pct","higher"),
+    callQualityMetricV1221("Transaction acceleration",failures,winners,r=>signalLearningVerifiedMetricV549(snap(r)?.measurementSignalsV411?.transactionAcceleration,"txPct"),"pct","higher")
+  ];
+
+  const candidates=metrics.map(x=>x.candidate).filter(Boolean)
+    .sort((a,b)=>b.relative-a.relative)
+    .slice(0,5);
+
+  const sampleStrongEnough=failures.length>=10 && winners.length>=10;
+  const recommendationLines = !sampleStrongEnough
+    ? [
+        `• <b>NO THRESHOLD CHANGE RECOMMENDED YET</b> — need at least 10 failures and 10 verified 2x+ winners.`,
+        `• Current comparison sample: failures ${failures.length}, 2x+ winners ${winners.length}.`,
+        `• Keep collecting frozen calls; do not tune the scanner from a tiny sample.`
+      ]
+    : candidates.length
+      ? candidates.map((c,i)=>{
+          const verb=c.direction==="lower" ? "lower values correlate with winners" : "higher values correlate with winners";
+          return `• ${i+1}. <b>${escapeHtml(c.label)}</b>: ${verb}; winner median ${callQualityFmtV1221(c.winMedian)} vs failure median ${callQualityFmtV1221(c.failMedian)}. <i>Candidate for controlled offline threshold simulation — not an automatic production change.</i>`;
+        })
+      : [
+          "• No metric currently shows a strong enough median separation to justify a threshold experiment.",
+          "• Continue collecting calls rather than forcing a scoring change."
+        ];
+
+  const coveragePct=frozen.length ? (frozen.length/all.length)*100 : 0;
+
+  return [
+    `🧪 <b>Call Quality Intelligence — ${VERSION}</b>`,
+    "",
+    `<b>Purpose:</b> identify evidence-backed ways to improve future calls without hindsight contamination or automatic tuning.`,
+    "",
+    `<b>📚 Cohorts</b>`,
+    `Tracked calls: <b>${all.length}</b>`,
+    `Frozen comparable calls: <b>${frozen.length}</b> (${coveragePct.toFixed(1)}%)`,
+    `Never above entry: <b>${failures.length}</b>`,
+    `Above entry but &lt;2x: <b>${middles.length}</b>`,
+    `Verified ≥2x: <b>${winners.length}</b>`,
+    `Verified ≥5x: <b>${bigWinners.length}</b>`,
+    "",
+    `<b>🎯 Winner vs failure entry evidence</b>`,
+    ...metrics.map(x=>x.line),
+    "",
+    `<b>⏱ Fixed-horizon outcome quality</b>`,
+    callQualityHorizonLineV1221("1h",frozen,"h1"),
+    callQualityHorizonLineV1221("6h",frozen,"h6"),
+    callQualityHorizonLineV1221("24h",frozen,"h24"),
+    "",
+    `<b>🧠 Evidence-backed tuning candidates</b>`,
+    ...recommendationLines,
+    "",
+    `<b>Professional tuning rule</b>`,
+    "• Change nothing automatically from this report.",
+    "• First simulate one candidate threshold offline against frozen historical entries.",
+    "• Prefer a holdout / newer-call validation set before production.",
+    "• Change one rule at a time, then measure 1h/6h/24h and ATH impact.",
+    "• Reject any change that improves hit rate only by collapsing call volume or relying on missing/unverified evidence.",
+    "",
+    "⚠️ <b>READ-ONLY / DESCRIPTIVE</b> — correlation is not causation. No score, weight, threshold, qualification rule, provider budget or Telegram behavior is changed.",
+    "<i>Uses only persisted frozen call-time evidence and verified outcomes. Zero provider requests and zero state writes.</i>"
+  ].join("\n");
+}
+
 function signalLearningMessageV548(state) {
   const all = callPerformanceEntriesV271(state);
   const frozen = all.filter(record => {
@@ -178383,6 +178573,7 @@ function telegramHelpV271() {
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
     "<code>/signallearn</code> — compare frozen entry measurements: failures vs 2x+ winners",
+    "<code>/callquality</code> — V1221 winner/failure intelligence + evidence-backed tuning candidates (read-only)",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
@@ -181818,6 +182009,14 @@ async function telegramCommandReplyV271(
       );
   } else if (
     parsed.command ===
+    "/callquality"
+  ) {
+    reply =
+      callQualityIntelligenceMessageV1221(
+        state
+      );
+  } else if (
+    parsed.command ===
       "/help" ||
     parsed.command ===
       "/start"
@@ -181857,6 +182056,7 @@ async function telegramCommandReplyV271(
     parsed.command === "/horizon" ||
     parsed.command === "/learning" ||
     parsed.command === "/signallearn" ||
+    parsed.command === "/callquality" ||
     parsed.command === "/launchcoverage" ||
     parsed.command === "/coverage" ||
     parsed.command === "/poolmatch" ||
