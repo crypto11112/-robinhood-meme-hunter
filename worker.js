@@ -1,3 +1,4 @@
+// V1216 — Stripe production hardening: live-mode enforcement, stale-checkout ordering guard, truthful success page.
 // V1215 — Telegram webhook authentication fail-closed. Requires configured TELEGRAM_WEBHOOK_SECRET.
 // V1214 — propagate V1213 scan-relay secret from the Durable Object relay to /scan. Security-only fix.
 // V1213 — scan relay authentication hardening only. Scheduled relay requires a dedicated secret; manual /scan requires WebDiag.
@@ -10024,7 +10025,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1215";
+const VERSION = "V1216";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -188908,6 +188909,20 @@ async function saveStripeCheckoutMappingV1031(env, event) {
   const telegramUsername = String(session?.metadata?.telegram_username || "").trim() || null;
   const customerId = typeof session?.customer === "string" ? session.customer : (session?.customer?.id || null);
   const subscriptionId = typeof session?.subscription === "string" ? session.subscription : (session?.subscription?.id || null);
+
+  // V1216: checkout and subscription lifecycle events share one ordering stream.
+  const orderingKeyV1216 = `subscription:${String(subscriptionId || customerId || "").trim()}`;
+  if (!String(subscriptionId || customerId || "").trim()) {
+    return {ok:false,reason:"STRIPE_CHECKOUT_ORDERING_KEY_MISSING_V1216"};
+  }
+  const orderingV1216 = await stripeOrderingCheckV1209(env,event,orderingKeyV1216);
+  if (!orderingV1216?.ok) {
+    return {ok:false,reason:orderingV1216?.reason || "STRIPE_CHECKOUT_ORDERING_CHECK_FAILED_V1216"};
+  }
+  if (orderingV1216?.stale === true) {
+    return {ok:true,stale:true,ignored:true,status:"STALE_STRIPE_CHECKOUT_IGNORED_V1216",entitlementVerified:true,premiumPriceMatched:true};
+  }
+
   const email = String(session?.customer_details?.email || session?.customer_email || "").trim() || null;
   const paymentStatus = String(session?.payment_status || "").toLowerCase();
   const status = paymentStatus === "paid" || paymentStatus === "no_payment_required" ? "ACTIVE" : "PENDING";
@@ -188930,7 +188945,11 @@ async function saveStripeCheckoutMappingV1031(env, event) {
       telegramUserId, telegramUsername, customerId, subscriptionId,
       email, status, ts, ts
     ).run();
-    return { ok:true, telegramUserId, status, customerId:Boolean(customerId), subscriptionId:Boolean(subscriptionId), entitlementVerified:true, premiumPriceMatched:true };
+    const orderCommitV1216 = await stripeOrderingCommitV1209(env,event,orderingKeyV1216);
+    if (!orderCommitV1216?.ok) {
+      return {ok:false,reason:orderCommitV1216?.reason || "STRIPE_CHECKOUT_ORDERING_COMMIT_FAILED_V1216",mappingWritten:true};
+    }
+    return { ok:true, telegramUserId, status, customerId:Boolean(customerId), subscriptionId:Boolean(subscriptionId), entitlementVerified:true, premiumPriceMatched:true, orderingCommitted:true };
   } catch (error) {
     console.error("V1031 D1 subscriber mapping failed", errorString(error));
     return { ok:false, reason:"D1_SUBSCRIBER_MAPPING_FAILED_V1031", error:errorString(error) };
@@ -190165,6 +190184,15 @@ async function stripeWebhookV1030(request, env) {
 
   const selected = STRIPE_WEBHOOK_EVENTS_V1030.has(eventType);
 
+  // V1216: production state accepts Stripe live-mode events only.
+  if (event?.livemode !== true) {
+    console.warn("V1216 Stripe non-live event rejected", {eventId,eventType});
+    return jsonResponse(
+      {ok:false,version:VERSION,error:"STRIPE_LIVEMODE_REQUIRED_V1216",eventId,eventType,timestamp:now()},
+      400
+    );
+  }
+
   // V1207: selected payment/access events are fail-closed if the idempotency
   // ledger cannot be checked. Duplicate verified Stripe deliveries are
   // acknowledged without repeating any payment/access side effects.
@@ -190197,6 +190225,7 @@ async function stripeWebhookV1030(request, env) {
     subscriberMappingV1031 = await saveStripeCheckoutMappingV1031(env, event);
     if (
       subscriberMappingV1031?.ok === true &&
+      subscriberMappingV1031?.stale !== true &&
       subscriberMappingV1031?.status === "ACTIVE" &&
       subscriberMappingV1031?.telegramUserId
     ) {
@@ -198570,13 +198599,13 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 </style>
 </head>
 <body><main class="wrap"><section class="card">
-<div class="ok">✓ Subscription active</div>
+<div class="ok">✓ Checkout completed</div>
 <h1>Welcome to ChainVanta Premium ⚡</h1>
-<p>Your payment was successful and your ChainVanta Premium subscription is active.</p>
+<p>Your checkout has returned successfully. Premium access is activated only after ChainVanta receives and verifies Stripe's signed payment confirmation.</p>
 <h2>How to enter the Premium channel</h2>
 <ol>
 <li>Return to your private Telegram conversation with the ChainVanta bot.</li>
-<li>Your personal Premium invite will be waiting in that chat.</li>
+<li>Once Stripe confirmation is verified, your personal Premium invite will be sent there.</li>
 <li>Tap the invite to join the private <b>ChainVanta Premium</b> channel.</li>
 </ol>
 <p>Your invite is for one member and expires after 24 hours. Please do not share it.</p>
