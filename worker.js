@@ -1,3 +1,4 @@
+// V1220 — final public-surface hardening: root is static and never exposes/executes internal health diagnostics.
 // V1219 — Admin-only Stripe subscription reconciliation: authoritative dry-run + explicit apply.
 // V1218 — fresh Stripe subscription replacement clears stale cancellation/expiry; user-level checkout ordering guard.
 // V1217 — explicit fail-closed Stripe environment mode control (test/live).
@@ -10028,7 +10029,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1219";
+const VERSION = "V1220";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -199639,9 +199640,24 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     );
   }
 
+  // V1220: the public root must not alias the protected /health diagnostic.
+  // Keep it static: no state read, no provider/RPC request, no internal route
+  // inventory, no scheduler/provider telemetry.
+  if (path === "/") {
+    return jsonResponse(
+      {
+        agent:"ChainVanta",
+        status:"ONLINE"
+      },
+      200,
+      {
+        "cache-control":"no-store",
+        "x-content-type-options":"nosniff"
+      }
+    );
+  }
+
   if (
-    path ===
-      "/" ||
     path ===
       "/health"
   ) {
