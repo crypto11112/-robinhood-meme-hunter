@@ -1,3 +1,4 @@
+// V1242 — Clickable Premium WebDiag Handoff. Builds directly from deployed V1241; keeps the refined near-miss ranking and makes Premium Funnel / Premium Why Telegram responses use the same clickable “Full web copy” UX as established diagnostics. WebDiag remains closed-by-default and web-side protected. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1241 — Secure Premium Decision Intelligence Refinement. Builds directly from deployed V1240; refines near-miss ranking and adds secure WebDiag handoff links to Premium diagnostics. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1239 — Heavy Scan Phase Checkpoints. Builds directly from deployed V1238; adds tiny KV phase checkpoints so a stalled scheduled heavy scan reveals the last completed internal phase. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1238 — Persisted Scan Completion Receipts. Builds directly from V1237; adds compact KV run receipts so scheduler completion no longer depends solely on the long-lived relay terminal body. Scanner/scoring/risk/provider/Telegram behavior unchanged.
@@ -10099,7 +10100,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1241";
+const VERSION = "V1242";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179214,7 +179215,7 @@ function premiumWhyBoolV1240(value) {
 function premiumWhyBulkMessageV1241(state,rawWindow) {
   const d = premiumWhyNearMissesV1241(state,rawWindow || "1h");
   const lines = [
-    `🧭 <b>ChainVanta Premium Why — V1241 · ${escapeHtml(d.window.label)}</b>`,
+    `🧭 <b>ChainVanta Premium Why — V1242 · ${escapeHtml(d.window.label)}</b>`,
     "",
     `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
     "Near-miss ranking: one-blocker-away → evidence-only unresolved → two blockers max. Clearly rejected tokens are separated below.",
@@ -179250,7 +179251,7 @@ function premiumWhyTokenMessageV1240(state,query) {
   const resolved = premiumWhyResolveTokenV1240(state,query);
   if (!resolved.row) {
     return [
-      "🧭 <b>ChainVanta Premium Decision — V1241</b>","",
+      "🧭 <b>ChainVanta Premium Decision — V1242</b>","",
       `Requested: <code>${escapeHtml(String(query||""))}</code>`,
       `Resolution: <b>${escapeHtml(resolved.status)}</b>`,
       "No retained qualification/call decision was found. Try the exact contract address or use <code>/premiumwhy 1h</code> to list recent near-misses.","",
@@ -179265,7 +179266,7 @@ function premiumWhyTokenMessageV1240(state,query) {
     : "Entry verified: <b>NOT FROZEN — no successful customer-call baseline</b>";
   const stage = r.currentDecisionStage.replaceAll("_"," ");
   return [
-    "🧭 <b>ChainVanta Premium Decision — V1241</b>","",
+    "🧭 <b>ChainVanta Premium Decision — V1242</b>","",
     `Requested: <code>${escapeHtml(String(query||""))}</code>`,
     `Resolution: <b>${escapeHtml(resolved.status)}</b>${resolved.matches>1?` · matches ${resolved.matches}`:""}`,
     `Token: <b>${escapeHtml(r.symbol)}</b>`,
@@ -181440,7 +181441,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
-    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1241 admin-only near-miss/reject separation + exact token pass/fail decision (read-only)",
+    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1242 admin-only near-miss/reject separation + exact token pass/fail decision (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
@@ -183007,13 +183008,16 @@ async function telegramCommandReplyV271(
       loadedV1233?.state || {},
       parsed.argument || "24h"
     );
-    const controlV1241 = await webDiagControlReadV1193(env,loadedV1233?.state||{});
-    if (webDiagStillEnabledV1179(controlV1241)) {
-      const windowV1241 = String(parsed.argument||"24h").trim() || "24h";
-      const linkV1241 = await webDiagIssueRouteGrantV1188(env,controlV1241,`/premiumfunnel?period=${encodeURIComponent(windowV1241)}`);
-      if (linkV1241) replyV1233 += `\n\n🔐 <a href="${escapeHtml(linkV1241)}">Open secure WebDiag</a>`;
-    } else {
-      replyV1233 += `\n\n🔒 WebDiag closed. Enable temporarily with <code>/webdiag on 1h</code>.`;
+    const controlV1242 = await webDiagControlReadV1193(env,loadedV1233?.state||{});
+    const windowV1242 = String(parsed.argument||"24h").trim() || "24h";
+    const targetV1242 = `/premiumfunnel?period=${encodeURIComponent(windowV1242)}`;
+    const secureLinkV1242 = webDiagStillEnabledV1179(controlV1242)
+      ? await webDiagIssueRouteGrantV1188(env,controlV1242,targetV1242)
+      : null;
+    const hrefV1242 = secureLinkV1242 || `${WEB_DIAG_BASE_V1179}${targetV1242}`;
+    replyV1233 += `\n\n🌐 <b>Full web copy:</b> <a href="${escapeHtml(hrefV1242)}">Open full web diagnostic</a>`;
+    if (!webDiagStillEnabledV1179(controlV1242)) {
+      replyV1233 += `\n🔒 WebDiag is currently closed. Enable temporarily with <code>/webdiag on 1h</code>.`;
     }
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV1233 = await sendTelegram(env, replyV1233, null, null);
@@ -183040,15 +183044,17 @@ async function telegramCommandReplyV271(
       loadedV1240?.state || {},
       parsed.argument || "1h"
     );
-    const controlV1241 = await webDiagControlReadV1193(env,loadedV1240?.state||{});
-    if (webDiagStillEnabledV1179(controlV1241)) {
-      const qV1241 = String(parsed.argument||"1h").trim() || "1h";
-      const isTokenV1241 = isAddress(normalize(qV1241));
-      const targetV1241 = isTokenV1241 ? `/premiumwhy?token=${encodeURIComponent(qV1241)}` : `/premiumwhy?q=${encodeURIComponent(qV1241)}`;
-      const linkV1241 = await webDiagIssueRouteGrantV1188(env,controlV1241,targetV1241);
-      if (linkV1241) replyV1240 += `\n\n🔐 <a href="${escapeHtml(linkV1241)}">Open secure WebDiag</a>`;
-    } else {
-      replyV1240 += `\n\n🔒 WebDiag closed. Enable temporarily with <code>/webdiag on 1h</code>.`;
+    const controlV1242 = await webDiagControlReadV1193(env,loadedV1240?.state||{});
+    const qV1242 = String(parsed.argument||"1h").trim() || "1h";
+    const isTokenV1242 = isAddress(normalize(qV1242));
+    const targetV1242 = isTokenV1242 ? `/premiumwhy?token=${encodeURIComponent(qV1242)}` : `/premiumwhy?q=${encodeURIComponent(qV1242)}`;
+    const secureLinkV1242 = webDiagStillEnabledV1179(controlV1242)
+      ? await webDiagIssueRouteGrantV1188(env,controlV1242,targetV1242)
+      : null;
+    const hrefV1242 = secureLinkV1242 || `${WEB_DIAG_BASE_V1179}${targetV1242}`;
+    replyV1240 += `\n\n🌐 <b>Full web copy:</b> <a href="${escapeHtml(hrefV1242)}">Open full web diagnostic</a>`;
+    if (!webDiagStillEnabledV1179(controlV1242)) {
+      replyV1240 += `\n🔒 WebDiag is currently closed. Enable temporarily with <code>/webdiag on 1h</code>.`;
     }
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV1240 = await sendTelegram(env, replyV1240, null, null);
