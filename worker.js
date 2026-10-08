@@ -1,3 +1,4 @@
+// V1248 — snapshot-only early-collapse entry evidence comparison; no scanner, risk, Telegram, billing or provider changes.
 // V1247 — entry-scoped confirmed Telegram delivery vs legacy cohort; forward frozen-horizon quality. Read-only, no provider requests.
 // V1246: bounded DexScreener response-to-target selection trace; no new provider calls, no scoring changes.
 // V1245: read-only DexScreener stored request-path telemetry audit; no new provider calls or state changes.
@@ -146956,6 +146957,69 @@ function performanceSummaryV271(state, options = {}) {
   const strongAnd24hV1247 = athStrongV1247.map(r=>performanceHorizonMultipleV1181(r,"h24")).filter(x=>x!==null);
   lines.push(`Peak-to-24h caution: delivery-proven ≥2x ATH ${athStrongV1247.length}; with frozen 24h ${strongAnd24hV1247.length}; at/below entry at 24h ${strongAnd24hV1247.filter(x=>x<=1).length}.`,
     "<i>Only entry-scoped Telegram API proofs count as confirmed delivery. A frozen baseline alone is not proof of delivery or Premium-channel membership. The registry has no guaranteed premium-only designation. Missing horizons remain unverified; selection and survivorship bias apply. ATH is not a tradable return. Read-only; no new observations or provider requests.</i>");
+
+  // V1248: read-only evidence-strict comparison of frozen 24h outcomes.
+  // Cohorts are NOT premium-only and no missing entry field is reconstructed.
+  const outcomeCohortsV1248 = { collapse: [], holding: [], middle: [], missing: [] };
+  for (const r of confirmedV1247) {
+    const v = performanceHorizonMultipleV1181(r, "h24");
+    if (v === null) outcomeCohortsV1248.missing.push(r);
+    else if (v <= 0.5) outcomeCohortsV1248.collapse.push(r);
+    else if (v > 1.000001) outcomeCohortsV1248.holding.push(r);
+    else outcomeCohortsV1248.middle.push(r);
+  }
+  const medianV1248 = arr => {
+    const v = arr.filter(Number.isFinite).sort((a,b)=>a-b);
+    return v.length ? (v.length%2 ? v[(v.length-1)/2] :
+      (v[v.length/2-1]+v[v.length/2])/2) : null;
+  };
+  // Exact snapshot schema comes from buildEntrySignalSnapshotV309; do not
+  // interpret null, absent, zero or unverified fields as verified positives.
+  const entryMetricV1248 = (r, type) => {
+    const snap = r?.entrySignalSnapshotV309;
+    if (snap?.frozenAtSuccessfulCall !== true) return null;
+    const market = snap.market || {};
+    let x = null;
+    switch(type) {
+      case "opportunity": x=snap?.opportunity?.score; break;
+      case "confidence": x=snap?.confidence?.score; break;
+      case "momentum": if(snap?.momentum?.verified !== true) return null; x=snap?.momentum?.score; break;
+      case "risk": if(snap?.rugRisk?.verified !== true) return null; x=snap?.rugRisk?.score; break;
+      case "marketCap": if(market.verified !== true) return null; x=market.marketCap; break;
+      case "liquidity": if(market.verified !== true) return null; x=market.liquidityUsd; break;
+      case "netFlow5m": {const f=market?.directionalUsdVerifiedWindows?.m5; if(f?.verified!==true) return null; x=f.netFlowUsd; break;}
+      case "netFlow1h": {const f=market?.directionalUsdVerifiedWindows?.h1; if(f?.verified!==true) return null; x=f.netFlowUsd; break;}
+      default: return null;
+    }
+    if (x === null || x === undefined || x === "") return null;
+    const n=Number(x);
+    return Number.isFinite(n) && (type==="marketCap" || type==="liquidity" ? n>0 : true) ? n : null;
+  };
+  const summarizeMetricV1248 = (rows, metric) => {
+    const vals=rows.map(r=>entryMetricV1248(r,metric)).filter(x=>x!==null);
+    return {n:vals.length, mid:medianV1248(vals)};
+  };
+  const metricDisplayV1248 = (rows,metric) => {
+    const {n,mid}=summarizeMetricV1248(rows,metric);
+    if(mid===null) return `UNVERIFIED (0/${rows.length})`;
+    const value=(metric==="marketCap" || metric==="liquidity") ? telegramMoneyV271(mid) :
+      (metric==="netFlow5m" || metric==="netFlow1h") ? `${mid.toFixed(2)} USD` : mid.toFixed(1);
+    return `${value} (${n}/${rows.length})`;
+  };
+  const {collapse:collV1248,holding:holdV1248,middle:midV1248,missing:missingV1248}=outcomeCohortsV1248;
+  lines.push("", "🧯 <b>V1248 early-collapse / entry-quality audit</b>",
+    `Delivery-proven 24h cohorts: ≤0.5x <b>${collV1248.length}</b> · &gt;1x <b>${holdV1248.length}</b> · middle <b>${midV1248.length}</b> · 24h missing <b>${missingV1248.length}</b>`,
+    "<b>Frozen entry medians — collapse / above-entry at 24h</b>");
+  for(const [metric,label] of [["opportunity","Opportunity"],["confidence","Confidence"],["momentum","Verified momentum"],["risk","Verified risk"],["marketCap","Verified entry MC"],["liquidity","Verified liquidity"],["netFlow5m","Verified 5m net flow"],["netFlow1h","Verified 1h net flow"]]) {
+    lines.push(`• ${label}: <b>${metricDisplayV1248(collV1248,metric)}</b> / <b>${metricDisplayV1248(holdV1248,metric)}</b>`);
+  }
+  const earlyV1248 = collV1248.filter(r => {
+    const h1=performanceHorizonMultipleV1181(r,"h1");
+    return h1 !== null && h1 <= 0.5;
+  });
+  const oneHourObservedV1248=collV1248.filter(r=>performanceHorizonMultipleV1181(r,"h1")!==null);
+  lines.push(`Early collapses: among 24h ≤0.5x, verified 1h ≤0.5x <b>${earlyV1248.length}/${oneHourObservedV1248.length}</b> (1h missing ${collV1248.length-oneHourObservedV1248.length}).`,
+    "<i>Snapshot-only observational comparison; no causal inference, no historical evidence backfill. Score scales and risk meanings are preserved from stored entry snapshots. Missing coverage is shown explicitly. Delivery does not prove Premium membership, and these are market-cap multiples, not executable customer returns. Read-only; zero extra requests, writes or qualification changes.</i>");
 
   const shown = detail ? entries.slice(0,250) : entries.slice(0,6);
   lines.push("", detail ? "📚 <b>Per-call performance</b>" : "🕒 <b>Latest calls</b>");
