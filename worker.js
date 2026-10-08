@@ -1,3 +1,4 @@
+// V1246: bounded DexScreener response-to-target selection trace; no new provider calls, no scoring changes.
 // V1245: read-only DexScreener stored request-path telemetry audit; no new provider calls or state changes.
 // V1244 — Retained Market/Liquidity Evidence Audit. Read-only provenance comparison; no new collection or provider requests.
 // V1243 — Premium Rejection Clarity. Builds from V1242. Adds bounded blocker-frequency summary, honest near-miss/rejection totals and owner guidance to read-only /premiumwhy and protected web mirror. No scanner, scoring, risk, provider, budget, premium delivery, payment or security changes.
@@ -71064,6 +71065,24 @@ async function marketData(
           normalize(pair?.quoteToken?.address) === normalize(token)
       );
 
+    // V1246: retain bounded metadata only; never retain raw provider payloads.
+    const traceDexCandidateV1246 = (stage, selected = null) => {
+      const entry = {
+        at: Date.now(), token: normalize(token), httpStatus: response.status,
+        requested: v295BatchAddresses.length,
+        returned: allPairsV295.length, matched: pairs.length,
+        stage,
+        selectedPair: selected ? String(selected?.pairAddress || "").slice(0,90) : null,
+        selectedLiquidityUsd: selected && Number.isFinite(Number(selected?.liquidity?.usd))
+          ? Number(selected.liquidity.usd) : null,
+        selectedPriceUsdPresent: selected ? Number(selected?.priceUsd)>0 : false,
+        selectedMarketCapPresent: selected ? (Number(selected?.marketCap)>0 || Number(selected?.fdv)>0) : false
+      };
+      const log = Array.isArray(service.dexCandidateTraceV1246) ? service.dexCandidateTraceV1246 : [];
+      service.dexCandidateTraceV1246 = [...log.slice(-29), entry];
+    };
+    if (!pairs.length) traceDexCandidateV1246("ZERO_TARGET_PAIRS_INITIAL");
+
     if (
       !pairs.length
     ) {
@@ -71331,6 +71350,8 @@ async function marketData(
 
     const pair =
       pairs[0];
+
+    traceDexCandidateV1246("SELECTED_TARGET_PAIR", pair);
 
     const txWindow = window => {
       const row =
@@ -179319,7 +179340,7 @@ function premiumWhyBoolV1240(value) {
 function premiumWhyBulkMessageV1241(state,rawWindow) {
   const d = premiumWhyNearMissesV1241(state,rawWindow || "1h");
   const lines = [
-    `🧭 <b>ChainVanta Premium Why — V1245 · ${escapeHtml(d.window.label)}</b>`,
+    `🧭 <b>ChainVanta Premium Why — V1246 · ${escapeHtml(d.window.label)}</b>`,
     "",
     `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
     `Near-misses: <b>${d.nearTotal}</b> · Other rejects: <b>${d.rejectedTotal}</b>`,
@@ -179365,6 +179386,17 @@ function premiumWhyBulkMessageV1241(state,rawWindow) {
     ...(dexV1245.grouped.length?["Recorded feature/path classes: "+dexV1245.grouped.map(x=>`${escapeHtml(x.label)} ${x.total} (429:${x.http429}, OK:${x.ok}, other:${x.other})`).join("; ")]:["Recorded feature/path classes: NONE IN RETAINED WINDOW"]),
     ...(dexV1245.endpoints.length?["Endpoint classes (redacted): "+dexV1245.endpoints.map(([x,n])=>`${escapeHtml(x)} ×${n}`).join("; ")]:[]),
     "Scope warning: V830 keeps at most 30 service rows; other Workers, isolated analyses or uninstrumented fetch paths may be absent. Prior-60s overlap is not proof of duplicate requests or a rate-limit cause. No collector-to-decision linkage is inferred.");
+  const dexTracesV1246 = Array.isArray(state?.services?.dexscreener?.dexCandidateTraceV1246)
+    ? state.services.dexscreener.dexCandidateTraceV1246 :
+    Array.isArray(state?.dexscreener?.dexCandidateTraceV1246) ? state.dexscreener.dexCandidateTraceV1246 : [];
+  const windowMsV1246 = d.window.label === "1h" ? 3600000 : d.window.label === "24h" ? 86400000 : d.window.label === "7d" ? 604800000 : 3600000;
+  const recentDexTracesV1246 = dexTracesV1246.filter(r=>Date.now()-safeNumber(r?.at)>=0 && Date.now()-safeNumber(r?.at)<=windowMsV1246);
+  const selectedDexTracesV1246 = recentDexTracesV1246.filter(r=>r?.stage==="SELECTED_TARGET_PAIR");
+  const zeroDexTracesV1246 = recentDexTracesV1246.filter(r=>r?.stage==="ZERO_TARGET_PAIRS_INITIAL");
+  lines.push("", "<b>🔗 V1246 Response-to-target trace</b>",
+    `Stored matching traces: <b>${recentDexTracesV1246.length}</b> · selected target pair: <b>${selectedDexTracesV1246.length}</b> · initially zero target pairs: <b>${zeroDexTracesV1246.length}</b>`,
+    ...(recentDexTracesV1246.slice(-5).map(r=>`${escapeHtml(String(r.token||"UNKNOWN").slice(0,10))}… · ${escapeHtml(r.stage||"UNKNOWN")} · HTTP ${safeNumber(r.httpStatus)} · pairs ${safeNumber(r.matched)}/${safeNumber(r.returned)} · liquidity ${r.selectedLiquidityUsd===null?"UNAVAILABLE":"$"+safeNumber(r.selectedLiquidityUsd).toLocaleString("en-GB")} · price ${r.selectedPriceUsdPresent?"YES":"NO"} · cap ${r.selectedMarketCapPresent?"YES":"NO"}`)),
+    "This traces Dex candidate-response matching, not downstream scoring. An HTTP 200 or positive liquidity is not proof of qualification. Only new normal scans populate this bounded trace; no historical response reconstruction.");
   lines.push(
     "",
     "Use <code>/premiumwhy SYMBOL</code> or <code>/premiumwhy 0xTOKEN</code> for the full retained gate/evidence decision.",
