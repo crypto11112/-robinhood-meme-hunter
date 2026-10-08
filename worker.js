@@ -1,3 +1,4 @@
+// V1239 — Heavy Scan Phase Checkpoints. Builds directly from deployed V1238; adds tiny KV phase checkpoints so a stalled scheduled heavy scan reveals the last completed internal phase. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1238 — Persisted Scan Completion Receipts. Builds directly from V1237; adds compact KV run receipts so scheduler completion no longer depends solely on the long-lived relay terminal body. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
@@ -10097,7 +10098,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1238";
+const VERSION = "V1239";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -114081,6 +114082,11 @@ async function scan(
   const startedAt =
     Date.now();
 
+  const runIdV1239 = String(options?.v1239RunId || options?.v1238RunId || "").slice(0,128) || null;
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"SCAN_ENTERED",scanStartedAt:startedAt});
+  }
+
   const budget =
     createBudget();
 
@@ -114091,6 +114097,10 @@ async function scan(
 
   const state =
     stateResult.state;
+
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"STATE_LOADED",scanStartedAt:startedAt});
+  }
 
   /*
    * V1151: restore the newest proven V551 cursor before any pruning, reserve
@@ -114180,6 +114190,10 @@ async function scan(
     Number(
       latest.block
     );
+
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"HEAD_READY",scanStartedAt:startedAt,latestBlock:latestNumber,requestsUsed:budget?.used});
+  }
 
   const directionalWatchReserveV553 =
     configureDirectionalWatchReserveV553(
@@ -118214,6 +118228,10 @@ for (
         normalize(lastAlertExactPoolFallbackV460?.candidate?.address) || null;
   }
 
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"ANALYSIS_STARTED",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,requestsUsed:budget?.used});
+  }
+
   for (
     let v135Index = 0;
     v135Index < v135AnalysisQueue.length;
@@ -121953,6 +121971,10 @@ for (
         productionV4EnrichmentV772?.activePoolIndexV799 || null,
       classification:classificationV910
     };
+  }
+
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"ANALYSIS_DONE",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,returnedCandidates:candidates.length,requestsUsed:budget?.used});
   }
 
   state.exactPoolV151HandoffDiagnosticV905 =
@@ -129342,6 +129364,10 @@ for (
   /* V1076: forward-only compact D1 market-history snapshots.
    * Uses only evidence already present on analysed candidates.
    * Adds zero provider/RPC requests and does not mutate candidate evidence. */
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"FINALIZATION_STARTED",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,returnedCandidates:candidates.length,requestsUsed:budget?.used});
+  }
+
   const marketHistoryV1076 =
     await persistMarketHistoryV1076(
       env,
@@ -129349,11 +129375,19 @@ for (
       Date.now()
     );
 
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"STATE_SAVE_STARTED",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,returnedCandidates:candidates.length,requestsUsed:budget?.used});
+  }
+
   const save =
     await writeState(
       env,
       state
     );
+
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"STATE_SAVE_DONE",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,returnedCandidates:candidates.length,requestsUsed:budget?.used});
+  }
 
   // V1109: after the authoritative state + D1 history for this scan exist,
   // derive the unchanged V1108 promotions and hand only those max-3 addresses
@@ -129395,6 +129429,10 @@ for (
     dexService(
       state
     );
+
+  if (runIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"SCAN_RETURNING",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,returnedCandidates:candidates.length,requestsUsed:budget?.used});
+  }
 
   return {
     agent:
@@ -183379,7 +183417,15 @@ async function telegramCommandReplyV271(
       `Pending / overlap prevented: <b>${lastV969?.v1238CompletionPending === true ? "YES" : "NO"} / ${lastV969?.v1238CompletionReceipt?.overlapPrevented === true ? "YES" : "NO"}</b>`,
       `Receipt age: <b>${safeNumber(lastV969?.v1238CompletionReceipt?.ageMs)}ms</b>`,
       "",
-      "<i>Read-only. V1238 adds only a compact persisted scheduler completion receipt and overlap guard. Zero provider/RPC requests are added and scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
+      "🧭 <b>V1239 heavy-scan phase checkpoint</b>",
+      `Run ID: <code>${escapeHtml(String(statusV969?.v1239HeavyScanPhase?.runId || "N/A"))}</code>`,
+      `Last reached phase: <b>${escapeHtml(String(statusV969?.v1239HeavyScanPhase?.phase || "N/A"))}</b>`,
+      `Phase age: <b>${safeNumber(statusV969?.v1239HeavyScanPhase?.ageMs)}ms</b>`,
+      `Latest block / selected / entered / returned: <b>${safeNumber(statusV969?.v1239HeavyScanPhase?.latestBlock)} / ${safeNumber(statusV969?.v1239HeavyScanPhase?.selectedForAnalysis)} / ${safeNumber(statusV969?.v1239HeavyScanPhase?.analysisLoopEntered)} / ${safeNumber(statusV969?.v1239HeavyScanPhase?.returnedCandidates)}</b>`,
+      `Requests used: <b>${safeNumber(statusV969?.v1239HeavyScanPhase?.requestsUsed)}</b> · KV: <b>${escapeHtml(String(statusV969?.v1239HeavyScanPhase?.binding || "N/A"))}</b>`,
+      `Checkpoint read error: <code>${escapeHtml(String(statusV969?.v1239HeavyScanPhase?.readError || "NONE"))}</code>`,
+      "",
+      "<i>Read-only. V1239 adds only tiny KV phase checkpoints to identify the exact heavy-scan stall phase. Zero provider/RPC requests are added and scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -204107,20 +204153,20 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     const relayModeV914 = String(url.searchParams.get("v914RelayMode") || "");
     const relayRunIdV1238 = String(url.searchParams.get("v1238RunId") || "").slice(0,128) || null;
     if (relayModeV914 === "scheduled") {
-      return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env), "scheduled", env, relayRunIdV1238);
+      return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env,{v1239RunId:relayRunIdV1238}), "scheduled", env, relayRunIdV1238);
     }
     if (relayModeV914 === "qualification-followup") {
       return streamedHeavyScanRelayResponseV1236(
-        () => scan(env,{scheduled:true,qualificationFollowUpV723:true}),
+        () => scan(env,{scheduled:true,qualificationFollowUpV723:true,v1239RunId:relayRunIdV1238}),
         "qualification-followup",
         env,
         relayRunIdV1238
       );
     }
     if (relayModeV914 === "manual") {
-      return streamedHeavyScanRelayResponseV1236(() => scan(env,{scheduled:false}), "manual", env, relayRunIdV1238);
+      return streamedHeavyScanRelayResponseV1236(() => scan(env,{scheduled:false,v1239RunId:relayRunIdV1238}), "manual", env, relayRunIdV1238);
     }
-    return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env), "scheduled", env, relayRunIdV1238);
+    return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env,{v1239RunId:relayRunIdV1238}), "scheduled", env, relayRunIdV1238);
   }
 
   // V1179: protect every exposed diagnostic route before route-specific rendering.
@@ -204334,7 +204380,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         relayModeV914 === "scheduled"
       ) {
         return streamedHeavyScanRelayResponseV1236(
-          () => scheduledScan(env),
+          () => scheduledScan(env,{v1239RunId:relayRunIdV1238}),
           "scheduled",
           env,
           relayRunIdV1238
@@ -204350,7 +204396,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
             env,
             {
               scheduled: true,
-              qualificationFollowUpV723: true
+              qualificationFollowUpV723: true,
+              v1239RunId: relayRunIdV1238
             }
           ),
           "qualification-followup",
@@ -204366,7 +204413,8 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
           () => scan(
             env,
             {
-              scheduled: false
+              scheduled: false,
+              v1239RunId: relayRunIdV1238
             }
           ),
           "manual",
@@ -205201,16 +205249,23 @@ async function maybeSendDiagnosticEmailV898(env) {
    ========================================================= */
 
 async function scheduledScan(
-  env
+  env,
+  optionsV1239 = {}
 ) {
   const result =
     await scan(
       env,
       {
         scheduled:
-          true
+          true,
+        v1239RunId: String(optionsV1239?.v1239RunId || "").slice(0,128) || null
       }
     );
+
+  const scheduledRunIdV1239 = String(optionsV1239?.v1239RunId || "").slice(0,128) || null;
+  if (scheduledRunIdV1239) {
+    await writeHeavyScanPhaseV1239(env,{runId:scheduledRunIdV1239,phase:"MAIN_SCAN_RETURNED",scanStartedAt:Date.now(),latestBlock:result?.latestBlock,returnedCandidates:result?.candidates?.length,requestsUsed:result?.requestBudget?.used});
+  }
 
   // V1028: drain due delayed Free alerts only after the normal scan has fully
   // completed. Fail-open and isolated from scanner/provider request accounting.
@@ -209221,6 +209276,50 @@ async function readScanCompletionReceiptV1238(env) {
   }
 }
 
+/* =======================================================
+   V1239 HEAVY-SCAN PHASE CHECKPOINTS
+   Tiny dedicated KV marker only. No provider/RPC requests, scoring,
+   qualification, risk, Telegram or scanner-budget changes.
+   ======================================================= */
+const V1239_HEAVY_SCAN_PHASE_KEY = "chainvanta:v1239:heavy-scan-phase";
+
+async function writeHeavyScanPhaseV1239(env, data = {}) {
+  const { kv, binding } = getKV(env || {});
+  if (!kv) return { saved:false, binding:null, error:"KV_NOT_CONFIGURED_V1239" };
+  try {
+    const safe = {
+      schemaVersion:"V1239_1",
+      runId:String(data?.runId || "").slice(0,128),
+      phase:String(data?.phase || "UNVERIFIED").slice(0,64),
+      phaseAt:Date.now(),
+      scanStartedAt:safeNumber(data?.scanStartedAt) || null,
+      latestBlock:safeNumber(data?.latestBlock) || null,
+      selectedForAnalysis:safeNumber(data?.selectedForAnalysis),
+      analysisLoopEntered:safeNumber(data?.analysisLoopEntered),
+      returnedCandidates:safeNumber(data?.returnedCandidates),
+      requestsUsed:safeNumber(data?.requestsUsed),
+      version:VERSION
+    };
+    await kv.put(V1239_HEAVY_SCAN_PHASE_KEY, jsonStringifySafeV246(safe,0));
+    return { saved:true, binding, error:null, checkpoint:safe };
+  } catch (error) {
+    return { saved:false, binding, error:errorString(error), checkpoint:null };
+  }
+}
+
+async function readHeavyScanPhaseV1239(env) {
+  const { kv, binding } = getKV(env || {});
+  if (!kv) return { found:false, binding:null, error:"KV_NOT_CONFIGURED_V1239", checkpoint:null };
+  try {
+    const raw = await kv.get(V1239_HEAVY_SCAN_PHASE_KEY);
+    if (!raw) return { found:false, binding, error:null, checkpoint:null };
+    const checkpoint = JSON.parse(raw);
+    return { found:true, binding, error:null, checkpoint };
+  } catch (error) {
+    return { found:false, binding, error:errorString(error), checkpoint:null };
+  }
+}
+
 function sanitizeRelayBodyPreviewV1235(text) {
   let s = String(text || "");
   s = s.replace(/0x[a-fA-F0-9]{40,64}/g, "0x…REDACTED");
@@ -209800,6 +209899,7 @@ export class ScanSchedulerV673 {
     const last =
       await this.state.storage.get("v673:last") ||
       null;
+    const phaseReadV1239 = await readHeavyScanPhaseV1239(this.env);
 
     const alarmNumber =
       Number(alarm);
@@ -209833,6 +209933,14 @@ export class ScanSchedulerV673 {
             )
           : false,
       last,
+      v1239HeavyScanPhase: phaseReadV1239?.checkpoint ? {
+        ...phaseReadV1239.checkpoint,
+        binding:phaseReadV1239?.binding || null,
+        ageMs:safeNumber(phaseReadV1239?.checkpoint?.phaseAt) > 0 ? Math.max(0,Date.now()-safeNumber(phaseReadV1239.checkpoint.phaseAt)) : null,
+        readError:phaseReadV1239?.error || null
+      } : {
+        runId:null,phase:"N/A",binding:phaseReadV1239?.binding || null,ageMs:null,readError:phaseReadV1239?.error || null
+      },
       timestamp: now()
     };
   }
