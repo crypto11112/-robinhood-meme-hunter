@@ -1,3 +1,4 @@
+// V1233 — Premium Funnel Intelligence: bounded hourly diagnostic rollups + read-only /premiumfunnel owner report; scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
@@ -10040,7 +10041,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1232";
+const VERSION = "V1233";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -178716,7 +178717,261 @@ function updateLaunchCoverageCumulativeV474(
     };
   }
 
+  // V1233: compact diagnostic-only hourly rollup. No extra write; this rides the
+  // same persisted state object already saved by the normal scanner cycle.
+  premiumFunnelRecordScanV1233(cumulative, row, cumulative.lastUpdatedAt);
+
   return cumulative;
+}
+
+
+/* =========================================================
+   V1233 — PREMIUM FUNNEL INTELLIGENCE
+   Diagnostic-only aggregation. Reuses already-computed launch-coverage rows
+   and the existing end-of-scan state write. Adds zero provider requests,
+   zero scanner passes and zero qualification/scoring/risk/Telegram changes.
+   Hourly buckets are bounded to 8 days so 1h/24h/7d reports remain compact.
+   ========================================================= */
+function premiumFunnelBlockerCategoryV1233(reason) {
+  const r = String(reason || "").toUpperCase();
+  if (!r) return "OTHER";
+  if (r.includes("RISK")) return "RISK_NOT_ACCEPTABLE";
+  if (r.includes("OPPORTUNITY")) return "OPPORTUNITY_BELOW_THRESHOLD";
+  if (r.includes("CONFIDENCE")) return "CONFIDENCE_BELOW_THRESHOLD";
+  if (r.includes("LIQUIDITY")) return "LIQUIDITY_UNVERIFIED_OR_LOW";
+  if (r.includes("EXACT_POOL") || r.includes("POOL_IDENTITY")) return "EXACT_POOL_UNAVAILABLE";
+  if (r.includes("MARKET")) return "MARKET_UNVERIFIED";
+  if (r.includes("ENTRY")) return "ENTRY_UNVERIFIED";
+  if (r.includes("LAUNCH")) return "LAUNCH_EVIDENCE_UNVERIFIED";
+  if (r.includes("SIGNAL")) return "INSUFFICIENT_SIGNALS";
+  if (r.includes("HOLDER") || r.includes("CONCENTRATION")) return "HOLDER_OR_CONCENTRATION";
+  if (r.includes("SWAP") || r.includes("FLOW") || r.includes("DIRECTIONAL")) return "FLOW_OR_SWAP_EVIDENCE";
+  return "OTHER";
+}
+
+function premiumFunnelRecordScanV1233(cumulative, row, capturedAt=Date.now()) {
+  if (!cumulative || typeof cumulative !== "object") return;
+  const hourMs = 60 * 60 * 1000;
+  const now = safeNumber(capturedAt) || Date.now();
+  const hourStart = Math.floor(now / hourMs) * hourMs;
+  const history = Array.isArray(cumulative.premiumFunnelHourlyV1233)
+    ? cumulative.premiumFunnelHourlyV1233
+    : [];
+  let bucket = history.find(b => safeNumber(b?.hourStart) === hourStart);
+  if (!bucket) {
+    bucket = {
+      hourStart,
+      scans:0,
+      liveAddressObservations:0,
+      newAddressesDiscovered:0,
+      verifiedLaunches:0,
+      selectedForAnalysis:0,
+      analysisLoopEntered:0,
+      budgetDeferred:0,
+      returnedCandidates:0,
+      telegramQualified:0,
+      telegramSent:0,
+      blockers:{}
+    };
+    history.push(bucket);
+  }
+  bucket.scans = safeNumber(bucket.scans) + 1;
+  bucket.liveAddressObservations = safeNumber(bucket.liveAddressObservations) + safeNumber(row?.liveAddressesObserved);
+  bucket.newAddressesDiscovered = safeNumber(bucket.newAddressesDiscovered) + safeNumber(row?.discoveredNewAddresses);
+  bucket.verifiedLaunches = safeNumber(bucket.verifiedLaunches) + safeNumber(row?.positivelyVerifiedLaunchesThisScan);
+  bucket.selectedForAnalysis = safeNumber(bucket.selectedForAnalysis) + safeNumber(row?.selectedCurrentLiveForAnalysis);
+  bucket.analysisLoopEntered = safeNumber(bucket.analysisLoopEntered) + safeNumber(row?.currentLiveAnalysisLoopEntered);
+  bucket.budgetDeferred = safeNumber(bucket.budgetDeferred) + safeNumber(row?.currentLiveBudgetDeferred);
+  bucket.returnedCandidates = safeNumber(bucket.returnedCandidates) + safeNumber(row?.currentLiveReturnedCandidates);
+  bucket.telegramQualified = safeNumber(bucket.telegramQualified) + safeNumber(row?.currentLiveTelegramQualified);
+  bucket.telegramSent = safeNumber(bucket.telegramSent) + safeNumber(row?.currentLiveTelegramSent);
+
+  const rawBlockers = row?.currentLiveTelegramBlockedByV649 && typeof row.currentLiveTelegramBlockedByV649 === "object"
+    ? row.currentLiveTelegramBlockedByV649
+    : {};
+  if (!bucket.blockers || typeof bucket.blockers !== "object") bucket.blockers = {};
+  for (const [reason,count] of Object.entries(rawBlockers)) {
+    const category = premiumFunnelBlockerCategoryV1233(reason);
+    bucket.blockers[category] = safeNumber(bucket.blockers[category]) + safeNumber(count);
+  }
+
+  const cutoff = now - (8 * 24 * hourMs);
+  cumulative.premiumFunnelHourlyV1233 = history
+    .filter(b => safeNumber(b?.hourStart) >= cutoff)
+    .sort((a,b) => safeNumber(a?.hourStart) - safeNumber(b?.hourStart))
+    .slice(-192);
+  if (!safeNumber(cumulative.premiumFunnelStartedAtV1233)) {
+    cumulative.premiumFunnelStartedAtV1233 = now;
+  }
+  cumulative.premiumFunnelLastUpdatedAtV1233 = now;
+}
+
+function premiumFunnelWindowMsV1233(raw) {
+  const q = String(raw || "24h").trim().toLowerCase();
+  if (!q || q === "24h" || q === "day") return {label:"24h",ms:24*60*60*1000};
+  if (q === "last" || q === "scan" || q === "latest") return {label:"last",ms:0};
+  if (q === "1h" || q === "hour") return {label:"1h",ms:60*60*1000};
+  if (q === "7d" || q === "week") return {label:"7d",ms:7*24*60*60*1000};
+  return {label:"24h",ms:24*60*60*1000,normalizedFrom:q};
+}
+
+function premiumFunnelAggregateV1233(state, rawWindow) {
+  const c = state?.launchCoverageCumulativeV474 && typeof state.launchCoverageCumulativeV474 === "object"
+    ? state.launchCoverageCumulativeV474
+    : {};
+  const w = premiumFunnelWindowMsV1233(rawWindow);
+  const now = Date.now();
+  const base = {
+    window:w,
+    now,
+    startedAt:safeNumber(c?.premiumFunnelStartedAtV1233) || null,
+    lastUpdatedAt:safeNumber(c?.premiumFunnelLastUpdatedAtV1233) || null,
+    scans:0,liveAddressObservations:0,newAddressesDiscovered:0,verifiedLaunches:0,
+    selectedForAnalysis:0,analysisLoopEntered:0,budgetDeferred:0,returnedCandidates:0,
+    telegramQualified:0,telegramSent:0,blockers:{},bucketsUsed:0
+  };
+
+  if (w.label === "last") {
+    const r = c?.lastScan || {};
+    Object.assign(base, {
+      scans:safeNumber(r?.capturedAt)>0?1:0,
+      liveAddressObservations:safeNumber(r?.liveAddressesObserved),
+      newAddressesDiscovered:safeNumber(r?.discoveredNewAddresses),
+      verifiedLaunches:safeNumber(r?.positivelyVerifiedLaunchesThisScan),
+      selectedForAnalysis:safeNumber(r?.selectedCurrentLiveForAnalysis),
+      analysisLoopEntered:safeNumber(r?.currentLiveAnalysisLoopEntered),
+      budgetDeferred:safeNumber(r?.currentLiveBudgetDeferred),
+      returnedCandidates:safeNumber(r?.currentLiveReturnedCandidates),
+      telegramQualified:safeNumber(r?.currentLiveTelegramQualified),
+      telegramSent:safeNumber(r?.currentLiveTelegramSent),
+      capturedAt:safeNumber(r?.capturedAt)||null
+    });
+    for (const [reason,count] of Object.entries(r?.currentLiveTelegramBlockedByV649 || {})) {
+      const cat = premiumFunnelBlockerCategoryV1233(reason);
+      base.blockers[cat] = safeNumber(base.blockers[cat]) + safeNumber(count);
+    }
+  } else {
+    const cutoff = now - w.ms;
+    const rows = (Array.isArray(c?.premiumFunnelHourlyV1233) ? c.premiumFunnelHourlyV1233 : [])
+      .filter(b => safeNumber(b?.hourStart) + 60*60*1000 > cutoff);
+    base.bucketsUsed = rows.length;
+    for (const b of rows) {
+      for (const k of ["scans","liveAddressObservations","newAddressesDiscovered","verifiedLaunches","selectedForAnalysis","analysisLoopEntered","budgetDeferred","returnedCandidates","telegramQualified","telegramSent"]) {
+        base[k] = safeNumber(base[k]) + safeNumber(b?.[k]);
+      }
+      for (const [cat,count] of Object.entries(b?.blockers || {})) {
+        base.blockers[cat] = safeNumber(base.blockers[cat]) + safeNumber(count);
+      }
+    }
+  }
+
+  // Successful Premium-call evidence is taken from persisted call-performance
+  // records. This is distinct-token/latest-success provenance, while telegramSent
+  // above remains the authoritative send count captured scan-by-scan.
+  const registry = state?.callPerformanceV270 && typeof state.callPerformanceV270 === "object"
+    ? state.callPerformanceV270 : {};
+  const cutoffCalls = w.label === "last"
+    ? (safeNumber(c?.lastScan?.capturedAt) - 10*60*1000)
+    : (now - w.ms);
+  const calls = Object.values(registry)
+    .filter(r => safeNumber(r?.lastSuccessfulAlertAt) >= cutoffCalls && safeNumber(r?.lastSuccessfulAlertAt) <= now)
+    .sort((a,b) => safeNumber(b?.lastSuccessfulAlertAt)-safeNumber(a?.lastSuccessfulAlertAt));
+  base.distinctSuccessfulCallTokens = calls.length;
+  base.verifiedCallTokens = 0;
+  base.earlyDiscoveryTokens = 0;
+  base.launchVerifiedCallTokens = 0;
+  base.triggerCounts = {};
+  base.recentCalls = [];
+  for (const r of calls) {
+    const call = r?.latestCustomerCallBaselineV1175 || null;
+    const verified = call?.customerVerifiedCallV1228 === true;
+    if (verified) base.verifiedCallTokens += 1; else base.earlyDiscoveryTokens += 1;
+    if (call?.launchAgeVerifiedV1178 === true) base.launchVerifiedCallTokens += 1;
+    const trigger = String(call?.triggerReason || "UNSPECIFIED").trim() || "UNSPECIFIED";
+    base.triggerCounts[trigger] = safeNumber(base.triggerCounts[trigger]) + 1;
+    if (base.recentCalls.length < 5) {
+      base.recentCalls.push({
+        symbol:r?.symbol || call?.symbol || "UNKNOWN",
+        address:normalize(r?.address || call?.address || ""),
+        at:safeNumber(r?.lastSuccessfulAlertAt),
+        stage:verified?"VERIFIED_CALL":"EARLY_DISCOVERY",
+        trigger,
+        opportunity:safeNumber(call?.opportunityScore ?? r?.entrySignalSnapshotV309?.opportunityScore),
+        confidence:safeNumber(call?.confidenceScore ?? r?.entrySignalSnapshotV309?.confidenceScore),
+        risk:call?.riskScore ?? r?.entrySignalSnapshotV309?.riskScore ?? null,
+        entryVerified:call?.entryPriceVerified === true,
+        exactPoolVerified:/^0x[a-f0-9]{64}$/.test(String(call?.exactPoolId || "")),
+        launchVerified:call?.launchAgeVerifiedV1178 === true
+      });
+    }
+  }
+  return base;
+}
+
+function premiumFunnelTelegramMessageV1233(state, rawWindow) {
+  const d = premiumFunnelAggregateV1233(state, rawWindow);
+  const fmt = v => Number(safeNumber(v)).toLocaleString("en-GB");
+  const pct = (n,den) => safeNumber(den)>0 ? `${(safeNumber(n)/safeNumber(den)*100).toFixed(1)}%` : "N/A";
+  const iso = v => safeNumber(v)>0 ? new Date(safeNumber(v)).toISOString() : "UNVERIFIED";
+  const blockerLines = Object.entries(d.blockers || {})
+    .filter(([,v]) => safeNumber(v)>0)
+    .sort((a,b)=>safeNumber(b[1])-safeNumber(a[1]))
+    .slice(0,8)
+    .map(([k,v])=>`• ${escapeHtml(k.replaceAll("_"," "))}: <b>${fmt(v)}</b>`);
+  const triggerLines = Object.entries(d.triggerCounts || {})
+    .filter(([,v])=>safeNumber(v)>0)
+    .sort((a,b)=>safeNumber(b[1])-safeNumber(a[1]))
+    .slice(0,5)
+    .map(([k,v])=>`• ${escapeHtml(k)}: <b>${fmt(v)}</b>`);
+  const recentLines = (d.recentCalls || []).map(r => {
+    const short = isAddress(r.address) ? `${r.address.slice(0,6)}…${r.address.slice(-4)}` : "UNVERIFIED";
+    return `• <b>${escapeHtml(r.symbol)}</b> <code>${escapeHtml(short)}</code> · ${r.stage==="VERIFIED_CALL"?"✅ VERIFIED":"🔎 EARLY"} · entry ${r.entryVerified?"YES":"NO"} · pool ${r.exactPoolVerified?"YES":"NO"} · launch ${r.launchVerified?"YES":"NO"} · ${escapeHtml(r.trigger)}`;
+  });
+  let coverageLine;
+  if (d.window.label === "last") {
+    coverageLine = `Captured: <code>${escapeHtml(iso(d.capturedAt))}</code>`;
+  } else {
+    const start = safeNumber(d.startedAt);
+    const requestedStart = d.now - d.window.ms;
+    const coveredMs = start>0 ? Math.max(0,d.now-Math.max(start,requestedStart)) : 0;
+    const coveragePct = d.window.ms>0 ? Math.min(100,coveredMs/d.window.ms*100) : 100;
+    coverageLine = `Coverage since V1233: <b>${coveragePct.toFixed(1)}%</b> · started <code>${escapeHtml(iso(start))}</code>`;
+  }
+  return [
+    `📊 <b>ChainVanta Premium Funnel — V1233 · ${escapeHtml(d.window.label)}</b>`,
+    "",
+    coverageLine,
+    d.window.normalizedFrom ? `Requested window “${escapeHtml(d.window.normalizedFrom)}” normalized to 24h.` : null,
+    "",
+    "<b>🔭 Market → Premium funnel</b>",
+    `Scans: <b>${fmt(d.scans)}</b>`,
+    `Live address observations*: <b>${fmt(d.liveAddressObservations)}</b>`,
+    `New addresses discovered*: <b>${fmt(d.newAddressesDiscovered)}</b>`,
+    `Verified launches: <b>${fmt(d.verifiedLaunches)}</b>`,
+    `Selected for analysis: <b>${fmt(d.selectedForAnalysis)}</b>`,
+    `Analysis entered: <b>${fmt(d.analysisLoopEntered)}</b>`,
+    `Returned candidates: <b>${fmt(d.returnedCandidates)}</b>`,
+    `Telegram qualified: <b>${fmt(d.telegramQualified)}</b> (${pct(d.telegramQualified,d.returnedCandidates)})`,
+    `Premium sends: <b>${fmt(d.telegramSent)}</b>`,
+    `Budget deferred: <b>${fmt(d.budgetDeferred)}</b>`,
+    "",
+    "<b>🚧 Why candidates did not qualify — blocker occurrences</b>",
+    ...(blockerLines.length ? blockerLines : ["• No retained blockers in this window."]),
+    "",
+    "<b>✅ Why successful calls passed</b>",
+    `Distinct successful-call tokens in retained performance: <b>${fmt(d.distinctSuccessfulCallTokens)}</b>`,
+    `Verified-entry call tokens: <b>${fmt(d.verifiedCallTokens)}</b> · Early Discovery tokens: <b>${fmt(d.earlyDiscoveryTokens)}</b>`,
+    `Launch-verified among those tokens: <b>${fmt(d.launchVerifiedCallTokens)}</b>`,
+    ...(triggerLines.length ? triggerLines : ["• No successful-call trigger records in this window."]),
+    "",
+    "<b>🧾 Recent successful calls</b>",
+    ...(recentLines.length ? recentLines : ["• None retained for this window."]),
+    "",
+    "*Live-address observations are scan observations, not a unique-token claim. New-address discovery can include backlog catch-up.",
+    "Blocker counts are occurrences and may overlap because one candidate can fail more than one gate.",
+    "Successful-call stage detail uses latest persisted per-token call provenance; Premium sends above is the scan-by-scan delivery count.",
+    "<i>Read-only command: zero provider requests, zero scanner-budget consumption and zero state writes. V1233 hourly rollups piggyback on the existing scanner state save and do not change scanner decisions.</i>"
+  ].filter(Boolean).join("\n");
 }
 
 
@@ -180851,6 +181106,7 @@ function telegramHelpV271() {
     "<code>/launchsources</code> — verified launch-source coverage + active sources",
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
+    "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
@@ -182404,6 +182660,26 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = sentV1031?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:sentV1031?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
+  // V1233: owner-facing Premium decision funnel. Read-only; all scanner data
+  // is already persisted by normal scans. No provider requests or state writes.
+  if (parsed.command === "/premiumfunnel") {
+    const loadedV1233 = await readState(env);
+    const replyV1233 = premiumFunnelTelegramMessageV1233(
+      loadedV1233?.state || {},
+      parsed.argument || "24h"
+    );
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1233 = await sendTelegram(env, replyV1233, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1233?.success === true;
+      diagnosticV273.telegramStatus = sentV1233?.status || null;
+      diagnosticV273.telegramMode = sentV1233?.mode || null;
+      diagnosticV273.telegramError = sentV1233?.error || null;
+      diagnosticV273.result = sentV1233?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1233?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
   }
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
