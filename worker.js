@@ -1,4 +1,4 @@
-// V1236 — Structured Relay Terminal Protocol. Inherits V1235 parser hardening, V1234 keepalive, and V1233 Premium Funnel Intelligence; scanner/scoring/risk/provider/Telegram behavior unchanged.
+// V1237 — NDJSON Delimiter Correction. Builds directly from V1236 and fixes the structured relay record delimiter/parser only; scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
@@ -10071,21 +10071,18 @@
  *   request ceilings, watch capacity, payments or WebDiag behavior changes.
  */
 /*
- * V1236 STRUCTURED RELAY TERMINAL PROTOCOL
- * - Builds directly from deployed V1235.
- * - Targets the proven intermittent HTTP 200 / heartbeat-only relay body where the
- *   scheduler received keepalive bytes but no terminal scan JSON.
- * - Replaces anonymous whitespace heartbeats with bounded NDJSON heartbeat records and
- *   requires one explicit terminal record carrying either the compact scan result or a
- *   structured execution failure.
- * - Scheduler parses the terminal record explicitly and may perform one sequential retry
- *   only after the first response has fully ended with HTTP 503/no body or HTTP 200 with
- *   heartbeat records but no terminal record. No overlapping fetches are created by this
- *   retry policy.
- * - Preserves V914 memory isolation, authentication, request ceilings, provider/RPC use,
- *   scoring, thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag.
+ * V1237 NDJSON DELIMITER CORRECTION
+ * - Builds directly from deployed V1236.
+ * - Fixes the proven deterministic relay parser failure where V1236 emitted the literal
+ *   two-character sequence "\\n" between structured JSON records instead of a real
+ *   newline, causing multiple heartbeat/terminal objects to be parsed as one JSON body.
+ * - Emits a real newline after every heartbeat and terminal record and splits the relay
+ *   body on real CR/LF line boundaries before parsing each NDJSON record independently.
+ * - Keeps the V1236 structured heartbeat/terminal protocol, sequential retry policy, V914
+ *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
+ *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1236";
+const VERSION = "V1237";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -183354,13 +183351,13 @@ async function telegramCommandReplyV271(
       `Parse error: <code>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.parseError || "NONE"))}</code>`,
       `Safe preview: <code>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.safePreview || "NONE"))}</code>`,
       "",
-      "🧷 <b>V1236 structured terminal proof</b>",
+      "🧷 <b>V1237 structured terminal proof</b>",
       `Protocol: <code>${escapeHtml(String(lastV969?.v1236RelayTransport?.protocol || "N/A"))}</code>`,
       `Terminal emitted / type: <b>${lastV969?.v1236RelayTransport?.terminalEmitted === true ? "YES" : "NO"}</b> · <code>${escapeHtml(String(lastV969?.v1236RelayTransport?.terminalType || "N/A"))}</code>`,
       `Parsed heartbeats / terminal records: <b>${safeNumber(lastV969?.v1235RelayBodyParse?.heartbeatRecords)} / ${safeNumber(lastV969?.v1235RelayBodyParse?.terminalRecords)}</b>`,
       `Terminal seen by scheduler: <b>${lastV969?.v1235RelayBodyParse?.terminalSeen === true ? "YES" : "NO"}</b>`,
       "",
-      "<i>Read-only. Zero provider requests and zero scanner writes. V1236 hardens only the scheduler↔relay transport with structured heartbeat/terminal records; scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
+      "<i>Read-only. Zero provider requests and zero scanner writes. V1237 corrects only the V1236 NDJSON record delimiter/parser; scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -209175,7 +209172,7 @@ async function parseHeavyScanRelayResponseV1236(response, attempt = 1) {
   // V1236 primary path: newline-delimited heartbeat records followed by exactly one
   // terminal record. Ignore malformed non-terminal lines, but never infer success
   // without a valid terminal payload.
-  const lines = String(rawText || "").split(/\\r?\\n/).map(v => v.trim()).filter(Boolean);
+  const lines = String(rawText || "").split(/\r?\n/).map(v => v.trim()).filter(Boolean);
   for (const line of lines) {
     try {
       const record = JSON.parse(line);
@@ -209191,7 +209188,7 @@ async function parseHeavyScanRelayResponseV1236(response, attempt = 1) {
         terminalType = String(record?.transport?.terminalType || (record.ok === false ? "SCAN_FAILED" : "SCAN_COMPLETE"));
         if (record.payload && typeof record.payload === "object" && !Array.isArray(record.payload)) {
           body = record.payload;
-          parseMethod = "V1236_NDJSON_TERMINAL_RECORD";
+          parseMethod = "V1237_NDJSON_TERMINAL_RECORD";
         } else {
           parseError = "V1236_TERMINAL_PAYLOAD_INVALID";
         }
@@ -209214,13 +209211,13 @@ async function parseHeavyScanRelayResponseV1236(response, attempt = 1) {
   }
 
   if (!body && heartbeatRecords > 0 && !terminalSeen) {
-    parseError = "TERMINAL_RECORD_MISSING_V1236";
+    parseError = "TERMINAL_RECORD_MISSING_V1237";
   } else if (!body && !trimmed && !readError) {
     parseError = "EMPTY_RELAY_BODY_V1236";
   }
 
   const meta = {
-    version: "V1236",
+    version: "V1237",
     attempt,
     httpStatus: Number(response?.status) || null,
     httpOk: response?.ok === true,
@@ -209270,7 +209267,7 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
         if (closedV1236) return false;
         try {
           controllerV1236.enqueue(
-            encoderV1236.encode(JSON.stringify(recordV1236) + "\\n")
+            encoderV1236.encode(JSON.stringify(recordV1236) + "\n")
           );
           return true;
         } catch (_) {
@@ -209282,7 +209279,7 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
         if (closedV1236 || terminalEmittedV1236) return;
         const emittedV1236 = enqueueRecordV1236({
           type: "heartbeat",
-          version: "V1236",
+          version: "V1237",
           seq: heartbeatCountV1236 + 1,
           elapsedMs: Date.now() - startedAtV1236,
           mode
@@ -209299,8 +209296,8 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
         const compactV1236 = compactHeavyScanRelayResultV914(resultV1236, mode);
         const completedAtV1236 = Date.now();
         const transportV1236 = {
-          version: "V1236",
-          protocol: "NDJSON_HEARTBEAT_PLUS_TERMINAL_V1236",
+          version: "V1237",
+          protocol: "NDJSON_HEARTBEAT_PLUS_TERMINAL_V1237",
           terminalType: "SCAN_COMPLETE",
           terminalEmitted: true,
           heartbeatIntervalMs: heartbeatIntervalMsV1236,
@@ -209324,7 +209321,7 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
         compactV1236.v1236RelayTransport = transportV1236;
         terminalEmittedV1236 = enqueueRecordV1236({
           type: "terminal",
-          version: "V1236",
+          version: "V1237",
           ok: true,
           payload: compactV1236,
           transport: transportV1236
@@ -209364,7 +209361,7 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
         };
         terminalEmittedV1236 = enqueueRecordV1236({
           type: "terminal",
-          version: "V1236",
+          version: "V1237",
           ok: false,
           payload: failureV1236,
           transport: transportV1236
@@ -209387,7 +209384,7 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
       "content-type": "application/x-ndjson; charset=utf-8",
       "cache-control": "no-store, max-age=0",
       "x-content-type-options": "nosniff",
-      "x-chainvanta-relay-stream": "V1236",
+      "x-chainvanta-relay-stream": "V1237",
       "x-chainvanta-relay-terminal-required": "1"
     }
   });
@@ -209459,7 +209456,7 @@ async function relayHeavyScanOutsideSchedulerV914(
   const firstTerminalMissingV1236 =
     first.response.ok === true &&
     (!first.body || typeof first.body !== "object") &&
-    String(first.bodyParseV1235?.parseError || "") === "TERMINAL_RECORD_MISSING_V1236";
+    String(first.bodyParseV1235?.parseError || "") === "TERMINAL_RECORD_MISSING_V1237";
 
   if (first.response.ok && !firstTerminalMissingV1236) {
     if (first.body?.v1236RelayExecutionError === true || first.body?.v1234RelayExecutionError === true) {
@@ -209469,7 +209466,7 @@ async function relayHeavyScanOutsideSchedulerV914(
     }
     if (!first.body || typeof first.body !== "object") {
       throw new Error(
-        `V1235_HEAVY_SCAN_RELAY_INVALID_BODY:status=${first.response.status};bytes=${safeNumber(first.bodyParseV1235?.bodyBytes)};trimmed=${safeNumber(first.bodyParseV1235?.trimmedChars)};parse=${String(first.bodyParseV1235?.parseError || "NONE").slice(0,120)}`
+        `V1237_HEAVY_SCAN_RELAY_INVALID_BODY:status=${first.response.status};bytes=${safeNumber(first.bodyParseV1235?.bodyBytes)};trimmed=${safeNumber(first.bodyParseV1235?.trimmedChars)};parse=${String(first.bodyParseV1235?.parseError || "NONE").slice(0,120)}`
       );
     }
 
