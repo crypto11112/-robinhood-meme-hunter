@@ -1,4 +1,4 @@
-// V1237 — NDJSON Delimiter Correction. Builds directly from V1236 and fixes the structured relay record delimiter/parser only; scanner/scoring/risk/provider/Telegram behavior unchanged.
+// V1238 — Persisted Scan Completion Receipts. Builds directly from V1237; adds compact KV run receipts so scheduler completion no longer depends solely on the long-lived relay terminal body. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
@@ -10071,6 +10071,21 @@
  *   request ceilings, watch capacity, payments or WebDiag behavior changes.
  */
 /*
+ * V1238 PERSISTED SCAN COMPLETION RECEIPTS
+ * - Builds directly from deployed V1237.
+ * - Keeps the V1237 NDJSON heartbeat/terminal transport for compatibility, but no
+ *   longer makes scheduler correctness depend solely on the terminal record reaching
+ *   the Durable Object over one long-lived HTTP response.
+ * - Each scheduled heavy scan gets one runId and writes a tiny dedicated KV receipt:
+ *   STARTED before heavy work, then COMPLETED or FAILED at the existing completion edge.
+ * - If the relay body loses its terminal record, the scheduler can recover the exact
+ *   compact completed result from the matching persisted receipt. If the receipt is
+ *   still STARTED, a later alarm observes it and avoids overlapping duplicate scans.
+ * - Receipts are compact, contain no secrets, add zero provider/RPC requests, and do
+ *   not alter scoring, risk, qualification, Telegram routing, request ceilings,
+ *   payments, Premium Funnel logic, or WebDiag security.
+ */
+/*
  * V1237 NDJSON DELIMITER CORRECTION
  * - Builds directly from deployed V1236.
  * - Fixes the proven deterministic relay parser failure where V1236 emitted the literal
@@ -10082,7 +10097,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1237";
+const VERSION = "V1238";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -183324,7 +183339,7 @@ async function telegramCommandReplyV271(
       `Started: <code>${fmtTsV969(lastV969?.startedAt)}</code>`,
       `Completed: <code>${fmtTsV969(lastV969?.completedAt)}</code>`,
       `Trigger: <b>${escapeHtml(String(lastV969?.trigger || lastV969?.reason || "UNVERIFIED"))}</b>`,
-      `Success: <b>${lastV969?.success === true || lastV969?.ok === true ? "YES" : lastV969?.success === false || lastV969?.ok === false ? "NO" : "UNVERIFIED"}</b>`,
+      `Success: <b>${lastV969?.v1238CompletionPending === true ? "PENDING" : lastV969?.success === true || lastV969?.ok === true ? "YES" : lastV969?.success === false || lastV969?.ok === false ? "NO" : "UNVERIFIED"}</b>`,
       `Failure: <code>${escapeHtml(String(lastV969?.failure || lastV969?.error || "NONE"))}</code>`,
       "",
       "💾 <b>V983 launch-coverage persistence proof</b>",
@@ -183357,7 +183372,14 @@ async function telegramCommandReplyV271(
       `Parsed heartbeats / terminal records: <b>${safeNumber(lastV969?.v1235RelayBodyParse?.heartbeatRecords)} / ${safeNumber(lastV969?.v1235RelayBodyParse?.terminalRecords)}</b>`,
       `Terminal seen by scheduler: <b>${lastV969?.v1235RelayBodyParse?.terminalSeen === true ? "YES" : "NO"}</b>`,
       "",
-      "<i>Read-only. Zero provider requests and zero scanner writes. V1237 corrects only the V1236 NDJSON record delimiter/parser; scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
+      "🧾 <b>V1238 persisted completion receipt</b>",
+      `Receipt status: <b>${escapeHtml(String(lastV969?.v1238CompletionReceipt?.status || "N/A"))}</b>`,
+      `Run ID: <code>${escapeHtml(String(lastV969?.v1238CompletionReceipt?.runId || "N/A"))}</code>`,
+      `KV binding: <b>${escapeHtml(String(lastV969?.v1238CompletionReceipt?.binding || "N/A"))}</b>`,
+      `Pending / overlap prevented: <b>${lastV969?.v1238CompletionPending === true ? "YES" : "NO"} / ${lastV969?.v1238CompletionReceipt?.overlapPrevented === true ? "YES" : "NO"}</b>`,
+      `Receipt age: <b>${safeNumber(lastV969?.v1238CompletionReceipt?.ageMs)}ms</b>`,
+      "",
+      "<i>Read-only. V1238 adds only a compact persisted scheduler completion receipt and overlap guard. Zero provider/RPC requests are added and scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -204083,19 +204105,22 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   // V1213: authenticated scheduler relay executes before interactive WebDiag.
   if (scheduledRelayV671) {
     const relayModeV914 = String(url.searchParams.get("v914RelayMode") || "");
+    const relayRunIdV1238 = String(url.searchParams.get("v1238RunId") || "").slice(0,128) || null;
     if (relayModeV914 === "scheduled") {
-      return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env), "scheduled");
+      return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env), "scheduled", env, relayRunIdV1238);
     }
     if (relayModeV914 === "qualification-followup") {
       return streamedHeavyScanRelayResponseV1236(
         () => scan(env,{scheduled:true,qualificationFollowUpV723:true}),
-        "qualification-followup"
+        "qualification-followup",
+        env,
+        relayRunIdV1238
       );
     }
     if (relayModeV914 === "manual") {
-      return streamedHeavyScanRelayResponseV1236(() => scan(env,{scheduled:false}), "manual");
+      return streamedHeavyScanRelayResponseV1236(() => scan(env,{scheduled:false}), "manual", env, relayRunIdV1238);
     }
-    return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env), "scheduled");
+    return streamedHeavyScanRelayResponseV1236(() => scheduledScan(env), "scheduled", env, relayRunIdV1238);
   }
 
   // V1179: protect every exposed diagnostic route before route-specific rendering.
@@ -204303,13 +204328,16 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
             "v914RelayMode"
           ) || ""
         );
+      const relayRunIdV1238 = String(url.searchParams.get("v1238RunId") || "").slice(0,128) || null;
 
       if (
         relayModeV914 === "scheduled"
       ) {
         return streamedHeavyScanRelayResponseV1236(
           () => scheduledScan(env),
-          "scheduled"
+          "scheduled",
+          env,
+          relayRunIdV1238
         );
       }
 
@@ -204325,7 +204353,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
               qualificationFollowUpV723: true
             }
           ),
-          "qualification-followup"
+          "qualification-followup",
+          env,
+          relayRunIdV1238
         );
       }
 
@@ -204339,7 +204369,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
               scheduled: false
             }
           ),
-          "manual"
+          "manual",
+          env,
+          relayRunIdV1238
         );
       }
 
@@ -204349,7 +204381,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
        */
       return streamedHeavyScanRelayResponseV1236(
         () => scheduledScan(env),
-        "scheduled"
+        "scheduled",
+        env,
+        relayRunIdV1238
       );
     }
 
@@ -209140,6 +209174,53 @@ function compactHeavyScanRelayResultV914(
 }
 
 
+const V1238_SCAN_COMPLETION_RECEIPT_KEY = "chainvanta:v1238:scan-completion-receipt";
+const V1238_SCAN_STALL_MS = 8 * 60 * 1000;
+
+function newScanRunIdV1238(mode = "scheduled") {
+  const suffix = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+    ? globalThis.crypto.randomUUID().slice(0, 12)
+    : Math.random().toString(36).slice(2, 14);
+  return `v1238-${String(mode || "scheduled").slice(0, 28)}-${Date.now()}-${suffix}`;
+}
+
+async function writeScanCompletionReceiptV1238(env, receipt) {
+  const { kv, binding } = getKV(env || {});
+  if (!kv) return { saved:false, binding:null, error:"KV_NOT_CONFIGURED_V1238" };
+  try {
+    const safe = {
+      schemaVersion:"V1238_1",
+      runId:String(receipt?.runId || "").slice(0, 128),
+      mode:String(receipt?.mode || "scheduled").slice(0, 40),
+      status:String(receipt?.status || "UNVERIFIED").slice(0, 32),
+      startedAt:safeNumber(receipt?.startedAt) || null,
+      updatedAt:Date.now(),
+      completedAt:safeNumber(receipt?.completedAt) || null,
+      durationMs:safeNumber(receipt?.durationMs) || null,
+      version:String(receipt?.version || VERSION).slice(0, 24),
+      error:receipt?.error ? String(receipt.error).slice(0, 220) : null,
+      payload:receipt?.payload && typeof receipt.payload === "object" ? receipt.payload : null
+    };
+    await kv.put(V1238_SCAN_COMPLETION_RECEIPT_KEY, jsonStringifySafeV246(safe,0));
+    return { saved:true, binding, error:null, receipt:safe };
+  } catch (error) {
+    return { saved:false, binding, error:errorString(error) };
+  }
+}
+
+async function readScanCompletionReceiptV1238(env) {
+  const { kv, binding } = getKV(env || {});
+  if (!kv) return { found:false, binding:null, error:"KV_NOT_CONFIGURED_V1238", receipt:null };
+  try {
+    const raw = await kv.get(V1238_SCAN_COMPLETION_RECEIPT_KEY);
+    if (!raw) return { found:false, binding, error:null, receipt:null };
+    const receipt = JSON.parse(raw);
+    return { found:true, binding, error:null, receipt };
+  } catch (error) {
+    return { found:false, binding, error:errorString(error), receipt:null };
+  }
+}
+
 function sanitizeRelayBodyPreviewV1235(text) {
   let s = String(text || "");
   s = s.replace(/0x[a-fA-F0-9]{40,64}/g, "0x…REDACTED");
@@ -209252,7 +209333,7 @@ async function parseHeavyScanRelayResponseV1236(response, attempt = 1) {
   return { body, meta };
 }
 
-function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "scheduled") {
+function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "scheduled", envV1238 = null, runIdV1238 = null) {
   const encoderV1236 = new TextEncoder();
   const startedAtV1236 = Date.now();
   const heartbeatIntervalMsV1236 = 15000;
@@ -209260,6 +209341,8 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
   let heartbeatCountV1236 = 0;
   let closedV1236 = false;
   let terminalEmittedV1236 = false;
+  const effectiveRunIdV1238 = String(runIdV1238 || newScanRunIdV1238(mode)).slice(0,128);
+  let receiptStartV1238 = null;
 
   const streamV1236 = new ReadableStream({
     async start(controllerV1236) {
@@ -209282,10 +209365,20 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
           version: "V1237",
           seq: heartbeatCountV1236 + 1,
           elapsedMs: Date.now() - startedAtV1236,
-          mode
+          mode,
+          runId: effectiveRunIdV1238
         });
         if (emittedV1236) heartbeatCountV1236 += 1;
       };
+
+      // V1238: persist a compact STARTED receipt before heavy work begins.
+      receiptStartV1238 = await writeScanCompletionReceiptV1238(envV1238, {
+        runId: effectiveRunIdV1238,
+        mode,
+        status: "STARTED",
+        startedAt: startedAtV1236,
+        version: VERSION
+      });
 
       // Establish response bytes immediately with a self-describing NDJSON heartbeat.
       enqueueHeartbeatV1236();
@@ -209319,9 +209412,27 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
           policy: "STRUCTURED_NDJSON_HEARTBEAT_V1236"
         };
         compactV1236.v1236RelayTransport = transportV1236;
+        const receiptSavedV1238 = await writeScanCompletionReceiptV1238(envV1238, {
+          runId: effectiveRunIdV1238,
+          mode,
+          status: "COMPLETED",
+          startedAt: startedAtV1236,
+          completedAt: completedAtV1236,
+          durationMs: completedAtV1236 - startedAtV1236,
+          version: VERSION,
+          payload: compactV1236
+        });
+        compactV1236.v1238CompletionReceipt = {
+          runId: effectiveRunIdV1238,
+          status: "COMPLETED",
+          persisted: receiptSavedV1238?.saved === true,
+          binding: receiptSavedV1238?.binding || null,
+          error: receiptSavedV1238?.error || null
+        };
         terminalEmittedV1236 = enqueueRecordV1236({
           type: "terminal",
-          version: "V1237",
+          version: "V1238",
+          runId: effectiveRunIdV1238,
           ok: true,
           payload: compactV1236,
           transport: transportV1236
@@ -209329,8 +209440,8 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
       } catch (errorV1236) {
         const completedAtV1236 = Date.now();
         const transportV1236 = {
-          version: "V1236",
-          protocol: "NDJSON_HEARTBEAT_PLUS_TERMINAL_V1236",
+          version: "V1238",
+          protocol: "NDJSON_HEARTBEAT_PLUS_TERMINAL_V1238_RECEIPT",
           terminalType: "SCAN_FAILED",
           terminalEmitted: true,
           heartbeatIntervalMs: heartbeatIntervalMsV1236,
@@ -209343,7 +209454,7 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
         const failureV1236 = {
           ok: false,
           version: VERSION,
-          status: "V1236_STREAMED_HEAVY_SCAN_EXECUTION_FAILED",
+          status: "V1238_STREAMED_HEAVY_SCAN_EXECUTION_FAILED",
           v1236RelayExecutionError: true,
           error: errorString(errorV1236),
           v1234RelayKeepalive: {
@@ -209359,9 +209470,28 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
           v1236RelayTransport: transportV1236,
           timestamp: now()
         };
+        const receiptFailedV1238 = await writeScanCompletionReceiptV1238(envV1238, {
+          runId: effectiveRunIdV1238,
+          mode,
+          status: "FAILED",
+          startedAt: startedAtV1236,
+          completedAt: completedAtV1236,
+          durationMs: completedAtV1236 - startedAtV1236,
+          version: VERSION,
+          error: failureV1236.error,
+          payload: failureV1236
+        });
+        failureV1236.v1238CompletionReceipt = {
+          runId: effectiveRunIdV1238,
+          status: "FAILED",
+          persisted: receiptFailedV1238?.saved === true,
+          binding: receiptFailedV1238?.binding || null,
+          error: receiptFailedV1238?.error || null
+        };
         terminalEmittedV1236 = enqueueRecordV1236({
           type: "terminal",
-          version: "V1237",
+          version: "V1238",
+          runId: effectiveRunIdV1238,
           ok: false,
           payload: failureV1236,
           transport: transportV1236
@@ -209384,7 +209514,8 @@ function streamedHeavyScanRelayResponseV1236(runHeavyScanV1236, mode = "schedule
       "content-type": "application/x-ndjson; charset=utf-8",
       "cache-control": "no-store, max-age=0",
       "x-content-type-options": "nosniff",
-      "x-chainvanta-relay-stream": "V1237",
+      "x-chainvanta-relay-stream": "V1238",
+      "x-chainvanta-run-id": effectiveRunIdV1238,
       "x-chainvanta-relay-terminal-required": "1"
     }
   });
@@ -209406,8 +209537,9 @@ async function relayHeavyScanOutsideSchedulerV914(
       ? mode
       : "scheduled";
 
+  const runIdV1238 = newScanRunIdV1238(relayMode);
   const baseRelayUrl =
-    `${V670_SELF_SCAN_URL}&v914RelayMode=${encodeURIComponent(relayMode)}`;
+    `${V670_SELF_SCAN_URL}&v914RelayMode=${encodeURIComponent(relayMode)}&v1238RunId=${encodeURIComponent(runIdV1238)}`;
 
   /*
    * V1173: retry only the exact failure proven in production: Cloudflare
@@ -209453,15 +209585,55 @@ async function relayHeavyScanOutsideSchedulerV914(
   const first =
     await relayAttemptV1173(1);
 
-  const firstTerminalMissingV1236 =
+  let firstTerminalMissingV1236 =
     first.response.ok === true &&
     (!first.body || typeof first.body !== "object") &&
     String(first.bodyParseV1235?.parseError || "") === "TERMINAL_RECORD_MISSING_V1237";
 
+  // V1238: terminal transport is no longer authoritative. Recover the exact
+  // matching compact result from the persisted completion receipt when available.
+  let firstReceiptReadV1238 = null;
+  if (firstTerminalMissingV1236 || !first.response.ok || !first.body) {
+    firstReceiptReadV1238 = await readScanCompletionReceiptV1238(env);
+    const receiptV1238 = firstReceiptReadV1238?.receipt || null;
+    if (receiptV1238?.runId === runIdV1238 && receiptV1238?.status === "COMPLETED" && receiptV1238?.payload && typeof receiptV1238.payload === "object") {
+      first.body = receiptV1238.payload;
+      first.body.v1238CompletionReceiptRecovery = {
+        runId: runIdV1238,
+        status: "COMPLETED",
+        recovered: true,
+        binding: firstReceiptReadV1238?.binding || null,
+        terminalBodyRequired: false
+      };
+      firstTerminalMissingV1236 = false;
+    } else if (receiptV1238?.runId === runIdV1238 && receiptV1238?.status === "FAILED") {
+      first.body = receiptV1238.payload || { ok:false, status:"SCAN_FAILED_V1238", error:receiptV1238?.error || "UNVERIFIED" };
+      first.body.v1238CompletionReceiptRecovery = { runId:runIdV1238, status:"FAILED", recovered:true, binding:firstReceiptReadV1238?.binding || null, terminalBodyRequired:false };
+      firstTerminalMissingV1236 = false;
+    } else if (receiptV1238?.runId === runIdV1238 && receiptV1238?.status === "STARTED") {
+      return {
+        ok:true,
+        version:VERSION,
+        status:"HEAVY_SCAN_COMPLETION_PENDING_V1238",
+        scheduledRun:true,
+        v1238CompletionPending:true,
+        v1238CompletionReceipt:{
+          runId:runIdV1238,
+          status:"STARTED",
+          startedAt:receiptV1238?.startedAt || null,
+          updatedAt:receiptV1238?.updatedAt || null,
+          binding:firstReceiptReadV1238?.binding || null
+        },
+        v1235RelayBodyParse:first.bodyParseV1235 || null,
+        timestamp:now()
+      };
+    }
+  }
+
   if (first.response.ok && !firstTerminalMissingV1236) {
     if (first.body?.v1236RelayExecutionError === true || first.body?.v1234RelayExecutionError === true) {
       throw new Error(
-        `V1236_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(first.body?.error || first.body?.status || "UNKNOWN").slice(0, 180)}`
+        `V1238_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(first.body?.error || first.body?.status || "UNKNOWN").slice(0, 180)}`
       );
     }
     if (!first.body || typeof first.body !== "object") {
@@ -209479,7 +209651,7 @@ async function relayHeavyScanOutsideSchedulerV914(
       firstJsonBody: true,
       recovered: false,
       policy:
-        "ONE_SEQUENTIAL_RETRY_HTTP_503_OR_TERMINAL_MISSING_V1236"
+        "V1238_RECEIPT_FIRST_THEN_ONE_RETRY_IF_NO_ACTIVE_RECEIPT"
     };
 
     return first.body;
@@ -209517,14 +209689,32 @@ async function relayHeavyScanOutsideSchedulerV914(
   }
 
   if (!second.body || typeof second.body !== "object") {
-    throw new Error(
-      `V1236_HEAVY_SCAN_RELAY_RETRY_INVALID_BODY:status=${second.response.status};bytes=${safeNumber(second.bodyParseV1235?.bodyBytes)};heartbeats=${safeNumber(second.bodyParseV1235?.heartbeatRecords)};terminal=${second.bodyParseV1235?.terminalSeen === true ? "YES" : "NO"};parse=${String(second.bodyParseV1235?.parseError || "NONE").slice(0,120)}`
-    );
+    const secondReceiptReadV1238 = await readScanCompletionReceiptV1238(env);
+    const receiptV1238 = secondReceiptReadV1238?.receipt || null;
+    if (receiptV1238?.runId === runIdV1238 && receiptV1238?.status === "COMPLETED" && receiptV1238?.payload && typeof receiptV1238.payload === "object") {
+      second.body = receiptV1238.payload;
+      second.body.v1238CompletionReceiptRecovery = { runId:runIdV1238, status:"COMPLETED", recovered:true, binding:secondReceiptReadV1238?.binding || null, terminalBodyRequired:false };
+    } else if (receiptV1238?.runId === runIdV1238 && receiptV1238?.status === "STARTED") {
+      return {
+        ok:true,
+        version:VERSION,
+        status:"HEAVY_SCAN_COMPLETION_PENDING_V1238",
+        scheduledRun:true,
+        v1238CompletionPending:true,
+        v1238CompletionReceipt:{runId:runIdV1238,status:"STARTED",startedAt:receiptV1238?.startedAt || null,updatedAt:receiptV1238?.updatedAt || null,binding:secondReceiptReadV1238?.binding || null},
+        v1235RelayBodyParse:second.bodyParseV1235 || null,
+        timestamp:now()
+      };
+    } else {
+      throw new Error(
+        `V1238_HEAVY_SCAN_RELAY_RETRY_INVALID_BODY:status=${second.response.status};bytes=${safeNumber(second.bodyParseV1235?.bodyBytes)};heartbeats=${safeNumber(second.bodyParseV1235?.heartbeatRecords)};terminal=${second.bodyParseV1235?.terminalSeen === true ? "YES" : "NO"};receipt=${String(receiptV1238?.status || "NONE")};parse=${String(second.bodyParseV1235?.parseError || "NONE").slice(0,120)}`
+      );
+    }
   }
 
   if (second.body?.v1236RelayExecutionError === true || second.body?.v1234RelayExecutionError === true) {
     throw new Error(
-      `V1236_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(second.body?.error || second.body?.status || "UNKNOWN").slice(0, 180)}`
+      `V1238_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(second.body?.error || second.body?.status || "UNKNOWN").slice(0, 180)}`
     );
   }
 
@@ -209538,7 +209728,7 @@ async function relayHeavyScanOutsideSchedulerV914(
     secondStatus: second.response.status,
     recovered: true,
     policy:
-      "ONE_SEQUENTIAL_RETRY_HTTP_503_OR_TERMINAL_MISSING_V1236"
+      "V1238_RECEIPT_FIRST_THEN_ONE_RETRY_IF_NO_ACTIVE_RECEIPT"
   };
 
   return second.body;
@@ -209763,17 +209953,48 @@ export class ScanSchedulerV673 {
       } catch {}
     }
 
-    try {
-      result =
-        await relayHeavyScanOutsideSchedulerV914(
-          this.env,
-           qualificationFollowUpV723
-            ? "qualification-followup"
-            : "scheduled"
-        );
-    } catch (error) {
-      failure = errorString(error);
-      console.error("V673_DURABLE_SCHEDULED_SCAN_ERROR", failure);
+    // V1238 overlap guard: if the previous heavy scan has a fresh STARTED receipt,
+    // do not launch a duplicate scan. The next alarm will reconcile the same receipt.
+    const receiptBeforeV1238 = await readScanCompletionReceiptV1238(this.env);
+    const priorReceiptV1238 = receiptBeforeV1238?.receipt || null;
+    const priorStartedAtV1238 = safeNumber(priorReceiptV1238?.startedAt);
+    const priorAgeMsV1238 = priorStartedAtV1238 > 0 ? Math.max(0, Date.now() - priorStartedAtV1238) : null;
+    const priorActiveV1238 =
+      priorReceiptV1238?.status === "STARTED" &&
+      Number.isFinite(priorAgeMsV1238) &&
+      priorAgeMsV1238 < V1238_SCAN_STALL_MS;
+
+    if (priorActiveV1238) {
+      result = {
+        ok:true,
+        version:VERSION,
+        status:"HEAVY_SCAN_COMPLETION_PENDING_V1238",
+        scheduledRun:true,
+        v1238CompletionPending:true,
+        v1238CompletionReceipt:{
+          runId:priorReceiptV1238?.runId || null,
+          status:"STARTED",
+          startedAt:priorReceiptV1238?.startedAt || null,
+          updatedAt:priorReceiptV1238?.updatedAt || null,
+          ageMs:priorAgeMsV1238,
+          binding:receiptBeforeV1238?.binding || null,
+          overlapPrevented:true
+        },
+        timestamp:now()
+      };
+    } else {
+      try {
+        result =
+          await relayHeavyScanOutsideSchedulerV914(
+            this.env,
+             qualificationFollowUpV723
+              ? "qualification-followup"
+              : "scheduled"
+          );
+      } catch (error) {
+        failure = errorString(error);
+        console.error("V673_DURABLE_SCHEDULED_SCAN_ERROR", failure);
+      }
     }
 
     const completedAt = Date.now();
@@ -209816,11 +210037,14 @@ export class ScanSchedulerV673 {
       });
     }
 
+    const completionPendingV1238 = result?.v1238CompletionPending === true;
     const last = {
-      ok: !failure,
+      ok: !failure && !completionPendingV1238,
       status: failure
         ? "DURABLE_SCHEDULED_SCAN_FAILED_V673"
-        : "DURABLE_SCHEDULED_SCAN_COMPLETE_V673",
+        : completionPendingV1238
+          ? "DURABLE_SCHEDULED_SCAN_PENDING_V1238"
+          : "DURABLE_SCHEDULED_SCAN_COMPLETE_V673",
       error: failure,
       startedAt,
       completedAt,
@@ -209880,6 +210104,19 @@ export class ScanSchedulerV673 {
         result?.v1235RelayBodyParse || null,
       v1236RelayTransport:
         result?.v1236RelayTransport || null,
+      v1238CompletionPending: completionPendingV1238,
+      v1238CompletionReceipt:
+        result?.v1238CompletionReceipt ||
+        result?.v1238CompletionReceiptRecovery ||
+        (priorReceiptV1238 ? {
+          runId:priorReceiptV1238?.runId || null,
+          status:priorReceiptV1238?.status || null,
+          startedAt:priorReceiptV1238?.startedAt || null,
+          completedAt:priorReceiptV1238?.completedAt || null,
+          updatedAt:priorReceiptV1238?.updatedAt || null,
+          binding:receiptBeforeV1238?.binding || null,
+          ageMs:priorAgeMsV1238
+        } : null),
       v1173RelayRecovery:
         result?.v1173RelayRecovery ||
         (failure
@@ -209893,7 +210130,7 @@ export class ScanSchedulerV673 {
               failure:
                 String(failure).slice(0, 220),
               policy:
-                "ONE_SEQUENTIAL_RETRY_HTTP_503_OR_TERMINAL_MISSING_V1236"
+                "V1238_RECEIPT_FIRST_THEN_ONE_RETRY_IF_NO_ACTIVE_RECEIPT"
             }
           : null)
     };
