@@ -1,3 +1,4 @@
+// V1250 historical shadow replay: read-only and in-sample; live selection unchanged.
 // V1249 — /performance Telegram transport fix only; preserves V1248 scoring, providers, delivery, billing, security and production settings.
 // V1248 — snapshot-only early-collapse entry evidence comparison; no scanner, risk, Telegram, billing or provider changes.
 // V1247 — entry-scoped confirmed Telegram delivery vs legacy cohort; forward frozen-horizon quality. Read-only, no provider requests.
@@ -147021,6 +147022,36 @@ function performanceSummaryV271(state, options = {}) {
   const oneHourObservedV1248=collV1248.filter(r=>performanceHorizonMultipleV1181(r,"h1")!==null);
   lines.push(`Early collapses: among 24h ≤0.5x, verified 1h ≤0.5x <b>${earlyV1248.length}/${oneHourObservedV1248.length}</b> (1h missing ${collV1248.length-oneHourObservedV1248.length}).`,
     "<i>Snapshot-only observational comparison; no causal inference, no historical evidence backfill. Score scales and risk meanings are preserved from stored entry snapshots. Missing coverage is shown explicitly. Delivery does not prove Premium membership, and these are market-cap multiples, not executable customer returns. Read-only; zero extra requests, writes or qualification changes.</i>");
+
+  // V1250: historical shadow-rule replay only; never used for live qualification.
+  // Trial thresholds are hypotheses, not production rules or validated signals.
+  const trialsV1250 = [
+    {label:"Liquidity ≥$75K", test:r=>{const v=entryMetricV1248(r,"liquidity");return v===null?null:v>=75000;}},
+    {label:"Market cap ≥$500K", test:r=>{const v=entryMetricV1248(r,"marketCap");return v===null?null:v>=500000;}},
+    {label:"Both conditions", test:r=>{const l=entryMetricV1248(r,"liquidity"),m=entryMetricV1248(r,"marketCap");return l===null||m===null?null:l>=75000&&m>=500000;}},
+    {label:"Liquidity / market cap ≥10%", test:r=>{const l=entryMetricV1248(r,"liquidity"),m=entryMetricV1248(r,"marketCap");return l===null||m===null?null:l/m>=0.10;}}
+  ];
+  const replayRowsV1250=confirmedV1247.filter(r=>performanceHorizonMultipleV1181(r,"h24")!==null);
+  const replayMetricV1250=rows=>{
+    const x=rows.map(r=>performanceHorizonMultipleV1181(r,"h24")).filter(x=>x!==null).sort((a,b)=>a-b);
+    const med=x.length? (x.length%2?x[(x.length-1)/2]:(x[x.length/2-1]+x[x.length/2])/2):null;
+    return {n:x.length,median:med,collapse:x.filter(v=>v<=0.5).length,up:x.filter(v=>v>1.000001).length};
+  };
+  const allReplayV1250=replayMetricV1250(replayRowsV1250);
+  lines.push("", "🧪 <b>V1250 historical shadow-filter replay — NOT LIVE</b>",
+    `Same 24h-known delivered cohort: <b>${allReplayV1250.n}</b> · median <b>${telegramMultipleV271(allReplayV1250.median)}</b> · ≤0.5x <b>${allReplayV1250.collapse}/${allReplayV1250.n}</b>`);
+  for(const t of trialsV1250){
+    const pass=[],fail=[],unknown=[];
+    for(const r of replayRowsV1250){
+      const outcome=t.test(r);
+      if(outcome===true)pass.push(r);
+      else if(outcome===false)fail.push(r);
+      else unknown.push(r);
+    }
+    const stats=replayMetricV1250(pass);
+    lines.push(`• ${escapeHtml(t.label)}: pass <b>${pass.length}</b> · reject <b>${fail.length}</b> · unknown <b>${unknown.length}</b> · pass median <b>${telegramMultipleV271(stats.median)}</b> · ≤0.5x <b>${stats.collapse}/${stats.n}</b> · above entry <b>${stats.up}/${stats.n}</b>`);
+  }
+  lines.push("<i>Exploratory in-sample replay, subject to hindsight, selection and survivorship bias. No inference about excluded candidates or future outcomes; the registry is not Premium-only. Missing frozen fields are UNKNOWN, never passing. No call selection, Telegram, state, provider, budget or scoring changes. Validate a candidate rule prospectively on unseen calls before considering promotion.</i>");
 
   const shown = detail ? entries.slice(0,250) : entries.slice(0,6);
   lines.push("", detail ? "📚 <b>Per-call performance</b>" : "🕒 <b>Latest calls</b>");
