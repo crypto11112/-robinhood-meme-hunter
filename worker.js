@@ -1,3 +1,4 @@
+// V1251: Forward-only shadow challenger recorded on newly successful calls; no production gating changes.
 // V1250 historical shadow replay: read-only and in-sample; live selection unchanged.
 // V1249 — /performance Telegram transport fix only; preserves V1248 scoring, providers, delivery, billing, security and production settings.
 // V1248 — snapshot-only early-collapse entry evidence comparison; no scanner, risk, Telegram, billing or provider changes.
@@ -110479,6 +110480,22 @@ function pruneCallPerformanceV270(state) {
   };
 }
 
+// V1251: capture only entry-time evidence, never recompute a decision from later prices.
+function frozenShadowDecisionV1251(snapshot, timestamp) {
+  const m = snapshot?.market;
+  const valid = m?.verified === true;
+  const liquidity = valid && m.liquidityUsd !== null && m.liquidityUsd !== undefined ? Number(m.liquidityUsd) : NaN;
+  const cap = valid && m.marketCap !== null && m.marketCap !== undefined ? Number(m.marketCap) : NaN;
+  const liquidityVerified = Number.isFinite(liquidity) && liquidity > 0;
+  const capVerified = Number.isFinite(cap) && cap > 0;
+  return {
+    version: 'V1251', capturedAt: timestamp, rule: 'LIQUIDITY_75000_AND_MARKETCAP_500000',
+    status: !liquidityVerified || !capVerified ? 'UNKNOWN' : (liquidity >= 75000 && cap >= 500000 ? 'PASS' : 'REJECT'),
+    liquidityUsd: liquidityVerified ? liquidity : null, marketCapUsd: capVerified ? cap : null,
+    source: 'FROZEN_ENTRY_SIGNAL_SNAPSHOT_V309', appliesToCustomerQualification: false
+  };
+}
+
 function registerSuccessfulCallPerformanceV270(
   candidate,
   state
@@ -110512,6 +110529,10 @@ function registerSuccessfulCallPerformanceV270(
 
   record.lastSuccessfulAlertAt =
     Date.now();
+  // First successful call only; never assign shadow decisions retrospectively.
+  if (!existing?.entryTimestamp && !record.shadowDecisionV1251) {
+    record.shadowDecisionV1251 = frozenShadowDecisionV1251(record.entrySignalSnapshotV309, record.lastSuccessfulAlertAt);
+  }
 
   if (!existing?.entryTimestamp) {
     record.exactV270EntryBaseline = true;
@@ -147052,6 +147073,27 @@ function performanceSummaryV271(state, options = {}) {
     lines.push(`• ${escapeHtml(t.label)}: pass <b>${pass.length}</b> · reject <b>${fail.length}</b> · unknown <b>${unknown.length}</b> · pass median <b>${telegramMultipleV271(stats.median)}</b> · ≤0.5x <b>${stats.collapse}/${stats.n}</b> · above entry <b>${stats.up}/${stats.n}</b>`);
   }
   lines.push("<i>Exploratory in-sample replay, subject to hindsight, selection and survivorship bias. No inference about excluded candidates or future outcomes; the registry is not Premium-only. Missing frozen fields are UNKNOWN, never passing. No call selection, Telegram, state, provider, budget or scoring changes. Validate a candidate rule prospectively on unseen calls before considering promotion.</i>");
+
+  // V1251 prospective shadow cohort. Decisions frozen on first successful alert
+  // starting in V1251. Old calls cannot enter this cohort through replay.
+  const forwardV1251 = entries.filter(r=>r?.shadowDecisionV1251?.version === 'V1251');
+  const withProofV1251 = forwardV1251.filter(r=>r?.entryTelegramDeliveryProofV412?.verified === true &&
+    r?.entryTelegramDeliveryProofV412?.source === 'TELEGRAM_SEND_API_RESULT_V412' &&
+    Number(r?.entryTelegramDeliveryProofV412?.messageId)>0);
+  lines.push('', '🔭 <b>V1251 prospective shadow comparison — NOT LIVE GATING</b>',
+    `Newly frozen decisions: <b>${forwardV1251.length}</b> · Telegram delivery proven <b>${withProofV1251.length}</b> · registry bounded to ${allEntries.length}`);
+  for (const [group,subset] of [['PASS',withProofV1251.filter(r=>r.shadowDecisionV1251.status==='PASS')],
+      ['REJECT',withProofV1251.filter(r=>r.shadowDecisionV1251.status==='REJECT')],
+      ['UNKNOWN',withProofV1251.filter(r=>r.shadowDecisionV1251.status==='UNKNOWN')]]) {
+    const horizons=[];
+    for(const [key,label] of [['h1','1h'],['h6','6h'],['h24','24h']]) {
+      const values=subset.map(r=>performanceHorizonMultipleV1181(r,key)).filter(x=>x!==null).sort((a,b)=>a-b);
+      const mid=values.length ? (values.length%2 ? values[(values.length-1)/2] : (values[values.length/2-1]+values[values.length/2])/2) : null;
+      horizons.push(`${label}: ${values.length}/${subset.length} · median ${telegramMultipleV271(mid)} · ≤0.5x ${values.filter(x=>x<=0.5).length}/${values.length}`);
+    }
+    lines.push(`• ${group}: <b>${subset.length}</b> · ${horizons.join(' | ')}`);
+  }
+  lines.push('<i>Only calls created after V1251 carry immutable challenger decisions; unknown evidence never passes. PASS/REJECT groups are both observed, but the performance registry contains delivered calls only and is not Premium-only; excluded scanner candidates are not measured. Missing horizons are not losses or wins. No new provider requests, no scoring or Telegram selection changes.</i>');
 
   const shown = detail ? entries.slice(0,250) : entries.slice(0,6);
   lines.push("", detail ? "📚 <b>Per-call performance</b>" : "🕒 <b>Latest calls</b>");
