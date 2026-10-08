@@ -1,3 +1,4 @@
+// V1249 — /performance Telegram transport fix only; preserves V1248 scoring, providers, delivery, billing, security and production settings.
 // V1248 — snapshot-only early-collapse entry evidence comparison; no scanner, risk, Telegram, billing or provider changes.
 // V1247 — entry-scoped confirmed Telegram delivery vs legacy cohort; forward frozen-horizon quality. Read-only, no provider requests.
 // V1246: bounded DexScreener response-to-target selection trace; no new provider calls, no scoring changes.
@@ -185536,7 +185537,10 @@ async function telegramCommandReplyV271(
   // which can make Telegram sendMessage return HTTP 400. Chunking changes only
   // reply transport; it consumes no scanner/provider budget and changes no
   // scoring, qualification, holder, market, state, or alert logic.
+  // V1249: performance grew with V1247/V1248 evidence audits; deliver via existing
+  // line-safe Telegram chunks rather than a single >4096-character message.
   const needsChunkedReplyV316 =
+    parsed.command === "/performance" ||
     parsed.command === "/analyse" ||
     parsed.command === "/analyze" ||
     parsed.command === "/help" ||
