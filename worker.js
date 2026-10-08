@@ -1,3 +1,4 @@
+// V1247 — entry-scoped confirmed Telegram delivery vs legacy cohort; forward frozen-horizon quality. Read-only, no provider requests.
 // V1246: bounded DexScreener response-to-target selection trace; no new provider calls, no scoring changes.
 // V1245: read-only DexScreener stored request-path telemetry audit; no new provider calls or state changes.
 // V1244 — Retained Market/Liquidity Evidence Audit. Read-only provenance comparison; no new collection or provider requests.
@@ -146923,6 +146924,38 @@ function performanceSummaryV271(state, options = {}) {
     `⏱ 1m captured: <b>${oneMinuteRowsV1096.length}</b> · Median 1m <b>${telegramMultipleV271(oneMinuteMedianV1096)}</b>`,
     best ? `🏆 Best: <b>${escapeHtml(best?.symbol || "UNKNOWN")}</b> — <b>${telegramMultipleV271(best?.athMultipleByMarketCap)}</b>` : "🏆 Best: <b>UNVERIFIED</b>"
   ];
+
+  // V1247: evidence-strict, forward-only performance quality view.
+  // No observation, backfill, state mutation or external provider calls.
+  const confirmedV1247 = entries.filter(r =>
+    r?.entryTelegramDeliveryProofV412?.verified === true &&
+    r?.entryTelegramDeliveryProofV412?.source === "TELEGRAM_SEND_API_RESULT_V412" &&
+    Number(r?.entryTelegramDeliveryProofV412?.messageId) > 0 &&
+    String(r?.entryTelegramDeliveryProofV412?.chatId || "").length > 0
+  );
+  const baselineOnlyV1247 = entries.filter(r =>
+    !confirmedV1247.includes(r) && r?.entryCustomerCallBaselineV1175?.frozenAfterSuccessfulSend === true
+  );
+  const legacyV1247 = entries.length - confirmedV1247.length - baselineOnlyV1247.length;
+  const horizonQualityV1247 = key => {
+    const values = confirmedV1247.map(r => performanceHorizonMultipleV1181(r, key))
+      .filter(x => Number.isFinite(x) && x > 0);
+    const sorted = values.slice().sort((a,b)=>a-b);
+    const median = sorted.length ? (sorted.length%2 ? sorted[(sorted.length-1)/2] :
+      (sorted[sorted.length/2-1]+sorted[sorted.length/2])/2) : null;
+    return {n:values.length, median, positive:values.filter(x=>x>1.000001).length,
+      doubled:values.filter(x=>x>=2).length, half:values.filter(x=>x<=0.5).length};
+  };
+  lines.push("", "🧪 <b>V1247 verified-delivery forward quality</b>",
+    `Delivery-proven entries: <b>${confirmedV1247.length}</b> · frozen-baseline only: <b>${baselineOnlyV1247.length}</b> · legacy/unproven: <b>${legacyV1247}</b>`);
+  for (const [key, label] of [["h1","1h"],["h6","6h"],["h24","24h"]]) {
+    const q = horizonQualityV1247(key);
+    lines.push(`• ${label}: <b>${q.n}/${confirmedV1247.length}</b> frozen · median <b>${telegramMultipleV271(q.median)}</b> · above entry <b>${q.positive}/${q.n}</b> · ≥2x <b>${q.doubled}/${q.n}</b> · ≤0.5x <b>${q.half}/${q.n}</b>`);
+  }
+  const athStrongV1247 = confirmedV1247.filter(r=>Number.isFinite(Number(r?.athMultipleByMarketCap))&&Number(r.athMultipleByMarketCap)>=2);
+  const strongAnd24hV1247 = athStrongV1247.map(r=>performanceHorizonMultipleV1181(r,"h24")).filter(x=>x!==null);
+  lines.push(`Peak-to-24h caution: delivery-proven ≥2x ATH ${athStrongV1247.length}; with frozen 24h ${strongAnd24hV1247.length}; at/below entry at 24h ${strongAnd24hV1247.filter(x=>x<=1).length}.`,
+    "<i>Only entry-scoped Telegram API proofs count as confirmed delivery. A frozen baseline alone is not proof of delivery or Premium-channel membership. The registry has no guaranteed premium-only designation. Missing horizons remain unverified; selection and survivorship bias apply. ATH is not a tradable return. Read-only; no new observations or provider requests.</i>");
 
   const shown = detail ? entries.slice(0,250) : entries.slice(0,6);
   lines.push("", detail ? "📚 <b>Per-call performance</b>" : "🕒 <b>Latest calls</b>");
