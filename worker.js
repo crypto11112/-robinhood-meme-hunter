@@ -1,4 +1,4 @@
-// V1240 — Secure Premium Decision Intelligence. Builds directly from deployed V1239; adds read-only /premiumwhy bulk + token drill-down and protected WebDiag Premium Funnel/Decision pages. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
+// V1241 — Secure Premium Decision Intelligence Refinement. Builds directly from deployed V1240; refines near-miss ranking and adds secure WebDiag handoff links to Premium diagnostics. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1239 — Heavy Scan Phase Checkpoints. Builds directly from deployed V1238; adds tiny KV phase checkpoints so a stalled scheduled heavy scan reveals the last completed internal phase. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1238 — Persisted Scan Completion Receipts. Builds directly from V1237; adds compact KV run receipts so scheduler completion no longer depends solely on the long-lived relay terminal body. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
@@ -10099,7 +10099,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1240";
+const VERSION = "V1241";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179178,7 +179178,7 @@ function premiumWhyResolveTokenV1240(state,query) {
     : {row:null,status:"SYMBOL_NOT_RETAINED",matches:0};
 }
 
-function premiumWhyNearMissesV1240(state,rawWindow) {
+function premiumWhyNearMissesV1241(state,rawWindow) {
   const w = premiumWhyWindowV1240(rawWindow);
   const now = Date.now();
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
@@ -179192,34 +179192,37 @@ function premiumWhyNearMissesV1240(state,rawWindow) {
     filtered = filtered.filter(r=>safeNumber(r?.lastEvaluatedAt) >= cutoff && safeNumber(r?.lastEvaluatedAt) <= now + 5*60*1000);
   }
   const views = filtered.map(r=>premiumWhyRecordViewV1240(state,r));
-  views.sort((a,b)=>{
-    const aTier = a.oneBlockerAway ? 0 : a.evidenceOnly ? 1 : 2;
-    const bTier = b.oneBlockerAway ? 0 : b.evidenceOnly ? 1 : 2;
+  const rank = (a,b)=>{
+    const aTier = a.oneBlockerAway ? 0 : a.evidenceOnly ? 1 : a.blockerCount<=2 ? 2 : 3;
+    const bTier = b.oneBlockerAway ? 0 : b.evidenceOnly ? 1 : b.blockerCount<=2 ? 2 : 3;
     if (aTier !== bTier) return aTier-bTier;
     if (a.blockerCount !== b.blockerCount) return a.blockerCount-b.blockerCount;
     if (a.opportunity !== b.opportunity) return b.opportunity-a.opportunity;
     if (a.confidence !== b.confidence) return b.confidence-a.confidence;
     return b.lastEvaluatedAt-a.lastEvaluatedAt;
-  });
-  return {window:w,total:views.length,rows:views.slice(0,12)};
+  };
+  views.sort(rank);
+  const near = views.filter(r=>r.oneBlockerAway || r.evidenceOnly || r.blockerCount<=2).slice(0,8);
+  const rejected = views.filter(r=>!(r.oneBlockerAway || r.evidenceOnly || r.blockerCount<=2)).slice(0,8);
+  return {window:w,total:views.length,near,rejected};
 }
 
 function premiumWhyBoolV1240(value) {
   return value === true ? "YES" : value === false ? "NO" : "UNVERIFIED";
 }
 
-function premiumWhyBulkMessageV1240(state,rawWindow) {
-  const d = premiumWhyNearMissesV1240(state,rawWindow || "1h");
+function premiumWhyBulkMessageV1241(state,rawWindow) {
+  const d = premiumWhyNearMissesV1241(state,rawWindow || "1h");
   const lines = [
-    `🧭 <b>ChainVanta Premium Why — V1240 · ${escapeHtml(d.window.label)}</b>`,
+    `🧭 <b>ChainVanta Premium Why — V1241 · ${escapeHtml(d.window.label)}</b>`,
     "",
     `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
-    "Ranking: one-blocker-away first → evidence-only unresolved → fewer blockers → stronger Opportunity/Confidence.",
+    "Near-miss ranking: one-blocker-away → evidence-only unresolved → two blockers max. Clearly rejected tokens are separated below.",
     "",
-    "<b>🔎 Closest retained near-misses</b>"
+    "<b>🔎 Genuine retained near-misses</b>"
   ];
-  if (!d.rows.length) lines.push("• No retained non-qualified token decisions in this window.");
-  d.rows.forEach((r,i)=>{
+  if (!d.near.length) lines.push("• No genuine one/two-blocker or evidence-only near-misses retained in this window.");
+  d.near.forEach((r,i)=>{
     const short = isAddress(r.address) ? `${r.address.slice(0,6)}…${r.address.slice(-4)}` : "UNVERIFIED";
     const primary = r.primary || "NO_RETAINED_REASON";
     const tag = r.oneBlockerAway ? "ONE-BLOCKER" : r.evidenceOnly ? "EVIDENCE-ONLY" : `${r.blockerCount} BLOCKERS`;
@@ -179228,6 +179231,12 @@ function premiumWhyBulkMessageV1240(state,rawWindow) {
       `   Opp ${r.opportunity} · Conf ${r.confidence} · Risk ${r.riskVerified?r.riskScore:"UNVERIFIED"} · Pool ${r.exactPoolVerified?"YES":"NO"} · Flow ${r.flowVerified?"YES":"NO"}`,
       `   First blocker: <b>${escapeHtml(primary)}</b>`
     );
+  });
+  lines.push("", "<b>🧱 Other rejected candidates</b>");
+  if (!d.rejected.length) lines.push("• None retained in this window.");
+  d.rejected.forEach((r,i)=>{
+    const short = isAddress(r.address) ? `${r.address.slice(0,6)}…${r.address.slice(-4)}` : "UNVERIFIED";
+    lines.push(`${i+1}. <b>${escapeHtml(r.symbol)}</b> <code>${escapeHtml(short)}</code> · ${r.blockerCount} blockers · Opp ${r.opportunity} · Conf ${r.confidence} · Risk ${r.riskVerified?r.riskScore:"UNVERIFIED"}`);
   });
   lines.push(
     "",
@@ -179241,7 +179250,7 @@ function premiumWhyTokenMessageV1240(state,query) {
   const resolved = premiumWhyResolveTokenV1240(state,query);
   if (!resolved.row) {
     return [
-      "🧭 <b>ChainVanta Premium Decision — V1240</b>","",
+      "🧭 <b>ChainVanta Premium Decision — V1241</b>","",
       `Requested: <code>${escapeHtml(String(query||""))}</code>`,
       `Resolution: <b>${escapeHtml(resolved.status)}</b>`,
       "No retained qualification/call decision was found. Try the exact contract address or use <code>/premiumwhy 1h</code> to list recent near-misses.","",
@@ -179256,7 +179265,7 @@ function premiumWhyTokenMessageV1240(state,query) {
     : "Entry verified: <b>NOT FROZEN — no successful customer-call baseline</b>";
   const stage = r.currentDecisionStage.replaceAll("_"," ");
   return [
-    "🧭 <b>ChainVanta Premium Decision — V1240</b>","",
+    "🧭 <b>ChainVanta Premium Decision — V1241</b>","",
     `Requested: <code>${escapeHtml(String(query||""))}</code>`,
     `Resolution: <b>${escapeHtml(resolved.status)}</b>${resolved.matches>1?` · matches ${resolved.matches}`:""}`,
     `Token: <b>${escapeHtml(r.symbol)}</b>`,
@@ -179295,7 +179304,7 @@ function premiumWhyTelegramMessageV1240(state,raw) {
   const mode = premiumWhyWindowV1240(raw || "1h");
   return mode.mode === "TOKEN"
     ? premiumWhyTokenMessageV1240(state,mode.query)
-    : premiumWhyBulkMessageV1240(state,mode.label);
+    : premiumWhyBulkMessageV1241(state,mode.label);
 }
 
 
@@ -181431,7 +181440,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
-    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1240 admin-only ranked near-misses + exact token pass/fail decision (read-only)",
+    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1241 admin-only near-miss/reject separation + exact token pass/fail decision (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
@@ -182990,11 +182999,22 @@ async function telegramCommandReplyV271(
   // V1233: owner-facing Premium decision funnel. Read-only; all scanner data
   // is already persisted by normal scans. No provider requests or state writes.
   if (parsed.command === "/premiumfunnel") {
+    if (chatRoleV1025 !== "ADMIN") {
+      return {success:true,ignored:true,command:parsed.command,reason:"PREMIUMFUNNEL_ADMIN_ONLY_V1241",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    }
     const loadedV1233 = await readState(env);
-    const replyV1233 = premiumFunnelTelegramMessageV1233(
+    let replyV1233 = premiumFunnelTelegramMessageV1233(
       loadedV1233?.state || {},
       parsed.argument || "24h"
     );
+    const controlV1241 = await webDiagControlReadV1193(env,loadedV1233?.state||{});
+    if (webDiagStillEnabledV1179(controlV1241)) {
+      const windowV1241 = String(parsed.argument||"24h").trim() || "24h";
+      const linkV1241 = await webDiagIssueRouteGrantV1188(env,controlV1241,`/premiumfunnel?period=${encodeURIComponent(windowV1241)}`);
+      if (linkV1241) replyV1233 += `\n\n🔐 <a href="${escapeHtml(linkV1241)}">Open secure WebDiag</a>`;
+    } else {
+      replyV1233 += `\n\n🔒 WebDiag closed. Enable temporarily with <code>/webdiag on 1h</code>.`;
+    }
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV1233 = await sendTelegram(env, replyV1233, null, null);
     if (diagnosticV273) {
@@ -183002,9 +183022,9 @@ async function telegramCommandReplyV271(
       diagnosticV273.telegramStatus = sentV1233?.status || null;
       diagnosticV273.telegramMode = sentV1233?.mode || null;
       diagnosticV273.telegramError = sentV1233?.error || null;
-      diagnosticV273.result = sentV1233?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+      diagnosticV273.result = sentV1233?.success === true ? "PREMIUMFUNNEL_REPLY_SENT_V1241" : "PREMIUMFUNNEL_REPLY_FAILED_V1241";
     }
-    return {success:sentV1233?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    return {success:sentV1233?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,authorization:"ADMIN_V1025_V1241"};
   }
 
 
@@ -183013,13 +183033,23 @@ async function telegramCommandReplyV271(
   // so future routing changes cannot accidentally expose retained blocker data.
   if (parsed.command === "/premiumwhy") {
     if (chatRoleV1025 !== "ADMIN") {
-      return {success:true,ignored:true,command:parsed.command,reason:"PREMIUMWHY_ADMIN_ONLY_V1240",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+      return {success:true,ignored:true,command:parsed.command,reason:"PREMIUMWHY_ADMIN_ONLY_V1241",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
     }
     const loadedV1240 = await readState(env);
-    const replyV1240 = premiumWhyTelegramMessageV1240(
+    let replyV1240 = premiumWhyTelegramMessageV1240(
       loadedV1240?.state || {},
       parsed.argument || "1h"
     );
+    const controlV1241 = await webDiagControlReadV1193(env,loadedV1240?.state||{});
+    if (webDiagStillEnabledV1179(controlV1241)) {
+      const qV1241 = String(parsed.argument||"1h").trim() || "1h";
+      const isTokenV1241 = isAddress(normalize(qV1241));
+      const targetV1241 = isTokenV1241 ? `/premiumwhy?token=${encodeURIComponent(qV1241)}` : `/premiumwhy?q=${encodeURIComponent(qV1241)}`;
+      const linkV1241 = await webDiagIssueRouteGrantV1188(env,controlV1241,targetV1241);
+      if (linkV1241) replyV1240 += `\n\n🔐 <a href="${escapeHtml(linkV1241)}">Open secure WebDiag</a>`;
+    } else {
+      replyV1240 += `\n\n🔒 WebDiag closed. Enable temporarily with <code>/webdiag on 1h</code>.`;
+    }
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
     const sentV1240 = await sendTelegram(env, replyV1240, null, null);
     if (diagnosticV273) {
@@ -183027,9 +183057,9 @@ async function telegramCommandReplyV271(
       diagnosticV273.telegramStatus = sentV1240?.status || null;
       diagnosticV273.telegramMode = sentV1240?.mode || null;
       diagnosticV273.telegramError = sentV1240?.error || null;
-      diagnosticV273.result = sentV1240?.success === true ? "PREMIUMWHY_REPLY_SENT_V1240" : "PREMIUMWHY_REPLY_FAILED_V1240";
+      diagnosticV273.result = sentV1240?.success === true ? "PREMIUMWHY_REPLY_SENT_V1241" : "PREMIUMWHY_REPLY_FAILED_V1241";
     }
-    return {success:sentV1240?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,authorization:"ADMIN_V1025_V1240"};
+    return {success:sentV1240?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,authorization:"ADMIN_V1025_V1241"};
   }
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
@@ -201969,7 +201999,7 @@ function webDiagHomeHtmlV1190(auth){
     ]],
     ["Premium Decision Intelligence",[
       ["/premiumfunnel?period=1h","Premium Funnel — 1h","Seen → analysed → blocked → qualified → sent, with blocker totals"],
-      ["/premiumwhy?q=1h","Premium Why — near-misses","Ranked retained near-misses and their primary blockers"],
+      ["/premiumwhy?q=1h","Premium Why — near-misses","Genuine one/two-blocker and evidence-only near-misses, with other rejects separated"],
       ["/premiumwhy?q=24h","Premium Why — 24h","Longer retained near-miss decision window"]
     ]],
     ["Delivery & Subscription",[
