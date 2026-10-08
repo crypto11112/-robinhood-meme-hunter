@@ -1,3 +1,4 @@
+// V1245: read-only DexScreener stored request-path telemetry audit; no new provider calls or state changes.
 // V1244 — Retained Market/Liquidity Evidence Audit. Read-only provenance comparison; no new collection or provider requests.
 // V1243 — Premium Rejection Clarity. Builds from V1242. Adds bounded blocker-frequency summary, honest near-miss/rejection totals and owner guidance to read-only /premiumwhy and protected web mirror. No scanner, scoring, risk, provider, budget, premium delivery, payment or security changes.
 // V1242 — Clickable Premium WebDiag Handoff. Builds directly from deployed V1241; keeps the refined near-miss ranking and makes Premium Funnel / Premium Why Telegram responses use the same clickable “Full web copy” UX as established diagnostics. WebDiag remains closed-by-default and web-side protected. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
@@ -10102,7 +10103,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1244";
+const VERSION = "V1245";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179274,6 +179275,43 @@ function premiumMarketEvidenceAuditV1244(state,rawWindow) {
   return {window:w,counts,statuses:[...statuses.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5),suspicious:suspicious.slice(0,5)};
 }
 
+/* V1245: existing V830 telemetry only. This may be partial or stale: absence
+   of rows never implies zero requests. Never call dexService(state) here because
+   its accessor initializes absent state; read existing state directly. */
+function premiumDexRequestPathAuditV1245(state,rawWindow) {
+  const window = premiumWhyWindowV1240(rawWindow);
+  const service = state?.services?.dexscreener;
+  const all = Array.isArray(service?.requestAuditV830) ? service.requestAuditV830 : [];
+  const now = Date.now();
+  const minTime = window.label === "last" ? now - 10*60*1000 : now - Math.max(0,safeNumber(window.ms));
+  const rows = all.filter(r => safeNumber(r?.at) >= minTime && safeNumber(r?.at) <= now+5*60*1000);
+  const groups = new Map();
+  const endpointGroups = new Map();
+  for (const r of rows) {
+    const label = String(r?.feature || "UNKNOWN").slice(0,48) + " / " + String(r?.pathClass || "UNKNOWN").slice(0,48);
+    const g = groups.get(label) || {label,total:0,http429:0,ok:0,other:0};
+    g.total++;
+    const http = Number(r?.httpStatus);
+    if (r?.httpStatus !== null && r?.httpStatus !== undefined && http === 429) g.http429++;
+    else if (r?.outcome === "SUCCESS" || (http >= 200 && http < 300)) g.ok++;
+    else g.other++;
+    groups.set(label,g);
+    const endpoint = String(r?.endpoint || "UNKNOWN").replace(/0x[0-9a-f]{40}/ig,":token").replace(/\b[0-9a-f]{64}\b/ig,":id").slice(0,100);
+    endpointGroups.set(endpoint,(endpointGroups.get(endpoint)||0)+1);
+  }
+  const ordered = [...rows].sort((a,b)=>safeNumber(a?.at)-safeNumber(b?.at));
+  const last = ordered.length ? ordered[ordered.length-1] : null;
+  const ages = ordered.length ? Math.max(0,now-safeNumber(last?.at)) : null;
+  const overlap = ordered.filter(r=>safeNumber(r?.requestsInPrior60s)>0).length;
+  const cooldownUntil = safeNumber(service?.cooldownUntil);
+  return {window, retained:all.length, matched:rows.length, lastAgeMs:ages,
+    total429:rows.filter(r=>Number(r?.httpStatus)===429 && r?.httpStatus!=null).length,
+    overlap, cooldownActive:cooldownUntil>now,
+    cooldownRemainingMs:cooldownUntil>now ? cooldownUntil-now : 0,
+    grouped:[...groups.values()].sort((a,b)=>b.total-a.total).slice(0,6),
+    endpoints:[...endpointGroups.entries()].sort((a,b)=>b[1]-a[1]).slice(0,4)};
+}
+
 function premiumWhyBoolV1240(value) {
   return value === true ? "YES" : value === false ? "NO" : "UNVERIFIED";
 }
@@ -179281,7 +179319,7 @@ function premiumWhyBoolV1240(value) {
 function premiumWhyBulkMessageV1241(state,rawWindow) {
   const d = premiumWhyNearMissesV1241(state,rawWindow || "1h");
   const lines = [
-    `🧭 <b>ChainVanta Premium Why — V1244 · ${escapeHtml(d.window.label)}</b>`,
+    `🧭 <b>ChainVanta Premium Why — V1245 · ${escapeHtml(d.window.label)}</b>`,
     "",
     `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
     `Near-misses: <b>${d.nearTotal}</b> · Other rejects: <b>${d.rejectedTotal}</b>`,
@@ -179319,6 +179357,14 @@ function premiumWhyBulkMessageV1241(state,rawWindow) {
     ...(auditV1244.statuses.length?["Top retained market statuses: "+auditV1244.statuses.map(([k,n])=>`${escapeHtml(k)} ×${n}`).join("; ")]:["Top retained market statuses: none recorded"]),
     ...(auditV1244.suspicious.length?["Review potential contradictions: "+auditV1244.suspicious.map(x=>`${escapeHtml(x.symbol)} (${escapeHtml(x.address.slice(0,6))}…)`).join(", ")]:["No retained-view contradictions detected under these tests."]),
     "Interpretation: zero contradictions does NOT establish that providers or collector handoffs worked. Decision rows do not retain provider responses; collection-origin failures remain UNDETERMINED. Positive liquidity alone does not prove minimum liquidity or freshness.");
+  const dexV1245 = premiumDexRequestPathAuditV1245(state,d.window.label);
+  lines.push("", "<b>📡 V1245 DexScreener request-path audit</b>",
+    `Stored request rows: <b>${dexV1245.retained}</b> (bounded recent log) · matching ${escapeHtml(dexV1245.window.label)}: <b>${dexV1245.matched}</b> · recorded HTTP 429: <b>${dexV1245.total429}</b>`,
+    `Logged requests with another prior 60s: <b>${dexV1245.overlap}</b> · cooldown now: <b>${dexV1245.cooldownActive?"ACTIVE":"NOT ACTIVE/NOT RETAINED"}</b>${dexV1245.cooldownActive?` (${Math.ceil(dexV1245.cooldownRemainingMs/60000)}m remaining)`:""}`,
+    ...(dexV1245.lastAgeMs!==null?[`Most recent retained request: <b>${Math.round(dexV1245.lastAgeMs/1000)}s ago</b>`]:["Most recent retained request: <b>NOT RECORDED IN WINDOW</b>"]),
+    ...(dexV1245.grouped.length?["Recorded feature/path classes: "+dexV1245.grouped.map(x=>`${escapeHtml(x.label)} ${x.total} (429:${x.http429}, OK:${x.ok}, other:${x.other})`).join("; ")]:["Recorded feature/path classes: NONE IN RETAINED WINDOW"]),
+    ...(dexV1245.endpoints.length?["Endpoint classes (redacted): "+dexV1245.endpoints.map(([x,n])=>`${escapeHtml(x)} ×${n}`).join("; ")]:[]),
+    "Scope warning: V830 keeps at most 30 service rows; other Workers, isolated analyses or uninstrumented fetch paths may be absent. Prior-60s overlap is not proof of duplicate requests or a rate-limit cause. No collector-to-decision linkage is inferred.");
   lines.push(
     "",
     "Use <code>/premiumwhy SYMBOL</code> or <code>/premiumwhy 0xTOKEN</code> for the full retained gate/evidence decision.",
@@ -181521,7 +181567,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
-    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1244 admin-only near-miss/reject + market/liquidity evidence audit + exact token decision (read-only)",
+    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1245 admin-only market + stored Dex request-path audit + exact token decision (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
