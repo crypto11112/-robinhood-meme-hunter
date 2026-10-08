@@ -10041,7 +10041,23 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1233";
+/*
+ * ChainVanta V1234 — SCHEDULED RELAY STREAM KEEPALIVE
+ * - Builds directly from deployed V1233.
+ * - Targets the proven production failure where the scheduler alarm remains healthy
+ *   but the isolated normal-Worker heavy-scan relay returns HTTP 503 with NO_JSON_BODY
+ *   after a long-running scan.
+ * - Authenticated V914/V1213 heavy-scan relay responses now start immediately and
+ *   emit JSON-safe whitespace keepalives while the existing heavy scan runs, then
+ *   append the same compact JSON result at completion. This protects the relay from
+ *   a long no-body/TTFB gap without moving heavy scanning back into the Durable Object.
+ * - The scheduler records keepalive duration/count for proof. Explicit streamed
+ *   execution failures remain fail-closed and are surfaced to the scheduler.
+ * - No provider/RPC requests are added. No scanner logic, scoring, thresholds, risk,
+ *   qualification, Telegram routing, request ceilings, watch capacity, Premium Funnel,
+ *   payments or WebDiag security behavior is changed.
+ */
+const VERSION = "V1234";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -183298,7 +183314,12 @@ async function telegramCommandReplyV271(
       `V983 scheduler re-arm verified: <b>${lastV969?.schedulerRearmV983?.armed === true ? "YES" : lastV969?.schedulerRearmV983?.armed === false ? "NO" : "N/A"}</b>`,
       `V983 re-arm retry / error: <b>${lastV969?.schedulerRearmV983?.retryUsed === true ? "YES" : "NO"}</b> · <code>${escapeHtml(String(lastV969?.schedulerRearmV983?.error || "NONE"))}</code>`,
       "",
-      "<i>Read-only. Zero provider requests and zero scanner writes. V983 adds an emergency history-only Tier-3 KV rescue and verified scheduler re-arm while preserving scanner, provider, scoring, risk and Telegram rules.</i>"
+      "🌊 <b>V1234 relay keepalive proof</b>",
+      `Keepalive observed: <b>${lastV969?.v1234RelayKeepalive?.enabled === true ? "YES" : "NO"}</b>`,
+      `Heartbeats / duration: <b>${safeNumber(lastV969?.v1234RelayKeepalive?.heartbeatCount)} / ${safeNumber(lastV969?.v1234RelayKeepalive?.durationMs)}ms</b>`,
+      `Relay mode: <b>${escapeHtml(String(lastV969?.v1234RelayKeepalive?.mode || "N/A"))}</b>`,
+      "",
+      "<i>Read-only. Zero provider requests and zero scanner writes. V1234 keeps the authenticated heavy-scan relay response body alive while preserving V914 memory isolation and all scanner/provider/scoring/risk/Telegram rules.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -204025,18 +204046,18 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
   if (scheduledRelayV671) {
     const relayModeV914 = String(url.searchParams.get("v914RelayMode") || "");
     if (relayModeV914 === "scheduled") {
-      const resultV914 = await scheduledScan(env);
-      return jsonResponse(compactHeavyScanRelayResultV914(resultV914,"scheduled"));
+      return streamedHeavyScanRelayResponseV1234(() => scheduledScan(env), "scheduled");
     }
     if (relayModeV914 === "qualification-followup") {
-      const resultV914 = await scan(env,{scheduled:true,qualificationFollowUpV723:true});
-      return jsonResponse(compactHeavyScanRelayResultV914(resultV914,"qualification-followup"));
+      return streamedHeavyScanRelayResponseV1234(
+        () => scan(env,{scheduled:true,qualificationFollowUpV723:true}),
+        "qualification-followup"
+      );
     }
     if (relayModeV914 === "manual") {
-      const resultV914 = await scan(env,{scheduled:false});
-      return jsonResponse(compactHeavyScanRelayResultV914(resultV914,"manual"));
+      return streamedHeavyScanRelayResponseV1234(() => scan(env,{scheduled:false}), "manual");
     }
-    return jsonResponse(await scheduledScan(env));
+    return streamedHeavyScanRelayResponseV1234(() => scheduledScan(env), "scheduled");
   }
 
   // V1179: protect every exposed diagnostic route before route-specific rendering.
@@ -204248,14 +204269,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       if (
         relayModeV914 === "scheduled"
       ) {
-        const resultV914 =
-          await scheduledScan(env);
-
-        return jsonResponse(
-          compactHeavyScanRelayResultV914(
-            resultV914,
-            "scheduled"
-          )
+        return streamedHeavyScanRelayResponseV1234(
+          () => scheduledScan(env),
+          "scheduled"
         );
       }
 
@@ -204263,39 +204279,29 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         relayModeV914 ===
         "qualification-followup"
       ) {
-        const resultV914 =
-          await scan(
+        return streamedHeavyScanRelayResponseV1234(
+          () => scan(
             env,
             {
               scheduled: true,
               qualificationFollowUpV723: true
             }
-          );
-
-        return jsonResponse(
-          compactHeavyScanRelayResultV914(
-            resultV914,
-            "qualification-followup"
-          )
+          ),
+          "qualification-followup"
         );
       }
 
       if (
         relayModeV914 === "manual"
       ) {
-        const resultV914 =
-          await scan(
+        return streamedHeavyScanRelayResponseV1234(
+          () => scan(
             env,
             {
               scheduled: false
             }
-          );
-
-        return jsonResponse(
-          compactHeavyScanRelayResultV914(
-            resultV914,
-            "manual"
-          )
+          ),
+          "manual"
         );
       }
 
@@ -204303,10 +204309,9 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
        * Preserve the historical V670/V671 relay behavior for any old caller
        * that still supplies only v670ScheduledRelay=1.
        */
-      return jsonResponse(
-        await scheduledScan(
-          env
-        )
+      return streamedHeavyScanRelayResponseV1234(
+        () => scheduledScan(env),
+        "scheduled"
       );
     }
 
@@ -209096,6 +209101,88 @@ function compactHeavyScanRelayResultV914(
   };
 }
 
+function streamedHeavyScanRelayResponseV1234(runHeavyScanV1234, mode = "scheduled") {
+  const encoderV1234 = new TextEncoder();
+  const startedAtV1234 = Date.now();
+  let heartbeatTimerV1234 = null;
+  let heartbeatCountV1234 = 0;
+  let closedV1234 = false;
+
+  const streamV1234 = new ReadableStream({
+    async start(controllerV1234) {
+      const enqueueWhitespaceV1234 = () => {
+        if (closedV1234) return;
+        try {
+          controllerV1234.enqueue(encoderV1234.encode(" \n"));
+          heartbeatCountV1234 += 1;
+        } catch (_) {}
+      };
+
+      // V1234: establish response bytes immediately, then keep the body active while
+      // the already-existing heavy scan runs. Leading JSON whitespace is valid and
+      // therefore remains compatible with response.json() in the scheduler relay.
+      enqueueWhitespaceV1234();
+      heartbeatTimerV1234 = setInterval(enqueueWhitespaceV1234, 15000);
+
+      try {
+        const resultV1234 = await runHeavyScanV1234();
+        const compactV1234 = compactHeavyScanRelayResultV914(resultV1234, mode);
+        compactV1234.v1234RelayKeepalive = {
+          enabled: true,
+          heartbeatIntervalMs: 15000,
+          heartbeatCount: heartbeatCountV1234,
+          startedAt: startedAtV1234,
+          completedAt: Date.now(),
+          durationMs: Date.now() - startedAtV1234,
+          mode,
+          policy: "IMMEDIATE_JSON_WHITESPACE_KEEPALIVE_V1234"
+        };
+        controllerV1234.enqueue(encoderV1234.encode(JSON.stringify(compactV1234)));
+      } catch (errorV1234) {
+        const failureV1234 = {
+          ok: false,
+          version: VERSION,
+          status: "V1234_STREAMED_HEAVY_SCAN_EXECUTION_FAILED",
+          v1234RelayExecutionError: true,
+          error: errorString(errorV1234),
+          v1234RelayKeepalive: {
+            enabled: true,
+            heartbeatIntervalMs: 15000,
+            heartbeatCount: heartbeatCountV1234,
+            startedAt: startedAtV1234,
+            completedAt: Date.now(),
+            durationMs: Date.now() - startedAtV1234,
+            mode,
+            policy: "IMMEDIATE_JSON_WHITESPACE_KEEPALIVE_V1234"
+          },
+          timestamp: now()
+        };
+        try {
+          controllerV1234.enqueue(encoderV1234.encode(JSON.stringify(failureV1234)));
+        } catch (_) {}
+      } finally {
+        if (heartbeatTimerV1234 !== null) clearInterval(heartbeatTimerV1234);
+        closedV1234 = true;
+        try { controllerV1234.close(); } catch (_) {}
+      }
+    },
+    cancel() {
+      closedV1234 = true;
+      if (heartbeatTimerV1234 !== null) clearInterval(heartbeatTimerV1234);
+    }
+  });
+
+  return new Response(streamV1234, {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store, max-age=0",
+      "x-content-type-options": "nosniff",
+      "x-chainvanta-relay-stream": "V1234"
+    }
+  });
+}
+
 async function relayHeavyScanOutsideSchedulerV914(
   env,
   mode = "scheduled"
@@ -209166,6 +209253,11 @@ async function relayHeavyScanOutsideSchedulerV914(
     await relayAttemptV1173(1);
 
   if (first.response.ok) {
+    if (first.body?.v1234RelayExecutionError === true) {
+      throw new Error(
+        `V1234_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(first.body?.error || first.body?.status || "UNKNOWN").slice(0, 180)}`
+      );
+    }
     if (!first.body || typeof first.body !== "object") {
       throw new Error(
         "V914_HEAVY_SCAN_RELAY_INVALID_BODY"
@@ -209217,6 +209309,12 @@ async function relayHeavyScanOutsideSchedulerV914(
   if (!second.body || typeof second.body !== "object") {
     throw new Error(
       "V1173_HEAVY_SCAN_RELAY_RETRY_INVALID_BODY"
+    );
+  }
+
+  if (second.body?.v1234RelayExecutionError === true) {
+    throw new Error(
+      `V1234_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(second.body?.error || second.body?.status || "UNKNOWN").slice(0, 180)}`
     );
   }
 
@@ -209564,6 +209662,8 @@ export class ScanSchedulerV673 {
             ? "qualification-followup"
             : "scheduled"
       },
+      v1234RelayKeepalive:
+        result?.v1234RelayKeepalive || null,
       v1173RelayRecovery:
         result?.v1173RelayRecovery ||
         (failure
