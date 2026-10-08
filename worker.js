@@ -1,3 +1,4 @@
+// V1240 — Secure Premium Decision Intelligence. Builds directly from deployed V1239; adds read-only /premiumwhy bulk + token drill-down and protected WebDiag Premium Funnel/Decision pages. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1239 — Heavy Scan Phase Checkpoints. Builds directly from deployed V1238; adds tiny KV phase checkpoints so a stalled scheduled heavy scan reveals the last completed internal phase. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1238 — Persisted Scan Completion Receipts. Builds directly from V1237; adds compact KV run receipts so scheduler completion no longer depends solely on the long-lived relay terminal body. Scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
@@ -10098,7 +10099,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1239";
+const VERSION = "V1240";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179070,6 +179071,235 @@ function premiumFunnelTelegramMessageV1233(state, rawWindow) {
 
 
 /* =========================================================
+   V1240 — SECURE PREMIUM DECISION INTELLIGENCE
+   Read-only owner diagnostics built on already-persisted V663 qualification
+   audit rows + V1175 successful-call baselines. No provider/RPC requests,
+   no state writes, no scoring/risk/qualification/Telegram behavior changes.
+   ========================================================= */
+function premiumWhyWindowV1240(raw) {
+  const q = String(raw || "1h").trim().toLowerCase();
+  if (!q || q === "1h" || q === "hour") return {mode:"WINDOW",label:"1h",ms:60*60*1000};
+  if (q === "24h" || q === "day") return {mode:"WINDOW",label:"24h",ms:24*60*60*1000};
+  if (q === "7d" || q === "week") return {mode:"WINDOW",label:"7d",ms:7*24*60*60*1000};
+  if (q === "last" || q === "latest") return {mode:"WINDOW",label:"last",ms:0};
+  return {mode:"TOKEN",query:String(raw||"").trim()};
+}
+
+function premiumWhyPerformanceRecordV1240(state,address) {
+  const a = normalize(address || "");
+  if (!isAddress(a)) return null;
+  const registry = state?.callPerformanceV270 && typeof state.callPerformanceV270 === "object"
+    ? state.callPerformanceV270 : {};
+  for (const row of Object.values(registry)) {
+    const rowAddress = normalize(row?.address || row?.latestCustomerCallBaselineV1175?.address || "");
+    if (rowAddress === a) return row;
+  }
+  return null;
+}
+
+function premiumWhyRecordViewV1240(state,row) {
+  const address = normalize(row?.address || "");
+  const perf = premiumWhyPerformanceRecordV1240(state,address);
+  const call = perf?.latestCustomerCallBaselineV1175 || null;
+  const ev = row?.evidenceCompletionAuditV727?.finalEvidence || {};
+  const reasons = Array.isArray(row?.telegramReasons) ? row.telegramReasons.filter(Boolean) : [];
+  const primary = reasons[0] || null;
+  const categories = [...new Set(reasons.map(premiumFunnelBlockerCategoryV1233))];
+  const sentAt = safeNumber(perf?.lastSuccessfulAlertAt);
+  const currentDecisionStage = row?.telegramSent === true
+    ? "PREMIUM_SENT_CURRENT_EVALUATION"
+    : row?.telegramQualified === true
+      ? "QUALIFIED_NOT_SENT_CURRENT_EVALUATION"
+      : "NO_PREMIUM_CALL_CURRENT_EVALUATION";
+  const historicalCustomerStage = call
+    ? (call?.customerVerifiedCallV1228 === true ? "VERIFIED_CALL" : "EARLY_DISCOVERY")
+    : null;
+  return {
+    address,
+    symbol:row?.symbol || call?.symbol || perf?.symbol || "UNKNOWN",
+    lastEvaluatedAt:safeNumber(row?.lastEvaluatedAt || row?.firstEvaluatedAt),
+    evaluationCount:safeNumber(row?.evaluationCount),
+    telegramQualified:row?.telegramQualified === true,
+    telegramSent:row?.telegramSent === true,
+    reasons,
+    categories,
+    primary,
+    blockerCount:reasons.length,
+    oneBlockerAway:row?.oneBlockerAwayV663 === true || reasons.length === 1,
+    evidenceOnly:row?.evidenceOnlyUnresolvedV663 === true,
+    opportunity:safeNumber(row?.opportunityScore),
+    confidence:safeNumber(row?.confidenceScore),
+    riskVerified:row?.riskVerified === true,
+    riskScore:row?.riskVerified === true ? safeNumber(row?.riskScore) : null,
+    marketVerified:row?.marketVerified === true || ev?.marketVerified === true,
+    liquidityUsd:row?.liquidityUsd ?? null,
+    holderVerified:row?.holderEvidenceVerified === true,
+    signalCount:safeNumber(row?.signalCount),
+    launchVerified:ev?.launchAgeVerified === true || call?.launchAgeVerifiedV1178 === true,
+    momentumVerified:ev?.momentumVerified === true,
+    marketQualityVerified:ev?.marketQualityVerified === true,
+    whaleVerified:ev?.whaleFlowVerified === true,
+    flowVerified:ev?.directionalUsdVerified === true,
+    exactPoolVerified:ev?.exactPoolIdentityVerified === true || /^0x[a-f0-9]{64}$/.test(String(call?.exactPoolId || "")),
+    observedSwaps:safeNumber(ev?.observedSwaps),
+    entryVerified:call?.entryPriceVerified === true,
+    entryPriceUsd:call?.entryPriceVerified === true ? Number(call?.entryPriceUsd) : null,
+    exactPoolId:/^0x[a-f0-9]{64}$/.test(String(call?.exactPoolId || "")) ? String(call.exactPoolId) : null,
+    currentDecisionStage,
+    historicalCustomerStage,
+    trigger:call?.triggerReason || null,
+    successfulCallAt:sentAt || null,
+    hasSuccessfulCallBaseline:Boolean(call)
+  };
+}
+
+function premiumWhyResolveTokenV1240(state,query) {
+  const q = String(query || "").trim();
+  const rows = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records : [];
+  if (!q) return {row:null,status:"QUERY_REQUIRED",matches:0};
+  const addr = normalize(q);
+  if (isAddress(addr)) {
+    const matches = rows.filter(r=>normalize(r?.address)===addr)
+      .sort((a,b)=>safeNumber(b?.lastEvaluatedAt)-safeNumber(a?.lastEvaluatedAt));
+    if (matches.length) return {row:matches[0],status:"MATCHED_ADDRESS",matches:matches.length};
+    const perf = premiumWhyPerformanceRecordV1240(state,addr);
+    if (perf) {
+      const call = perf?.latestCustomerCallBaselineV1175 || null;
+      return {row:{address:addr,symbol:perf?.symbol||call?.symbol||"UNKNOWN",lastEvaluatedAt:safeNumber(perf?.lastSuccessfulAlertAt),telegramQualified:true,telegramSent:true,telegramReasons:[],opportunityScore:call?.opportunityScore,confidenceScore:call?.confidenceScore,riskVerified:Number.isFinite(Number(call?.riskScore)),riskScore:call?.riskScore,marketVerified:true,holderEvidenceVerified:false,signalCount:0},status:"MATCHED_SUCCESSFUL_CALL_BASELINE",matches:1};
+    }
+    return {row:null,status:"ADDRESS_NOT_RETAINED",matches:0};
+  }
+  const symbol = q.toLowerCase();
+  const matches = rows.filter(r=>String(r?.symbol||"").trim().toLowerCase()===symbol)
+    .sort((a,b)=>safeNumber(b?.lastEvaluatedAt)-safeNumber(a?.lastEvaluatedAt));
+  return matches.length
+    ? {row:matches[0],status:matches.length>1?"MATCHED_SYMBOL_LATEST_OF_MULTIPLE":"MATCHED_SYMBOL",matches:matches.length}
+    : {row:null,status:"SYMBOL_NOT_RETAINED",matches:0};
+}
+
+function premiumWhyNearMissesV1240(state,rawWindow) {
+  const w = premiumWhyWindowV1240(rawWindow);
+  const now = Date.now();
+  const rows = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records : [];
+  let filtered = rows.filter(r=>r?.telegramQualified !== true);
+  if (w.label === "last") {
+    const latest = filtered.reduce((m,r)=>Math.max(m,safeNumber(r?.lastEvaluatedAt)),0);
+    filtered = latest ? filtered.filter(r=>safeNumber(r?.lastEvaluatedAt) >= latest - 10*60*1000) : [];
+  } else {
+    const cutoff = now - safeNumber(w.ms);
+    filtered = filtered.filter(r=>safeNumber(r?.lastEvaluatedAt) >= cutoff && safeNumber(r?.lastEvaluatedAt) <= now + 5*60*1000);
+  }
+  const views = filtered.map(r=>premiumWhyRecordViewV1240(state,r));
+  views.sort((a,b)=>{
+    const aTier = a.oneBlockerAway ? 0 : a.evidenceOnly ? 1 : 2;
+    const bTier = b.oneBlockerAway ? 0 : b.evidenceOnly ? 1 : 2;
+    if (aTier !== bTier) return aTier-bTier;
+    if (a.blockerCount !== b.blockerCount) return a.blockerCount-b.blockerCount;
+    if (a.opportunity !== b.opportunity) return b.opportunity-a.opportunity;
+    if (a.confidence !== b.confidence) return b.confidence-a.confidence;
+    return b.lastEvaluatedAt-a.lastEvaluatedAt;
+  });
+  return {window:w,total:views.length,rows:views.slice(0,12)};
+}
+
+function premiumWhyBoolV1240(value) {
+  return value === true ? "YES" : value === false ? "NO" : "UNVERIFIED";
+}
+
+function premiumWhyBulkMessageV1240(state,rawWindow) {
+  const d = premiumWhyNearMissesV1240(state,rawWindow || "1h");
+  const lines = [
+    `🧭 <b>ChainVanta Premium Why — V1240 · ${escapeHtml(d.window.label)}</b>`,
+    "",
+    `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
+    "Ranking: one-blocker-away first → evidence-only unresolved → fewer blockers → stronger Opportunity/Confidence.",
+    "",
+    "<b>🔎 Closest retained near-misses</b>"
+  ];
+  if (!d.rows.length) lines.push("• No retained non-qualified token decisions in this window.");
+  d.rows.forEach((r,i)=>{
+    const short = isAddress(r.address) ? `${r.address.slice(0,6)}…${r.address.slice(-4)}` : "UNVERIFIED";
+    const primary = r.primary || "NO_RETAINED_REASON";
+    const tag = r.oneBlockerAway ? "ONE-BLOCKER" : r.evidenceOnly ? "EVIDENCE-ONLY" : `${r.blockerCount} BLOCKERS`;
+    lines.push(
+      `${i+1}. <b>${escapeHtml(r.symbol)}</b> <code>${escapeHtml(short)}</code> · ${escapeHtml(tag)}`,
+      `   Opp ${r.opportunity} · Conf ${r.confidence} · Risk ${r.riskVerified?r.riskScore:"UNVERIFIED"} · Pool ${r.exactPoolVerified?"YES":"NO"} · Flow ${r.flowVerified?"YES":"NO"}`,
+      `   First blocker: <b>${escapeHtml(primary)}</b>`
+    );
+  });
+  lines.push(
+    "",
+    "Use <code>/premiumwhy SYMBOL</code> or <code>/premiumwhy 0xTOKEN</code> for the full retained gate/evidence decision.",
+    "<i>Admin-only, read-only. Zero provider requests, zero scanner-budget consumption, zero state writes and no qualification changes.</i>"
+  );
+  return lines.join("\n");
+}
+
+function premiumWhyTokenMessageV1240(state,query) {
+  const resolved = premiumWhyResolveTokenV1240(state,query);
+  if (!resolved.row) {
+    return [
+      "🧭 <b>ChainVanta Premium Decision — V1240</b>","",
+      `Requested: <code>${escapeHtml(String(query||""))}</code>`,
+      `Resolution: <b>${escapeHtml(resolved.status)}</b>`,
+      "No retained qualification/call decision was found. Try the exact contract address or use <code>/premiumwhy 1h</code> to list recent near-misses.","",
+      "<i>Admin-only, read-only. No provider requests or state writes.</i>"
+    ].join("\n");
+  }
+  const r = premiumWhyRecordViewV1240(state,resolved.row);
+  const secondary = r.reasons.slice(1);
+  const primary = r.primary || (r.telegramQualified ? "NONE — QUALIFIED" : "NO_RETAINED_REASON");
+  const entryLine = r.hasSuccessfulCallBaseline
+    ? `Entry verified: <b>${r.entryVerified?"YES":"NO"}</b>${r.entryVerified&&Number.isFinite(r.entryPriceUsd)?` · $${escapeHtml(String(r.entryPriceUsd))}`:""}`
+    : "Entry verified: <b>NOT FROZEN — no successful customer-call baseline</b>";
+  const stage = r.currentDecisionStage.replaceAll("_"," ");
+  return [
+    "🧭 <b>ChainVanta Premium Decision — V1240</b>","",
+    `Requested: <code>${escapeHtml(String(query||""))}</code>`,
+    `Resolution: <b>${escapeHtml(resolved.status)}</b>${resolved.matches>1?` · matches ${resolved.matches}`:""}`,
+    `Token: <b>${escapeHtml(r.symbol)}</b>`,
+    `Address: <code>${escapeHtml(r.address||"UNVERIFIED")}</code>`,
+    `Last evaluated: <code>${r.lastEvaluatedAt?escapeHtml(new Date(r.lastEvaluatedAt).toISOString()):"UNVERIFIED"}</code> · evaluations <b>${r.evaluationCount}</b>`,"",
+    "<b>🎯 Decision gates</b>",
+    `Opportunity: <b>${r.opportunity}</b>`,
+    `Confidence: <b>${r.confidence}</b>`,
+    `Risk: <b>${r.riskVerified?r.riskScore:"UNVERIFIED"}</b>`,
+    `Signals: <b>${r.signalCount}</b>`,
+    `Market verified: <b>${premiumWhyBoolV1240(r.marketVerified)}</b>${r.liquidityUsd!==null?` · liquidity $${Number(safeNumber(r.liquidityUsd)).toLocaleString("en-GB",{maximumFractionDigits:2})}`:""}`,
+    `Holder evidence: <b>${premiumWhyBoolV1240(r.holderVerified)}</b>`,"",
+    "<b>🧬 Evidence state</b>",
+    `Exact pool: <b>${premiumWhyBoolV1240(r.exactPoolVerified)}</b>${r.exactPoolId?` · <code>${escapeHtml(r.exactPoolId)}</code>`:""}`,
+    entryLine,
+    `Directional USD flow: <b>${premiumWhyBoolV1240(r.flowVerified)}</b> · observed swaps <b>${r.observedSwaps}</b>`,
+    `Momentum verified: <b>${premiumWhyBoolV1240(r.momentumVerified)}</b>`,
+    `Launch age verified: <b>${premiumWhyBoolV1240(r.launchVerified)}</b>`,
+    `Market quality verified: <b>${premiumWhyBoolV1240(r.marketQualityVerified)}</b>`,
+    `Whale flow verified: <b>${premiumWhyBoolV1240(r.whaleVerified)}</b>`,"",
+    "<b>🚦 Final decision</b>",
+    `Stage: <b>${escapeHtml(stage)}</b>`,
+    `Telegram qualified / sent: <b>${r.telegramQualified?"YES":"NO"} / ${r.telegramSent?"YES":"NO"}</b>`,
+    `First retained blocker: <b>${escapeHtml(primary)}</b>`,
+    `Secondary blockers: <b>${secondary.length?escapeHtml(secondary.join(", ")):"NONE"}</b>`,
+    `Evidence-only unresolved: <b>${r.evidenceOnly?"YES":"NO"}</b> · one-blocker-away: <b>${r.oneBlockerAway?"YES":"NO"}</b>`,
+    r.historicalCustomerStage ? `Historical successful-call stage: <b>${escapeHtml(r.historicalCustomerStage.replaceAll("_"," "))}</b>` : null,
+    r.trigger ? `Historical successful-call trigger: <b>${escapeHtml(r.trigger)}</b>` : null,
+    r.successfulCallAt ? `Successful-call time: <code>${escapeHtml(new Date(r.successfulCallAt).toISOString())}</code>` : null,
+    "",
+    "<i>This is the retained decision-time evidence/provenance available to ChainVanta; missing evidence is never treated as positive. Admin-only, read-only, zero provider requests and zero state writes.</i>"
+  ].filter(Boolean).join("\n");
+}
+
+function premiumWhyTelegramMessageV1240(state,raw) {
+  const mode = premiumWhyWindowV1240(raw || "1h");
+  return mode.mode === "TOKEN"
+    ? premiumWhyTokenMessageV1240(state,mode.query)
+    : premiumWhyBulkMessageV1240(state,mode.label);
+}
+
+
+/* =========================================================
    V985 — resilient compact /launchcoverage formatter
    =========================================================
    The legacy V474 formatter remains intact for rollback/reference. V985
@@ -181201,6 +181431,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
+    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1240 admin-only ranked near-misses + exact token pass/fail decision (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
@@ -182774,6 +183005,31 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = sentV1233?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:sentV1233?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+  }
+
+
+  // V1240: defense-in-depth Admin-only Premium decision intelligence.
+  // This sits behind the established V1025 ADMIN branch and rechecks role here
+  // so future routing changes cannot accidentally expose retained blocker data.
+  if (parsed.command === "/premiumwhy") {
+    if (chatRoleV1025 !== "ADMIN") {
+      return {success:true,ignored:true,command:parsed.command,reason:"PREMIUMWHY_ADMIN_ONLY_V1240",scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+    }
+    const loadedV1240 = await readState(env);
+    const replyV1240 = premiumWhyTelegramMessageV1240(
+      loadedV1240?.state || {},
+      parsed.argument || "1h"
+    );
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1240 = await sendTelegram(env, replyV1240, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1240?.success === true;
+      diagnosticV273.telegramStatus = sentV1240?.status || null;
+      diagnosticV273.telegramMode = sentV1240?.mode || null;
+      diagnosticV273.telegramError = sentV1240?.error || null;
+      diagnosticV273.result = sentV1240?.success === true ? "PREMIUMWHY_REPLY_SENT_V1240" : "PREMIUMWHY_REPLY_FAILED_V1240";
+    }
+    return {success:sentV1240?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0,authorization:"ADMIN_V1025_V1240"};
   }
 
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
@@ -201448,7 +201704,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
   "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel",
-  "/callquality","/calllab","/callresearch","/capturestatus","/freequeue","/narrativeaudit","/stripereconcile-preview",
+  "/callquality","/calllab","/callresearch","/capturestatus","/freequeue","/narrativeaudit","/stripereconcile-preview","/premiumfunnel","/premiumwhy",
 
   // V1210: legacy/internal diagnostic and operational inspection routes must
   // pass the same closed-by-default WebDiag authorization before their
@@ -201711,6 +201967,11 @@ function webDiagHomeHtmlV1190(auth){
       ["/callresearch","Professional Call Research","Microstructure-to-7d research, data-quality gating and holdout protocol"],
       ["/capturestatus","Forward Capture Status","V1224 genuine-call 5s→7d forward capture coverage"]
     ]],
+    ["Premium Decision Intelligence",[
+      ["/premiumfunnel?period=1h","Premium Funnel — 1h","Seen → analysed → blocked → qualified → sent, with blocker totals"],
+      ["/premiumwhy?q=1h","Premium Why — near-misses","Ranked retained near-misses and their primary blockers"],
+      ["/premiumwhy?q=24h","Premium Why — 24h","Longer retained near-miss decision window"]
+    ]],
     ["Delivery & Subscription",[
       ["/freequeue","Free Delayed Queue","Pending, due, sent, failed and dropped Free-call deliveries"],
       ["/narrativeaudit","Narrative Evidence","Verified/supported narrative provenance and cache status"],
@@ -201730,7 +201991,7 @@ function webDiagHomeHtmlV1190(auth){
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ChainVanta Admin Diagnostics</title>
 <style>
 :root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{max-width:1040px;margin:0 auto;padding:18px 16px 40px}.top{background:#101828;color:#fff;border-radius:18px;padding:20px;margin-bottom:16px}.eyebrow{font-size:12px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#98a2b3}.top h1{font-size:26px;margin:7px 0 8px}.top p{margin:0;color:#d0d5dd;line-height:1.5}.status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:16px}.status{background:#1d2939;border-radius:12px;padding:12px}.status b{display:block;color:#fff;font-size:14px}.status span{display:block;color:#98a2b3;font-size:12px;margin-top:4px;line-height:1.35}.group{background:#fff;border:1px solid #e4e7ec;border-radius:16px;padding:16px;margin-top:14px}.group h2{font-size:17px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.tool{position:relative;display:block;text-decoration:none;color:#101828;border:1px solid #e4e7ec;border-radius:13px;padding:14px 38px 14px 14px;min-height:78px;background:#fff}.tool:active{background:#f9fafb}.tool-title{display:block;font-size:15px;font-weight:750}.tool-desc{display:block;font-size:12px;color:#667085;line-height:1.4;margin-top:5px}.arrow{position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:24px;color:#98a2b3}.utility{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.utility a,.utility button{width:100%;appearance:none;border-radius:12px;padding:13px 14px;font:inherit;font-weight:750;cursor:pointer;text-align:center}.secondary{border:1px solid #d0d5dd;background:#fff;color:#101828;text-decoration:none}.danger{border:1px solid #fda29b;background:#fff5f4;color:#b42318}.note{font-size:12px;color:#667085;line-height:1.5;margin-top:14px;padding:0 2px}.token-note{background:#fff;border:1px dashed #d0d5dd;border-radius:14px;padding:14px;margin-top:14px;font-size:13px;color:#475467;line-height:1.55}.launcher-copy{margin:0 0 12px;color:#667085;font-size:13px;line-height:1.5}.token-launcher{display:grid;grid-template-columns:1fr 220px auto;gap:10px;align-items:end}.token-launcher label{font-size:12px;font-weight:700;color:#475467;grid-row:1}.token-launcher input,.token-launcher select{width:100%;border:1px solid #d0d5dd;border-radius:11px;background:#fff;color:#101828;padding:12px 12px;font:inherit;min-height:46px}.token-launcher input{grid-column:1}.token-launcher select{grid-column:2}.token-launcher .primary{grid-column:3;appearance:none;border:0;border-radius:11px;background:#101828;color:#fff;padding:12px 16px;font:inherit;font-weight:750;min-height:46px}.utility.single{grid-template-columns:1fr}.utility.single form{width:100%}code{word-break:break-all}@media(max-width:680px){.status-grid{grid-template-columns:1fr}.grid,.utility,.token-launcher{grid-template-columns:1fr}.token-launcher label,.token-launcher input,.token-launcher select,.token-launcher .primary{grid-column:1;grid-row:auto}.top h1{font-size:23px}.wrap{padding:12px 12px 32px}}
-</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>${webDiagHtmlEscapeV1184(cfDetail)}</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<section class="group"><h2>Token-specific diagnostics</h2><p class="launcher-copy">Paste a token contract address and open one of the existing protected token reports directly.</p><form class="token-launcher" method="post" action="/webdiag-token-open"><label for="token-v1190">Token contract</label><input id="token-v1190" name="token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x…" required pattern="0x[0-9a-fA-F]{40}"><label for="tool-v1190">Diagnostic</label><select id="tool-v1190" name="tool"><option value="telegramwhy">Telegram why</option><option value="marketwhy">Market why</option><option value="sendwhy">Send why</option></select><button class="primary" type="submit">Open token diagnostic</button></form></section><div class="utility single"><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Report controls:</b> protected long-form reports use the same owner UX throughout — <b>Copy full diagnostic</b>, <b>Download .txt</b> and <b>Diagnostics home</b>.</p><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
+</style></head><body><main class="wrap"><header class="top"><div class="eyebrow">Protected admin area</div><h1>ChainVanta Diagnostics</h1><p>Your browser is authorised for the current diagnostic window.</p><div class="status-grid"><div class="status"><b>Access authorised</b><span>ChainVanta secure browser session</span></div><div class="status"><b>${webDiagHtmlEscapeV1184(cfState)}</b><span>${webDiagHtmlEscapeV1184(cfDetail)}</span></div><div class="status"><b>Session expires</b><span>${expiry}</span></div></div></header>${cards}<section class="group"><h2>Token-specific diagnostics</h2><p class="launcher-copy">Paste a token contract address and open one of the existing protected token reports directly.</p><form class="token-launcher" method="post" action="/webdiag-token-open"><label for="token-v1190">Token contract</label><input id="token-v1190" name="token" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="0x…" required pattern="0x[0-9a-fA-F]{40}"><label for="tool-v1190">Diagnostic</label><select id="tool-v1190" name="tool"><option value="telegramwhy">Telegram why</option><option value="marketwhy">Market why</option><option value="sendwhy">Send why</option><option value="premiumwhy">Premium decision why</option></select><button class="primary" type="submit">Open token diagnostic</button></form></section><div class="utility single"><form method="post" action="/webdiag-logout"><button class="danger" type="submit">Log out this browser</button></form></div><p class="note"><b>Report controls:</b> protected long-form reports use the same owner UX throughout — <b>Copy full diagnostic</b>, <b>Download .txt</b> and <b>Diagnostics home</b>.</p><p class="note"><b>Emergency revoke:</b> <code>/webdiag off</code> in the authorised Admin Telegram immediately disables diagnostics and invalidates access for every authorised browser.</p></main></body></html>`;
 }
 
 function webDiagRouteCookieValueV1188(request){
@@ -202011,6 +202272,8 @@ function webDiagLongRouteV1179(path,state,env,url=null){
   if(path==="/calllab") return callQualityLaboratoryMessageV1222(state);
   if(path==="/callresearch") return professionalCallResearchLabMessageV1223(state);
   if(path==="/capturestatus") return researchCaptureStatusMessageV1224(state);
+  if(path==="/premiumfunnel") return premiumFunnelTelegramMessageV1233(state,url?.searchParams?.get("period")||url?.searchParams?.get("q")||"1h");
+  if(path==="/premiumwhy") return premiumWhyTelegramMessageV1240(state,url?.searchParams?.get("token")||url?.searchParams?.get("q")||"1h");
   return null;
 }
 
@@ -202028,6 +202291,8 @@ function webDiagRouteForCommandV1179(command){
     "/calllab":"/calllab",
     "/callresearch":"/callresearch",
     "/capturestatus":"/capturestatus",
+    "/premiumfunnel":"/premiumfunnel?period=1h",
+    "/premiumwhy":"/premiumwhy?q=1h",
     "/freequeue":"/freequeue",
     "/narrativeaudit":"/narrativeaudit",
     "/stripereconcile":"/stripereconcile-preview"
@@ -204182,7 +204447,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       const formV1190 = await request.formData();
       const tokenV1190 = String(formV1190.get("token")||"").trim();
       const toolV1190 = String(formV1190.get("tool")||"").trim().toLowerCase();
-      const toolMapV1190 = {telegramwhy:"/telegramwhy",marketwhy:"/marketwhy",sendwhy:"/sendwhy"};
+      const toolMapV1190 = {telegramwhy:"/telegramwhy",marketwhy:"/marketwhy",sendwhy:"/sendwhy",premiumwhy:"/premiumwhy"};
       if (!/^0x[0-9a-fA-F]{40}$/.test(tokenV1190) || !toolMapV1190[toolV1190]) {
         return new Response("Invalid token address or diagnostic selection.",{status:400,headers:{"content-type":"text/plain; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff"}});
       }
