@@ -1,3 +1,4 @@
+// V1244 — Retained Market/Liquidity Evidence Audit. Read-only provenance comparison; no new collection or provider requests.
 // V1243 — Premium Rejection Clarity. Builds from V1242. Adds bounded blocker-frequency summary, honest near-miss/rejection totals and owner guidance to read-only /premiumwhy and protected web mirror. No scanner, scoring, risk, provider, budget, premium delivery, payment or security changes.
 // V1242 — Clickable Premium WebDiag Handoff. Builds directly from deployed V1241; keeps the refined near-miss ranking and makes Premium Funnel / Premium Why Telegram responses use the same clickable “Full web copy” UX as established diagnostics. WebDiag remains closed-by-default and web-side protected. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1241 — Secure Premium Decision Intelligence Refinement. Builds directly from deployed V1240; refines near-miss ranking and adds secure WebDiag handoff links to Premium diagnostics. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
@@ -10101,7 +10102,7 @@
  *   memory isolation, authentication, request ceilings, provider/RPC use, scoring,
  *   thresholds, risk, Premium qualification, Telegram routing, payments and WebDiag unchanged.
  */
-const VERSION = "V1242";
+const VERSION = "V1244";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -179222,6 +179223,57 @@ function premiumWhyNearMissesV1241(state,rawWindow) {
     nearTotal:allNear.length,rejectedTotal:allRejected.length,topRejectBlockers};
 }
 
+/* V1244: audit retained decision-time evidence only. A contradictory retained
+   score/evidence view is a SUSPECT requiring inspection, not proven data loss.
+   A market status is never proof that an external source returned valid data. */
+function premiumMarketEvidenceAuditV1244(state,rawWindow) {
+  const w = premiumWhyWindowV1240(rawWindow);
+  const now = Date.now();
+  const records = Array.isArray(state?.qualificationAuditV663?.records) ? state.qualificationAuditV663.records : [];
+  let rows = records.filter(r=>r?.telegramQualified!==true);
+  if (w.label === "last") {
+    const latest=rows.reduce((m,r)=>Math.max(m,safeNumber(r?.lastEvaluatedAt)),0);
+    rows=latest?rows.filter(r=>safeNumber(r?.lastEvaluatedAt)>=latest-10*60*1000):[];
+  } else {
+    rows=rows.filter(r=>safeNumber(r?.lastEvaluatedAt)>=now-safeNumber(w.ms)&&safeNumber(r?.lastEvaluatedAt)<=now+5*60*1000);
+  }
+  const counts={retained:rows.length,marketVerified:0,marketGateFail:0,liquidityGateFail:0,
+    verifiedButMarketBlocked:0,finalEvidenceScoreMismatch:0,positiveLiquidityButBlocked:0,
+    missingMarketStatus:0,marketStatusPresent:0,marketSourceUnknown:0,marketMissingScoreBit:0};
+  const suspicious=[];
+  const statuses=new Map();
+  for(const r of rows){
+    const reasons=Array.isArray(r?.telegramReasons)?r.telegramReasons:[];
+    const ev=r?.evidenceCompletionAuditV727?.finalEvidence||{};
+    const score=r?.scoreAuditV725||{};
+    const verified=r?.marketVerified===true;
+    const finalVerified=ev?.marketVerified===true;
+    const gateMarket=reasons.includes("MARKET_UNVERIFIED");
+    const gateLiquidity=reasons.includes("LIQUIDITY_TOO_LOW_OR_UNVERIFIED");
+    const liquidity=Number(r?.liquidityUsd);
+    const positiveLiquidity=r?.liquidityUsd!==null&&r?.liquidityUsd!==undefined&&Number.isFinite(liquidity)&&liquidity>0;
+    const missingBit=Number.isFinite(Number(score?.missingMask)) && ((Number(score.missingMask)&SCORE_AUDIT_MISSING_MARKET_V725)!==0);
+    const status=String(r?.marketStatus||"").trim().slice(0,80);
+    counts.marketVerified+=verified?1:0;
+    counts.marketGateFail+=gateMarket?1:0;
+    counts.liquidityGateFail+=gateLiquidity?1:0;
+    counts.verifiedButMarketBlocked+=(verified&&gateMarket)?1:0;
+    counts.finalEvidenceScoreMismatch+=(finalVerified&&missingBit)?1:0;
+    counts.positiveLiquidityButBlocked+=(positiveLiquidity&&gateLiquidity)?1:0;
+    counts.marketMissingScoreBit+=missingBit?1:0;
+    counts.missingMarketStatus+=status?0:1;
+    counts.marketStatusPresent+=status?1:0;
+    counts.marketSourceUnknown+=1; // provenance/provider response not retained in this row
+    if(status)statuses.set(status,(statuses.get(status)||0)+1);
+    if((verified&&gateMarket)||(finalVerified&&missingBit)||(positiveLiquidity&&gateLiquidity)){
+      suspicious.push({symbol:String(r?.symbol||"UNKNOWN").slice(0,24),address:normalize(r?.address||""),
+        marketGate:gateMarket,liquidityGate:gateLiquidity,verified,finalVerified,positiveLiquidity,
+        missingBit,status});
+    }
+  }
+  return {window:w,counts,statuses:[...statuses.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5),suspicious:suspicious.slice(0,5)};
+}
+
 function premiumWhyBoolV1240(value) {
   return value === true ? "YES" : value === false ? "NO" : "UNVERIFIED";
 }
@@ -179229,7 +179281,7 @@ function premiumWhyBoolV1240(value) {
 function premiumWhyBulkMessageV1241(state,rawWindow) {
   const d = premiumWhyNearMissesV1241(state,rawWindow || "1h");
   const lines = [
-    `🧭 <b>ChainVanta Premium Why — V1243 · ${escapeHtml(d.window.label)}</b>`,
+    `🧭 <b>ChainVanta Premium Why — V1244 · ${escapeHtml(d.window.label)}</b>`,
     "",
     `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
     `Near-misses: <b>${d.nearTotal}</b> · Other rejects: <b>${d.rejectedTotal}</b>`,
@@ -179258,6 +179310,15 @@ function premiumWhyBulkMessageV1241(state,rawWindow) {
   if (!d.topRejectBlockers.length) lines.push("• No rejected blockers retained in this window.");
   d.topRejectBlockers.forEach((r,i)=>lines.push(`${i+1}. <code>${escapeHtml(r.reason)}</code> — ${r.count} rejected token${r.count===1?"":"s"}`));
   lines.push("Counts overlap: a token can fail several gates. These are explanations, not proposed threshold changes.");
+  const auditV1244=premiumMarketEvidenceAuditV1244(state,d.window.label);
+  const mc=auditV1244.counts;
+  lines.push("", "<b>🔬 V1244 Market/Liquidity evidence audit</b>",
+    `Retained rejects examined: <b>${mc.retained}</b> · market gate failed <b>${mc.marketGateFail}</b> · liquidity gate failed <b>${mc.liquidityGateFail}</b>`,
+    `Market verified in retained decision: <b>${mc.marketVerified}</b> · market status recorded: <b>${mc.marketStatusPresent}</b> · no status: <b>${mc.missingMarketStatus}</b>`,
+    `Potential retained-view contradictions: market verified but market blocked <b>${mc.verifiedButMarketBlocked}</b>; final evidence verified but score missing-market <b>${mc.finalEvidenceScoreMismatch}</b>; positive liquidity recorded but liquidity blocked <b>${mc.positiveLiquidityButBlocked}</b>`,
+    ...(auditV1244.statuses.length?["Top retained market statuses: "+auditV1244.statuses.map(([k,n])=>`${escapeHtml(k)} ×${n}`).join("; ")]:["Top retained market statuses: none recorded"]),
+    ...(auditV1244.suspicious.length?["Review potential contradictions: "+auditV1244.suspicious.map(x=>`${escapeHtml(x.symbol)} (${escapeHtml(x.address.slice(0,6))}…)`).join(", ")]:["No retained-view contradictions detected under these tests."]),
+    "Interpretation: zero contradictions does NOT establish that providers or collector handoffs worked. Decision rows do not retain provider responses; collection-origin failures remain UNDETERMINED. Positive liquidity alone does not prove minimum liquidity or freshness.");
   lines.push(
     "",
     "Use <code>/premiumwhy SYMBOL</code> or <code>/premiumwhy 0xTOKEN</code> for the full retained gate/evidence decision.",
@@ -181460,7 +181521,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
-    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1243 admin-only near-miss/reject separation + blocker-frequency summary + exact token decision (read-only)",
+    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1244 admin-only near-miss/reject + market/liquidity evidence audit + exact token decision (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
