@@ -1,3 +1,4 @@
+// V1252: Bitquery trial-expiry circuit breaker (opt-in reactivation only); scanner qualification and V1251 unchanged.
 // V1251: Forward-only shadow challenger recorded on newly successful calls; no production gating changes.
 // V1250 historical shadow replay: read-only and in-sample; live selection unchanged.
 // V1249 — /performance Telegram transport fix only; preserves V1248 scoring, providers, delivery, billing, security and production settings.
@@ -10495,6 +10496,17 @@ const POOL_MANAGER =
 
 const BITQUERY_GRAPHQL_V2 =
   "https://streaming.bitquery.io/graphql";
+
+/* V1252: expired trials must not generate periodic GraphQL/OAuth retries.
+   Re-enable only after purchasing/restoring access: set Cloudflare Worker
+   BITQUERY_ENTITLEMENT_ACTIVE=true. No secret or entitlement is inferred. */
+function bitqueryEntitlementActiveV1252(env) {
+  return String(env?.BITQUERY_ENTITLEMENT_ACTIVE || "").trim().toLowerCase() === "true";
+}
+function bitqueryExpiredResultV1252() {
+  return {attempted:false, status:"BITQUERY_DISABLED_EXPIRED_TRIAL_V1252", externalRequestsUsed:0, requestsUsed:0};
+}
+
 
 /*
  * V251 BITQUERY PROVIDER-WIDE HTTP 402 QUOTA COOLDOWN
@@ -34911,6 +34923,9 @@ let bitqueryOAuthBearerCacheV1161 = {
 };
 
 async function resolveBitqueryBearerV1161(env) {
+  if (!bitqueryEntitlementActiveV1252(env)) {
+    return {...bitqueryExpiredResultV1252(), token:null, authMode:"DISABLED", oauthAttempted:false, oauthHttpStatus:null};
+  }
   const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
   const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
   const manualToken = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
@@ -35020,7 +35035,7 @@ async function resolveBitqueryBearerV1161(env) {
 }
 
 function bitqueryConfiguredV1161(env) {
-  return Boolean(
+  return bitqueryEntitlementActiveV1252(env) && Boolean(
     (String(env?.BITQUERY_CLIENT_ID || "").trim() && String(env?.BITQUERY_CLIENT_SECRET || "").trim()) ||
     String(env?.BITQUERY_ACCESS_TOKEN || "").trim()
   );
@@ -138802,6 +138817,7 @@ function telegramAnalyseVerifiedUsdLinesV284(
    - Used only to prove current BITQUERY_ACCESS_TOKEN auth/connectivity.
    ========================================================= */
 async function bitqueryConnectivityTestV1010(env, state) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const token = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
 
   const base = {
@@ -139044,6 +139060,7 @@ function manualBitqueryWindowV285(rows, windowMs, nowMs, coverageComplete) {
 }
 
 async function manualBitqueryDirectionalUsdV285(env, budget, state, candidate) {
+  if (!bitqueryEntitlementActiveV1252(env)) return {...bitqueryExpiredResultV1252(), verified:false};
   const base = {
     attempted: false,
     verified: false,
@@ -182458,6 +182475,7 @@ async function bitqueryStageDeadlineV1159(promise, timeoutMs, label) {
 }
 
 async function bitqueryConnectivityTestV1159(env) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
   const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
   const manualToken = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
@@ -182597,6 +182615,7 @@ function bitqueryConnectivityMessageV1159(result) {
 }
 
 async function bitqueryConnectivityTestV1013(env) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const token = String(env?.BITQUERY_ACCESS_TOKEN || "").trim();
 
   const base = {
@@ -192229,6 +192248,7 @@ async function readBitqueryHttpTestV1016(env) {
 }
 
 async function runBitqueryHttpTestV1016(env) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const token =
     String(
       env?.BITQUERY_ACCESS_TOKEN || ""
@@ -194467,6 +194487,7 @@ function bitqueryUsageHealthV1059(percentages) {
 }
 
 async function bitqueryUsageMeterV1059(env) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const token = String(env?.BITQUERY_USAGE_TOKEN || "").trim();
   if (!token) {
     return {
@@ -194610,6 +194631,7 @@ const BITQUERY_OAUTH_TOKEN_URL_V1060 = "https://oauth2.bitquery.io/oauth2/token"
 const BITQUERY_GRAPHQL_URL_V1060 = "https://streaming.bitquery.io/graphql";
 
 async function bitqueryOAuthRobinhoodDiagnosticV1060(env) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
   const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
   const configured = Boolean(clientId && clientSecret);
@@ -194737,6 +194759,7 @@ function finiteNumberOrNullV1061(value) {
 }
 
 async function bitqueryRobinhoodSwapsDiagnosticV1061(env, url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const clientId = String(env?.BITQUERY_CLIENT_ID || "").trim();
   const clientSecret = String(env?.BITQUERY_CLIENT_SECRET || "").trim();
   const configured = Boolean(clientId && clientSecret);
@@ -195038,6 +195061,7 @@ function normalizeBitqueryRowsV1062(rows) {
 }
 
 async function bitqueryRobinhoodSwapsNormalizedDiagnosticV1062(env, url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const raw = await bitqueryRobinhoodSwapsDiagnosticV1061(env, url);
   if (!raw?.success) {
     return {
@@ -195270,6 +195294,7 @@ function economicReconstructBitqueryRowsV1063(rows) {
 }
 
 async function bitqueryRobinhoodEconomicFlowDiagnosticV1063(env, url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const raw = await bitqueryRobinhoodSwapsDiagnosticV1061(env, url);
   if (!raw?.success) {
     return {
@@ -195370,6 +195395,7 @@ function bitqueryRawSummaryV1064(rows) {
 }
 
 async function bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env, url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const startedAt=Date.now();
   const seed=await bitqueryRobinhoodSwapsDiagnosticV1061(env,url);
   if (!seed?.success) {
@@ -195639,6 +195665,7 @@ function transferEvidenceFromReceiptV1065(receipt, token, pools, decimals) {
 }
 
 async function bitqueryRpcCrosscheckV1065(env, url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const startedAt=Date.now();
   const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
   if (!base?.success || base?.completion?.boundaryComplete!==true) {
@@ -195808,6 +195835,7 @@ function v4SwapEvidenceFromReceiptV1066(receipt, token, quoteAddress, decimals) 
 }
 
 async function bitqueryV4PathCrosscheckV1066(env,url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const startedAt=Date.now();
   const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
   if (!base?.success || base?.completion?.boundaryComplete!==true) {
@@ -195951,6 +195979,7 @@ function decodeV4SwapWithResolvedPoolV1067(log, token, pool, decimals) {
 }
 
 async function bitqueryV4PoolIdentityCrosscheckV1067(env,url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const startedAt=Date.now();
   const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
   if (!base?.success || base?.completion?.boundaryComplete!==true) {
@@ -200974,6 +201003,7 @@ function amountDiffPctV1075(a,b) {
 }
 
 async function bitqueryV4TransactionCompleteCrosscheckV1075(env,url) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const startedAt=Date.now();
   const base=await bitqueryRobinhoodBoundaryCompleteDiagnosticV1064(env,url);
   if (!base?.success || base?.completion?.boundaryComplete!==true) {
@@ -201364,6 +201394,7 @@ function migrateBitqueryShadowStoreV1069(state) {
 }
 
 async function runBitqueryShadowFallbackV1069(env, state, candidates, scheduled) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const store = migrateBitqueryShadowStoreV1069(state);
   store.version = "V1069";
   store.mode = "SHADOW_PHASE_2";
@@ -201853,6 +201884,7 @@ function ensureBitqueryEstablishedStoreV1070(state) {
 }
 
 async function runBitqueryEstablishedShadowV1070(env, state, candidates, scheduled) {
+  if (!bitqueryEntitlementActiveV1252(env)) return bitqueryExpiredResultV1252();
   const store = ensureBitqueryEstablishedStoreV1070(state);
   store.version = "V1073";
   store.mode = "ACTIVITY_PRIORITISED_ESTABLISHED_RPC_VS_BITQUERY_SHADOW_BENCHMARK";
