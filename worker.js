@@ -1,4 +1,4 @@
-// V1231 — Entry-Priority Launch Verification: preserve V1230 entry verification first; launch verification runs only afterward and only with remaining analysis budget. No scoring/threshold/request-ceiling changes.
+// V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
 // V1228 — Customer Call Staging: distinguish Early Discovery from Verified Call using exact-pool entry proof; presentation/telemetry only, no scoring or provider-budget changes.
@@ -10040,7 +10040,7 @@
  * - no Telegram permission, scanner, scoring, risk, qualification, provider, request
  *   budget or alert-threshold behaviour is changed.
  */
-const VERSION = "V1231";
+const VERSION = "V1232";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -180892,7 +180892,7 @@ function telegramHelpV271() {
     "<code>/paymentgrace</code> — V1046 failed-payment 7-day grace audit (fixed per invoice)",
     "<code>/freequeue</code> — V1226 durable delayed Free-call queue + per-call delivery provenance (read-only)",
     "<code>/narrativeaudit [SYMBOL|0xTOKEN]</code> — V1227 narrative evidence provenance/cache (read-only)",
-    "<code>/launchverify</code> — V1231 entry-priority launch verification result (read-only)",
+    "<code>/launchverify [SYMBOL|0xTOKEN]</code> — V1232 requested-token launch-verification provenance; no argument shows latest result (read-only)",
     "<code>/entryverify</code> — V1230 last exact-pool/entry verification provenance, including already-verified outcomes (read-only)",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -180929,6 +180929,140 @@ function parseTelegramCommandV271(
     command,
     argument:
       parts.join(" ").trim()
+  };
+}
+
+
+/* =========================================================
+   V1232 — /launchverify TARGET RESOLVER
+   Diagnostic-only. Explicit token/symbol queries must never silently fall
+   through to an unrelated latest global result. Prefer the persisted per-call
+   customer baseline, then current watched-candidate provenance, then the latest
+   global result only when its token matches the explicit request.
+   ========================================================= */
+function launchVerifyDiagnosticSelectionV1232(state, rawQuery) {
+  const query = String(rawQuery || "").trim();
+  const latest = state?.immediateCustomerLaunchVerificationV1231 || null;
+
+  if (!query) {
+    return {
+      row: latest,
+      requested: null,
+      resolvedAddress: latest?.tokenAddress || null,
+      resolutionSource: latest ? "LATEST_GLOBAL_V1231" : "NONE",
+      resolutionStatus: latest ? "LATEST_RESULT" : "NO_RESULT"
+    };
+  }
+
+  let record = null;
+  let address = null;
+  let resolutionStatus = null;
+  const normalizedQuery = normalize(query);
+
+  if (isAddress(normalizedQuery)) {
+    address = normalizedQuery;
+    const registry = state?.callPerformanceV270 && typeof state.callPerformanceV270 === "object"
+      ? state.callPerformanceV270
+      : {};
+    record = Object.values(registry).find(r => normalize(r?.address || "") === address) || null;
+    resolutionStatus = record ? "MATCHED_ADDRESS" : "ADDRESS_NOT_IN_CALL_PERFORMANCE";
+  } else {
+    const resolved = resolveCallPerformanceV271(state, query);
+    resolutionStatus = resolved?.status || "NOT_FOUND";
+    if (resolved?.status === "AMBIGUOUS_SYMBOL") {
+      return {
+        row:null,
+        requested:query,
+        resolvedAddress:null,
+        resolutionSource:"NONE",
+        resolutionStatus:"AMBIGUOUS_SYMBOL"
+      };
+    }
+    record = resolved?.record || null;
+    address = normalize(record?.address || "");
+  }
+
+  if (!isAddress(address)) {
+    return {
+      row:null,
+      requested:query,
+      resolvedAddress:null,
+      resolutionSource:"NONE",
+      resolutionStatus:resolutionStatus || "NOT_FOUND"
+    };
+  }
+
+  // Preferred historical source: the exact successful call's frozen/latest
+  // customer baseline. This survives the token leaving the live watch list.
+  const baseline =
+    record?.latestCustomerCallBaselineV1175 ||
+    record?.entryCustomerCallBaselineV1175 ||
+    null;
+  const snapshot = baseline?.immediateLaunchVerificationV1231 || null;
+
+  if (snapshot) {
+    const beforeVerified = snapshot?.status === "LAUNCH_ALREADY_VERIFIED_V1231";
+    const afterVerified = snapshot?.verifiedNow === true || beforeVerified;
+    return {
+      row:{
+        version:"V1231",
+        runtimeVersion:"V1231",
+        tokenAddress:address,
+        symbol:record?.symbol || baseline?.symbol || null,
+        status:snapshot?.status || "UNKNOWN",
+        entryPriorityProtected:true,
+        before:{verified:beforeVerified},
+        after:{
+          verified:afterVerified,
+          protocol:snapshot?.protocol || null,
+          launchTime:snapshot?.launchTime || null
+        },
+        promotedFromUnverified:snapshot?.promotedFromUnverified === true,
+        completion:{
+          launchBlock:safeNumber(snapshot?.launchBlock) || null,
+          evidenceProtocol:snapshot?.protocol || null,
+          launchTime:snapshot?.launchTime || null
+        },
+        externalRequestsUsed:safeNumber(snapshot?.externalRequestsUsed),
+        historicalSnapshotV1232:true
+      },
+      requested:query,
+      resolvedAddress:address,
+      resolutionSource:"CALL_PERFORMANCE_BASELINE_V1175",
+      resolutionStatus:resolutionStatus || "MATCHED_CALL"
+    };
+  }
+
+  // Current watch-state candidate provenance, when still retained.
+  const watched = findWatched(state,address);
+  const watchedRow = watched?.immediateCustomerLaunchVerificationV1231 || null;
+  if (watchedRow) {
+    return {
+      row:watchedRow,
+      requested:query,
+      resolvedAddress:address,
+      resolutionSource:"WATCH_STATE_CANDIDATE",
+      resolutionStatus:resolutionStatus || "MATCHED_WATCH_STATE"
+    };
+  }
+
+  // Explicit queries may use the global row only when it is for the same token.
+  if (latest && normalize(latest?.tokenAddress || "") === address) {
+    return {
+      row:latest,
+      requested:query,
+      resolvedAddress:address,
+      resolutionSource:"LATEST_GLOBAL_TOKEN_MATCH_V1231",
+      resolutionStatus:resolutionStatus || "MATCHED_LATEST"
+    };
+  }
+
+  return {
+    row:null,
+    requested:query,
+    resolvedAddress:address,
+    resolutionSource:"NONE",
+    resolutionStatus:record ? "CALL_FOUND_NO_LAUNCH_SNAPSHOT" : (resolutionStatus || "NOT_FOUND")
   };
 }
 
@@ -182275,37 +182409,66 @@ async function telegramCommandReplyV271(
   // V1029: read-only delayed Free-call queue diagnostic. Admin reaches this
   // branch only; Premium/Free are intercepted by the V1025 member allowlist.
   if (parsed.command === "/launchverify") {
-    const loadedV1231 = await readState(env);
-    const rowV1231 = loadedV1231?.state?.immediateCustomerLaunchVerificationV1231 || null;
-    const replyV1231 = rowV1231
-      ? [
-          "🕒 <b>Immediate Launch Verification — V1231</b>",
-          "",
-          `Token: <b>${escapeHtml(rowV1231?.symbol || "UNKNOWN")}</b>`,
-          `Address: <code>${escapeHtml(rowV1231?.tokenAddress || "UNVERIFIED")}</code>`,
-          `Status: <b>${escapeHtml(rowV1231?.status || "UNKNOWN")}</b>`,
-          `Entry priority protected: <b>${rowV1231?.entryPriorityProtected===true?"YES":"NO"}</b>`,
-          `Already verified before pass: <b>${rowV1231?.before?.verified===true?"YES":"NO"}</b>`,
-          `Launch verified after: <b>${rowV1231?.after?.verified===true?"YES":"NO"}</b>`,
-          `Same-run promotion: <b>${rowV1231?.promotedFromUnverified===true?"YES":"NO"}</b>`,
-          `Protocol: <b>${escapeHtml(rowV1231?.after?.protocol || rowV1231?.completion?.evidenceProtocol || "UNVERIFIED")}</b>`,
-          `Launch block: <code>${rowV1231?.completion?.launchBlock || "UNVERIFIED"}</code>`,
-          `Launch time: <code>${escapeHtml(rowV1231?.after?.launchTime || rowV1231?.completion?.launchTime || "UNVERIFIED")}</code>`,
-          `Requests used: <b>${safeNumber(rowV1231?.externalRequestsUsed)}</b>`,
-          "",
-          "<i>Read-only. Entry verification always runs first. Launch verification only uses remaining analysis budget.</i>"
-        ].join("\n")
-      : "🕒 <b>Immediate Launch Verification — V1231</b>\n\nNo V1231 customer launch-verification attempt recorded yet.";
-    if (diagnosticV273) diagnosticV273.replyAttempted = true;
-    const sentV1231 = await sendTelegram(env, replyV1231, null, null);
-    if (diagnosticV273) {
-      diagnosticV273.replySuccess = sentV1231?.success === true;
-      diagnosticV273.telegramStatus = sentV1231?.status || null;
-      diagnosticV273.telegramMode = sentV1231?.mode || null;
-      diagnosticV273.telegramError = sentV1231?.error || null;
-      diagnosticV273.result = sentV1231?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    const loadedV1232 = await readState(env);
+    const selectionV1232 = launchVerifyDiagnosticSelectionV1232(
+      loadedV1232?.state || {},
+      parsed.argument || ""
+    );
+    const rowV1232 = selectionV1232?.row || null;
+
+    let replyV1232;
+    if (rowV1232) {
+      const requestedLine = selectionV1232?.requested
+        ? `Requested: <code>${escapeHtml(selectionV1232.requested)}</code>`
+        : "Requested: <b>LATEST</b>";
+      replyV1232 = [
+        "🕒 <b>Immediate Launch Verification — V1232</b>",
+        "",
+        requestedLine,
+        `Resolution source: <b>${escapeHtml(selectionV1232?.resolutionSource || "UNKNOWN")}</b>`,
+        `Resolution status: <b>${escapeHtml(selectionV1232?.resolutionStatus || "UNKNOWN")}</b>`,
+        `Token: <b>${escapeHtml(rowV1232?.symbol || "UNKNOWN")}</b>`,
+        `Address: <code>${escapeHtml(rowV1232?.tokenAddress || selectionV1232?.resolvedAddress || "UNVERIFIED")}</code>`,
+        `Status: <b>${escapeHtml(rowV1232?.status || "UNKNOWN")}</b>`,
+        `Entry priority protected: <b>${rowV1232?.entryPriorityProtected===true?"YES":"NO"}</b>`,
+        `Already verified before pass: <b>${rowV1232?.before?.verified===true?"YES":"NO"}</b>`,
+        `Launch verified after: <b>${rowV1232?.after?.verified===true?"YES":"NO"}</b>`,
+        `Same-run promotion: <b>${rowV1232?.promotedFromUnverified===true?"YES":"NO"}</b>`,
+        `Protocol: <b>${escapeHtml(rowV1232?.after?.protocol || rowV1232?.completion?.evidenceProtocol || "UNVERIFIED")}</b>`,
+        `Launch block: <code>${rowV1232?.completion?.launchBlock || "UNVERIFIED"}</code>`,
+        `Launch time: <code>${escapeHtml(rowV1232?.after?.launchTime || rowV1232?.completion?.launchTime || "UNVERIFIED")}</code>`,
+        `Requests used: <b>${safeNumber(rowV1232?.externalRequestsUsed)}</b>`,
+        "",
+        "<i>Read-only. Explicit token/symbol queries never fall through to an unrelated latest result. Entry verification still runs first in production; launch verification only uses remaining analysis budget.</i>"
+      ].join("\n");
+    } else {
+      const requested = selectionV1232?.requested || parsed.argument || "LATEST";
+      replyV1232 = [
+        "🕒 <b>Immediate Launch Verification — V1232</b>",
+        "",
+        `Requested: <code>${escapeHtml(requested)}</code>`,
+        `Resolution source: <b>${escapeHtml(selectionV1232?.resolutionSource || "NONE")}</b>`,
+        `Resolution status: <b>${escapeHtml(selectionV1232?.resolutionStatus || "NOT_FOUND")}</b>`,
+        selectionV1232?.resolvedAddress
+          ? `Resolved address: <code>${escapeHtml(selectionV1232.resolvedAddress)}</code>`
+          : "Resolved address: <b>NONE</b>",
+        "",
+        "No persisted launch-verification result was found for the requested token. The command did not substitute another token and made zero provider requests.",
+        "",
+        "<i>Read-only diagnostic. Use a contract address for an unambiguous lookup.</i>"
+      ].join("\n");
     }
-    return {success:sentV1231?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
+
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV1232 = await sendTelegram(env, replyV1232, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV1232?.success === true;
+      diagnosticV273.telegramStatus = sentV1232?.status || null;
+      diagnosticV273.telegramMode = sentV1232?.mode || null;
+      diagnosticV273.telegramError = sentV1232?.error || null;
+      diagnosticV273.result = sentV1232?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV1232?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0};
   }
 
   if (parsed.command === "/entryverify") {
