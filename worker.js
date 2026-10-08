@@ -1,3 +1,4 @@
+// V1243 — Premium Rejection Clarity. Builds from V1242. Adds bounded blocker-frequency summary, honest near-miss/rejection totals and owner guidance to read-only /premiumwhy and protected web mirror. No scanner, scoring, risk, provider, budget, premium delivery, payment or security changes.
 // V1242 — Clickable Premium WebDiag Handoff. Builds directly from deployed V1241; keeps the refined near-miss ranking and makes Premium Funnel / Premium Why Telegram responses use the same clickable “Full web copy” UX as established diagnostics. WebDiag remains closed-by-default and web-side protected. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1241 — Secure Premium Decision Intelligence Refinement. Builds directly from deployed V1240; refines near-miss ranking and adds secure WebDiag handoff links to Premium diagnostics. Scanner/scoring/risk/provider/Telegram qualification behavior unchanged.
 // V1239 — Heavy Scan Phase Checkpoints. Builds directly from deployed V1238; adds tiny KV phase checkpoints so a stalled scheduled heavy scan reveals the last completed internal phase. Scanner/scoring/risk/provider/Telegram behavior unchanged.
@@ -179205,7 +179206,20 @@ function premiumWhyNearMissesV1241(state,rawWindow) {
   views.sort(rank);
   const near = views.filter(r=>r.oneBlockerAway || r.evidenceOnly || r.blockerCount<=2).slice(0,8);
   const rejected = views.filter(r=>!(r.oneBlockerAway || r.evidenceOnly || r.blockerCount<=2)).slice(0,8);
-  return {window:w,total:views.length,near,rejected};
+  // V1243: Aggregate all retained rejects, not just the eight preview rows.
+  const allNear = views.filter(r=>r.oneBlockerAway || r.evidenceOnly || r.blockerCount<=2);
+  const allRejected = views.filter(r=>!(r.oneBlockerAway || r.evidenceOnly || r.blockerCount<=2));
+  const blockerCounts = new Map();
+  for (const row of allRejected) {
+    for (const reason of new Set((row.reasons||[]).map(x=>String(x||"UNSPECIFIED")))) {
+      blockerCounts.set(reason,(blockerCounts.get(reason)||0)+1);
+    }
+  }
+  const topRejectBlockers = [...blockerCounts.entries()]
+    .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]))
+    .slice(0,5).map(([reason,count])=>({reason,count}));
+  return {window:w,total:views.length,near,rejected,
+    nearTotal:allNear.length,rejectedTotal:allRejected.length,topRejectBlockers};
 }
 
 function premiumWhyBoolV1240(value) {
@@ -179215,9 +179229,10 @@ function premiumWhyBoolV1240(value) {
 function premiumWhyBulkMessageV1241(state,rawWindow) {
   const d = premiumWhyNearMissesV1241(state,rawWindow || "1h");
   const lines = [
-    `🧭 <b>ChainVanta Premium Why — V1242 · ${escapeHtml(d.window.label)}</b>`,
+    `🧭 <b>ChainVanta Premium Why — V1243 · ${escapeHtml(d.window.label)}</b>`,
     "",
     `Retained non-qualified tokens in window: <b>${safeNumber(d.total).toLocaleString("en-GB")}</b>`,
+    `Near-misses: <b>${d.nearTotal}</b> · Other rejects: <b>${d.rejectedTotal}</b>`,
     "Near-miss ranking: one-blocker-away → evidence-only unresolved → two blockers max. Clearly rejected tokens are separated below.",
     "",
     "<b>🔎 Genuine retained near-misses</b>"
@@ -179239,6 +179254,10 @@ function premiumWhyBulkMessageV1241(state,rawWindow) {
     const short = isAddress(r.address) ? `${r.address.slice(0,6)}…${r.address.slice(-4)}` : "UNVERIFIED";
     lines.push(`${i+1}. <b>${escapeHtml(r.symbol)}</b> <code>${escapeHtml(short)}</code> · ${r.blockerCount} blockers · Opp ${r.opportunity} · Conf ${r.confidence} · Risk ${r.riskVerified?r.riskScore:"UNVERIFIED"}`);
   });
+  lines.push("", "<b>📊 Most frequent blockers among other rejects</b>");
+  if (!d.topRejectBlockers.length) lines.push("• No rejected blockers retained in this window.");
+  d.topRejectBlockers.forEach((r,i)=>lines.push(`${i+1}. <code>${escapeHtml(r.reason)}</code> — ${r.count} rejected token${r.count===1?"":"s"}`));
+  lines.push("Counts overlap: a token can fail several gates. These are explanations, not proposed threshold changes.");
   lines.push(
     "",
     "Use <code>/premiumwhy SYMBOL</code> or <code>/premiumwhy 0xTOKEN</code> for the full retained gate/evidence decision.",
@@ -181441,7 +181460,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/premiumfunnel [last|1h|24h|7d]</code> — V1233 owner Premium decision funnel: seen → analysed → blocked → sent + why calls passed (read-only)",
-    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1242 admin-only near-miss/reject separation + exact token pass/fail decision (read-only)",
+    "<code>/premiumwhy [last|1h|24h|7d|SYMBOL|0xTOKEN]</code> — V1243 admin-only near-miss/reject separation + blocker-frequency summary + exact token decision (read-only)",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
