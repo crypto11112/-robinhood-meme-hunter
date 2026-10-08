@@ -1,4 +1,4 @@
-// V1233 — Premium Funnel Intelligence: bounded hourly diagnostic rollups + read-only /premiumfunnel owner report; scanner/scoring/risk/provider/Telegram behavior unchanged.
+// V1235 — Relay Body Parser & Diagnostic. Inherits V1234 relay keepalive and V1233 Premium Funnel Intelligence; scanner/scoring/risk/provider/Telegram behavior unchanged.
 // V1232 — LaunchVerify Target Resolver Fix: explicit /launchverify token/symbol queries resolve the requested persisted call snapshot; corrected V1231 entry-priority scanner behavior remains unchanged.
 // V1230 — Entry verification provenance fix: persist ALL V1229 verification outcomes, including already-verified and invalid-token early returns. No scanner/scoring/provider changes.
 // V1229 — Immediate Entry Verification & Promotion: qualified alerts get an immediate same-run exact-pool/entry verification attempt before customer rendering; verified stage transitions may promote through cooldown. No scoring/threshold/request-ceiling changes.
@@ -10042,8 +10042,8 @@
  *   budget or alert-threshold behaviour is changed.
  */
 /*
- * ChainVanta V1234 — SCHEDULED RELAY STREAM KEEPALIVE
- * - Builds directly from deployed V1233.
+ * ChainVanta V1235 — RELAY BODY PARSER & DIAGNOSTIC
+ * - Builds directly from deployed V1234.
  * - Targets the proven production failure where the scheduler alarm remains healthy
  *   but the isolated normal-Worker heavy-scan relay returns HTTP 503 with NO_JSON_BODY
  *   after a long-running scan.
@@ -10057,7 +10057,20 @@
  *   qualification, Telegram routing, request ceilings, watch capacity, Premium Funnel,
  *   payments or WebDiag security behavior is changed.
  */
-const VERSION = "V1234";
+/*
+ * V1235 RELAY BODY PARSER & DIAGNOSTIC
+ * - Builds directly from deployed V1234.
+ * - Fixes the proven post-V1234 scheduler failure V914_HEAVY_SCAN_RELAY_INVALID_BODY.
+ * - Scheduler relay now reads the streamed response as text, trims legal keepalive
+ *   whitespace, parses the complete JSON body, and has a strict suffix-recovery path
+ *   for harmless transport preamble bytes only when a complete JSON object is present.
+ * - Persists safe response metadata: HTTP status, content type, body size, parse method,
+ *   parse error and a redacted/truncated preview. No secrets or raw credentials are logged.
+ * - Keeps V1234 streamed keepalive and V914 memory isolation unchanged.
+ * - No provider/RPC requests, scoring, thresholds, risk, qualification, Telegram,
+ *   request ceilings, watch capacity, payments or WebDiag behavior changes.
+ */
+const VERSION = "V1235";
 const CHAINVANTA_DISPLAY_VERSION = "V1164"; // display-only; legacy VERSION remains untouched for scanner compatibility
 
 /* =========================================================
@@ -183319,7 +183332,14 @@ async function telegramCommandReplyV271(
       `Heartbeats / duration: <b>${safeNumber(lastV969?.v1234RelayKeepalive?.heartbeatCount)} / ${safeNumber(lastV969?.v1234RelayKeepalive?.durationMs)}ms</b>`,
       `Relay mode: <b>${escapeHtml(String(lastV969?.v1234RelayKeepalive?.mode || "N/A"))}</b>`,
       "",
-      "<i>Read-only. Zero provider requests and zero scanner writes. V1234 keeps the authenticated heavy-scan relay response body alive while preserving V914 memory isolation and all scanner/provider/scoring/risk/Telegram rules.</i>"
+      "🧾 <b>V1235 relay-body parser proof</b>",
+      `HTTP / body bytes: <b>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.httpStatus ?? "N/A"))} / ${safeNumber(lastV969?.v1235RelayBodyParse?.bodyBytes)}</b>`,
+      `Content type: <code>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.contentType || "N/A"))}</code>`,
+      `Parse OK / method: <b>${lastV969?.v1235RelayBodyParse?.parseOk === true ? "YES" : "NO"}</b> · <code>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.parseMethod || "N/A"))}</code>`,
+      `Parse error: <code>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.parseError || "NONE"))}</code>`,
+      `Safe preview: <code>${escapeHtml(String(lastV969?.v1235RelayBodyParse?.safePreview || "NONE"))}</code>`,
+      "",
+      "<i>Read-only. Zero provider requests and zero scanner writes. V1235 hardens only the scheduler↔relay response parser and exposes safe body diagnostics; scanner/provider/scoring/risk/Telegram rules remain unchanged.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -209101,6 +209121,84 @@ function compactHeavyScanRelayResultV914(
   };
 }
 
+
+function sanitizeRelayBodyPreviewV1235(text) {
+  let s = String(text || "");
+  s = s.replace(/0x[a-fA-F0-9]{40,64}/g, "0x…REDACTED");
+  s = s.replace(/[A-Za-z0-9_\-]{48,}/g, "…REDACTED…");
+  s = s.replace(/\s+/g, " ").trim();
+  return s.slice(0, 160);
+}
+
+async function parseHeavyScanRelayResponseV1235(response, attempt) {
+  const contentType = String(response?.headers?.get("content-type") || "");
+  const streamHeader = String(response?.headers?.get("x-chainvanta-relay-stream") || "");
+  let rawText = "";
+  let readError = null;
+  try {
+    rawText = await response.text();
+  } catch (error) {
+    readError = errorString(error);
+  }
+
+  const trimmed = String(rawText || "").trim();
+  let body = null;
+  let parseError = null;
+  let parseMethod = "NONE";
+
+  if (trimmed) {
+    try {
+      body = JSON.parse(trimmed);
+      parseMethod = "TRIMMED_FULL_BODY_JSON_V1235";
+    } catch (error) {
+      parseError = errorString(error);
+      // Defensive recovery for any harmless proxy/banner bytes before the final
+      // compact JSON object. We only accept a suffix that itself parses as one
+      // complete JSON object; we never guess or merge partial payloads.
+      const starts = [];
+      for (let i = 0; i < rawText.length; i++) {
+        if (rawText.charCodeAt(i) === 123) starts.push(i); // "{"
+      }
+      for (const pos of starts) {
+        const candidate = rawText.slice(pos).trim();
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            body = parsed;
+            parseMethod = "JSON_OBJECT_SUFFIX_RECOVERY_V1235";
+            parseError = null;
+            break;
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
+  const meta = {
+    version: "V1235",
+    attempt,
+    httpStatus: Number(response?.status) || null,
+    httpOk: response?.ok === true,
+    contentType: contentType.slice(0, 96) || "NONE",
+    relayStreamHeader: streamHeader.slice(0, 48) || "NONE",
+    bodyBytes: new TextEncoder().encode(String(rawText || "")).byteLength,
+    bodyChars: String(rawText || "").length,
+    trimmedChars: trimmed.length,
+    bodyEmpty: trimmed.length === 0,
+    readError: readError ? String(readError).slice(0, 160) : null,
+    parseOk: !!(body && typeof body === "object" && !Array.isArray(body)),
+    parseMethod,
+    parseError: parseError ? String(parseError).slice(0, 160) : null,
+    safePreview: sanitizeRelayBodyPreviewV1235(rawText)
+  };
+
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    body.v1235RelayBodyParse = meta;
+  }
+
+  return { body, meta };
+}
+
 function streamedHeavyScanRelayResponseV1234(runHeavyScanV1234, mode = "scheduled") {
   const encoderV1234 = new TextEncoder();
   const startedAtV1234 = Date.now();
@@ -209234,18 +209332,12 @@ async function relayHeavyScanOutsideSchedulerV914(
         }
       );
 
-    let body = null;
-
-    try {
-      body =
-        await response.json();
-    } catch (_) {
-      body = null;
-    }
+    const parsedV1235 = await parseHeavyScanRelayResponseV1235(response, attempt);
 
     return {
       response,
-      body
+      body: parsedV1235.body,
+      bodyParseV1235: parsedV1235.meta
     };
   };
 
@@ -209260,9 +209352,11 @@ async function relayHeavyScanOutsideSchedulerV914(
     }
     if (!first.body || typeof first.body !== "object") {
       throw new Error(
-        "V914_HEAVY_SCAN_RELAY_INVALID_BODY"
+        `V1235_HEAVY_SCAN_RELAY_INVALID_BODY:status=${first.response.status};bytes=${safeNumber(first.bodyParseV1235?.bodyBytes)};trimmed=${safeNumber(first.bodyParseV1235?.trimmedChars)};parse=${String(first.bodyParseV1235?.parseError || "NONE").slice(0,120)}`
       );
     }
+
+    first.body.v1235RelayBodyParse = first.bodyParseV1235 || first.body.v1235RelayBodyParse || null;
 
     first.body.v1173RelayRecovery = {
       enabled: true,
@@ -209308,7 +209402,7 @@ async function relayHeavyScanOutsideSchedulerV914(
 
   if (!second.body || typeof second.body !== "object") {
     throw new Error(
-      "V1173_HEAVY_SCAN_RELAY_RETRY_INVALID_BODY"
+      `V1235_HEAVY_SCAN_RELAY_RETRY_INVALID_BODY:status=${second.response.status};bytes=${safeNumber(second.bodyParseV1235?.bodyBytes)};trimmed=${safeNumber(second.bodyParseV1235?.trimmedChars)};parse=${String(second.bodyParseV1235?.parseError || "NONE").slice(0,120)}`
     );
   }
 
@@ -209317,6 +209411,8 @@ async function relayHeavyScanOutsideSchedulerV914(
       `V1234_HEAVY_SCAN_RELAY_EXECUTION_FAILED:${String(second.body?.error || second.body?.status || "UNKNOWN").slice(0, 180)}`
     );
   }
+
+  second.body.v1235RelayBodyParse = second.bodyParseV1235 || second.body.v1235RelayBodyParse || null;
 
   second.body.v1173RelayRecovery = {
     enabled: true,
@@ -209664,6 +209760,8 @@ export class ScanSchedulerV673 {
       },
       v1234RelayKeepalive:
         result?.v1234RelayKeepalive || null,
+      v1235RelayBodyParse:
+        result?.v1235RelayBodyParse || null,
       v1173RelayRecovery:
         result?.v1173RelayRecovery ||
         (failure
