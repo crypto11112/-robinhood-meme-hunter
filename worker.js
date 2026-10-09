@@ -1,4 +1,4 @@
-// ChainVanta V1267 — bounded active-token V179 retention fix with exact-USD verification unchanged.
+// ChainVanta V1268 — secure admin /analyse web snapshot, copy/download/home and Telegram handoff.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -186366,6 +186366,26 @@ async function telegramCommandReplyV271(
     reply =
       fresh.reply;
 
+    // V1268: Only an authorised Admin command can create a private web
+    // snapshot. Never create a snapshot for public /analyse or cooldown/error.
+    if (chatRoleV1025 === "ADMIN" &&
+        fresh?.telemetry?.status !== "COOLDOWN" &&
+        typeof reply === "string" &&
+        reply.length > 0) {
+      const controlV1268 = await webDiagControlReadV1193(env,state);
+      const snapshotPathV1268 = webDiagStillEnabledV1179(controlV1268)
+        ? await webDiagSaveAnalyseSnapshotV1268(env, parsed.argument, reply)
+        : null;
+      if (snapshotPathV1268) {
+        const grantV1268 = await webDiagIssueRouteGrantV1188(
+          env, controlV1268, snapshotPathV1268
+        );
+        // A failed grant does not disclose a bypass or impact Telegram analysis.
+        const linkV1268 = grantV1268 || `${WEB_DIAG_BASE_V1179}${snapshotPathV1268}`;
+        reply += `\n\n🔐 <b>Admin web analysis:</b> <a href="${escapeHtml(linkV1268)}">Open full analysis</a>\n<i>Copy · Download .txt · Diagnostics home. WebDiag authentication required.</i>`;
+      }
+    }
+
     if (diagnosticV273) {
       diagnosticV273
         .telegramAnalyseV276 =
@@ -203168,12 +203188,42 @@ async function webDiagControlWriteV1193(env,control){
 }
 
 const WEB_DIAG_BASE_V1179 = "https://robinhood-meme-hunter.johnd1987.workers.dev";
+// V1268: Admin-only /analyse snapshot. Separate short-lived KV record;
+// no change to autonomous scan state, manual analysis provider budget, or scoring.
+async function webDiagSaveAnalyseSnapshotV1268(env, query, reply) {
+  const {kv} = getKV(env);
+  if (!kv || typeof kv.put !== "function") return null;
+  const report = String(reply || "");
+  if (!report || report.length > 180000) return null;
+  const id = webDiagRandomSecretV1179(18);
+  if (!/^[a-f0-9]{36}$/i.test(id)) return null;
+  const key = "cv_admin_analyse_v1268_" + id;
+  try {
+    await kv.put(key, JSON.stringify({
+      version:"V1268", query:String(query||"").slice(0,100),
+      capturedAt:Date.now(), reply:report
+    }), {expirationTtl:86400});
+    return "/webdiag-analyse?id=" + encodeURIComponent(id);
+  } catch (_) { return null; }
+}
+
+async function webDiagReadAnalyseSnapshotV1268(env, id) {
+  if (!/^[a-f0-9]{36}$/i.test(String(id||""))) return null;
+  const {kv} = getKV(env);
+  if (!kv || typeof kv.get !== "function") return null;
+  try {
+    const raw = await kv.get("cv_admin_analyse_v1268_" + id);
+    const row = raw ? JSON.parse(raw) : null;
+    return row && row.version === "V1268" && typeof row.reply === "string" ? row : null;
+  } catch (_) { return null; }
+}
+
 const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/telegramwhy","/marketwhy","/sendwhy",
   "/scheduler-status-v673","/scheduler-start-v673",
   "/telegramaudit","/evidenceaudit","/scorehandoff","/rescoreaudit",
   "/riskaudit","/holderaudit","/marketaudit","/performance",
-  "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel",
+  "/webdiag-home","/webdiag-token-open","/webdiag-outcomeintel","/webdiag-analyse",
   "/callquality","/calllab","/callresearch","/capturestatus","/freequeue","/narrativeaudit","/stripereconcile-preview","/premiumfunnel","/premiumwhy",
 
   // V1210: legacy/internal diagnostic and operational inspection routes must
@@ -205974,6 +206024,26 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         "referrer-policy":"no-referrer",
         "content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
       }});
+    }
+
+    // V1268: display the exact Telegram /analyse result already saved.
+    // Opening, copying or downloading does not run fresh provider requests.
+    if (path === "/webdiag-analyse") {
+      if (request.method !== "GET") return new Response("Method not allowed",{status:405});
+      const snapshotV1268 = await webDiagReadAnalyseSnapshotV1268(
+        env, url.searchParams.get("id")
+      );
+      if (!snapshotV1268) return webDiagTextResponseV1179(
+        "Analysis snapshot not found or expired. Run /analyse in the Admin Telegram again.",404
+      );
+      const headingV1268 = "🔬 ChainVanta Token Analysis — V1268\n" +
+        "Query: " + snapshotV1268.query + "\n" +
+        "Captured: " + new Date(snapshotV1268.capturedAt).toISOString() + "\n\n";
+      const contentV1268 = headingV1268 + snapshotV1268.reply;
+      if (url.searchParams.get("download") === "1") {
+        return webDiagDownloadResponseV1184(contentV1268,"chainvanta-token-analysis.txt");
+      }
+      return webDiagHtmlResponseV1184("ChainVanta Token Analysis",contentV1268,url);
     }
 
     if (path === "/webdiag-outcomeintel") {
