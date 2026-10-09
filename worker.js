@@ -1,3 +1,4 @@
+// V1254: preserve forward-only V1251 shadow decisions across V270 performance updates; no backfill.
 // V1253: read-only first-hour crash evidence triage; zero external calls, no live gating changes.
 // V1252: Bitquery trial-expiry circuit breaker (opt-in reactivation only); scanner qualification and V1251 unchanged.
 // V1251: Forward-only shadow challenger recorded on newly successful calls; no production gating changes.
@@ -110341,6 +110342,9 @@ function buildCallPerformanceRecordV270(
     entryPriceUsd,
     entryMarketCap,
     entrySignalSnapshotV309,
+    // V1254: retain the immutable entry-time challenger across every V270 rebuild.
+    // No retrospective reconstruction from later market observations.
+    shadowDecisionV1251: existing?.shadowDecisionV1251 ?? null,
     entryTelegramDeliveryProofV412,
     latestSuccessfulTelegramDeliveryV412,
     entryCustomerCallBaselineV1175,
