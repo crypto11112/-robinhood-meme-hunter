@@ -1,3 +1,4 @@
+// V1255: Admin-protected bounded 20s V3 WebSocket swap observation; no live scanner, collector, risk, Telegram or provider-budget changes.
 // V1254: preserve forward-only V1251 shadow decisions across V270 performance updates; no backfill.
 // V1253: read-only first-hour crash evidence triage; zero external calls, no live gating changes.
 // V1252: Bitquery trial-expiry circuit breaker (opt-in reactivation only); scanner qualification and V1251 unchanged.
@@ -188719,6 +188720,95 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
 
 
 
+/* V1255 — Read-only bounded V3 live swap observation. No persistent collector. */
+async function v3AlchemyWebSocketObserveV1255(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput || "");
+  const out = {
+    version: "V1255", diagnostic: "V3_ALCHEMY_BOUNDED_LIVE_SWAP_OBSERVATION_V1255",
+    safe: true, writes: 0, kvWrites: 0, collectorMutated: false,
+    telegramMutated: false, token, pair: null, provider: "ALCHEMY_ROBINHOOD_WEBSOCKET_ONLY",
+    apiKeyConfigured: Boolean(env.ALCHEMY_API_KEY), websocketUrlExposed: false,
+    maximumObservationMs: 20000, observationMs: 0, connectionOpened: false,
+    subscriptionAccepted: false, subscriptionIdPresent: false, swapsObserved: 0,
+    distinctTransactions: 0, duplicates: 0, removedLogs: 0, malformedMessages: 0,
+    firstSwapReceiptMs: null, lastSwapReceiptMs: null, firstSwapBlock: null,
+    lastSwapBlock: null, websocketMessages: 0, status: "UNTESTED_V1255"
+  };
+  if (!/^0x[a-f0-9]{40}$/.test(token)) { out.status = "INVALID_TOKEN_ADDRESS_V1255"; return out; }
+  if (!env.ALCHEMY_API_KEY) { out.status = "ALCHEMY_API_KEY_NOT_CONFIGURED_V1255"; return out; }
+  try {
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress || "");
+    out.pairStatus = pairCache?.status || null;
+    if (!/^0x[a-f0-9]{40}$/.test(pair)) { out.status = "VERIFIED_V3_POOL_UNAVAILABLE_V1255"; return out; }
+    out.pair = pair;
+    // One bounded connection. This diagnostic does not start the production collector.
+    const ws = new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(env.ALCHEMY_API_KEY)}`);
+    const unique = new Set();
+    const txs = new Set();
+    const observed = await new Promise((resolve) => {
+      let finished = false, observationStarted = 0, hardTimer, sampleTimer;
+      const end = (status) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(hardTimer); clearTimeout(sampleTimer);
+        if (observationStarted) out.observationMs = Date.now() - observationStarted;
+        try { ws.close(1000, "V1255 bounded observation finished"); } catch (_) {}
+        resolve(status);
+      };
+      hardTimer = setTimeout(() => end("HARD_DEADLINE_REACHED_V1255"), 25000);
+      ws.addEventListener("open", () => {
+        out.connectionOpened = true;
+        try {
+          ws.send(JSON.stringify({jsonrpc:"2.0",id:1255,method:"eth_subscribe",params:["logs",{address:pair,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
+        } catch (_) { end("SUBSCRIPTION_SEND_FAILED_V1255"); }
+      });
+      ws.addEventListener("message", (event) => {
+        out.websocketMessages++;
+        let msg;
+        try { msg = JSON.parse(typeof event.data === "string" ? event.data : ""); }
+        catch (_) { out.malformedMessages++; return; }
+        if (msg?.id === 1255) {
+          if (msg?.error) { out.rpcErrorCode = msg.error.code ?? null; return end("SUBSCRIPTION_REJECTED_V1255"); }
+          if (typeof msg.result === "string" && msg.result.length > 2) {
+            out.subscriptionAccepted = true; out.subscriptionIdPresent = true;
+            observationStarted = Date.now();
+            sampleTimer = setTimeout(() => end("OBSERVATION_COMPLETE_V1255"), 20000);
+          }
+          return;
+        }
+        if (!out.subscriptionAccepted || msg?.method !== "eth_subscription") return;
+        const log = msg?.params?.result;
+        if (!log || normalize(log.address || "") !== pair || normalize(log.topics?.[0] || "") !== normalize(UNISWAP_V3_SWAP_TOPIC_V326)) return;
+        const txHash = normalize(log.transactionHash || "");
+        const logIndex = String(log.logIndex || "");
+        if (!/^0x[a-f0-9]{64}$/.test(txHash) || !logIndex) { out.malformedMessages++; return; }
+        const eventKey = txHash + ":" + logIndex;
+        if (unique.has(eventKey)) { out.duplicates++; return; }
+        unique.add(eventKey); txs.add(txHash);
+        if (log.removed === true) out.removedLogs++;
+        out.swapsObserved++;
+        out.distinctTransactions = txs.size;
+        const t = Date.now() - startedAt;
+        if (out.firstSwapReceiptMs === null) { out.firstSwapReceiptMs = t; out.firstSwapBlock = log.blockNumber || null; }
+        out.lastSwapReceiptMs = t; out.lastSwapBlock = log.blockNumber || null;
+      });
+      ws.addEventListener("error", () => end("WEBSOCKET_ERROR_V1255"));
+      ws.addEventListener("close", () => end("CLOSED_EARLY_V1255"));
+    });
+    out.status = observed;
+    out.noSwapsInterpretation = out.swapsObserved === 0 ? "NO_SWAPS_OBSERVED_IN_SHORT_WINDOW_NOT_A_SUBSCRIPTION_FAILURE" : null;
+    out.eventLatencyInterpretation = "RECEIPT_ELAPSED_SINCE_DIAGNOSTIC_START_NOT_BLOCK_TO_RECEIPT_LATENCY";
+    out.httpLedgerComparison = "NOT_PERFORMED_NO_ADDITIONAL_RPC_REQUESTS";
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V1255";
+    out.error = String(error?.message || error).slice(0, 180).replace(/\/v2\/[^\\s]+/g,"/v2/[REDACTED]");
+  }
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* ============================================================
    V375 — EXACT TRANSACTION V3 ROUTE / POOL RECONCILIATION
    Read-only diagnostic for a known transaction hash.
@@ -202152,7 +202242,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/v4completeaudit","/v4manualflowaudit","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
-  "/v3websocket-diagnostic","/v3multipool-diagnostic","/v3aggregation-diagnostic",
+  "/v3websocket-diagnostic","/v3websocket-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
   "/v3route-aggregation-diagnostic","/v3tx-diagnostic","/v3reconcile-diagnostic",
   "/v3multipool-plan","/v3multipool-shadow-start","/v3multipool-shadow-status",
   "/v3live-start","/v3live-status","/v3live-windows","/v3live-stop",
@@ -203766,6 +203856,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     );
   }
 
+
+  if (path === "/v3websocket-observe") {
+    return jsonResponse(await v3AlchemyWebSocketObserveV1255(env, url.searchParams.get("token") || ""));
+  }
 
   if (
     path ===
