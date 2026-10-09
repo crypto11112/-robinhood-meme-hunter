@@ -1,4 +1,4 @@
-// ChainVanta V1266 — V1265 production baseline + all-touched V179 retention proof.
+// ChainVanta V1267 — bounded active-token V179 retention fix with exact-USD verification unchanged.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -11162,8 +11162,16 @@ const NATIVE_ETH_DECIMALS_V192 = 18;
  * evidence while preventing a handful of active tokens from consuming most
  * of the single KV state value.
  */
-const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 1000;
-const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 8;
+/*
+ * V1267: V1266 proved 69 of 77 exact-USD-active tokens were evicted by
+ * the 8-token cap in one real scan. Rebalance the existing bounded
+ * single-KV-value ledger from 8 x 1000 to 96 x 96 (9,216 max rows).
+ * This preserves more active token identities without unbounded growth.
+ * All existing verification, 26h expiry, watch/scoring/Telegram gates stay.
+ * A per-token record cap is NOT a complete-window proof.
+ */
+const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 96;
+const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 96;
 const ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 =
   26 * 60 * 60 * 1000;
 
