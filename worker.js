@@ -1,3 +1,4 @@
+// V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
 // V1255: Admin-protected bounded 20s V3 WebSocket swap observation; no live scanner, collector, risk, Telegram or provider-budget changes.
@@ -188845,87 +188846,99 @@ async function v3AlchemyWebSocketObserveV1256(env, tokenInput) {
   return out;
 }
 
-/* V1258 — protected read-only activity-ranked V3 WebSocket verification.
+/* V1259 — protected read-only activity-ranked V3 WebSocket verification.
    Caller supplies up to five token addresses already examined by ChainVanta.
    No token/pool is admitted without the existing V329 verified-pair cache.
-   One eth_blockNumber plus up to five Alchemy Free-compatible (10-block) eth_getLogs requests; no state writes.
+   One eth_blockNumber plus up to thirty Alchemy Free-compatible (10-block) eth_getLogs requests; no state writes.
    The winning pool is observed by the unchanged V1256 receipt-parity test.
 */
-async function v3ActiveWebSocketObserveV1258(env, tokenInputs) {
+async function v3ActiveWebSocketObserveV1259(env, tokenInputs) {
   const started = Date.now();
   const supplied = String(tokenInputs || "").split(/[\s,;]+/).map(x => normalize(x)).filter(Boolean);
   const tokens = [...new Set(supplied)].slice(0, 5);
   const result = {
-    version: "V1258", diagnostic: "VERIFIED_V3_ACTIVITY_RANKED_WEBSOCKET_OBSERVATION_V1258",
+    version: "V1259", diagnostic: "VERIFIED_V3_ACTIVITY_RANKED_WEBSOCKET_OBSERVATION_V1259",
     safe: true, writes: 0, kvWrites: 0, collectorMutated: false, telegramMutated: false,
-    maximumCandidates: 5, recentBlockWindow: 10, preflightMaximumRpcRequests: 6,
+    maximumCandidates: 5, recentBlockWindow: 60, chunkSizeBlocks: 10, maximumActivityLogRequests: 30, preflightMaximumRpcRequests: 31, activityLogRequests: 0, windowsChecked: 0,
     candidatesSupplied: supplied.length, candidatesChecked: 0, candidates: [],
-    chosenToken: null, chosenPair: null, headBlock: null, status: "UNTESTED_V1258",
+    chosenToken: null, chosenPair: null, headBlock: null, status: "UNTESTED_V1259",
     observation: null, elapsedMs: null
   };
-  if (supplied.length > 5) { result.status = "TOO_MANY_TOKENS_MAX_5_V1258"; return result; }
+  if (supplied.length > 5) { result.status = "TOO_MANY_TOKENS_MAX_5_V1259"; return result; }
   if (!tokens.length || tokens.some(x => !/^0x[a-f0-9]{40}$/.test(x))) {
-    result.status = "PROVIDE_1_TO_5_VALID_TOKEN_ADDRESSES_V1258"; return result;
+    result.status = "PROVIDE_1_TO_5_VALID_TOKEN_ADDRESSES_V1259"; return result;
   }
   const rpcUrl = v356AlchemyUrl(env);
-  if (!rpcUrl || !env.ALCHEMY_API_KEY) { result.status = "ALCHEMY_RPC_OR_WEBSOCKET_NOT_CONFIGURED_V1258"; return result; }
+  if (!rpcUrl || !env.ALCHEMY_API_KEY) { result.status = "ALCHEMY_RPC_OR_WEBSOCKET_NOT_CONFIGURED_V1259"; return result; }
   try {
     // Cache-only selection. Do not initiate pool discovery, mutate registries, or perform scanning.
     for (const token of tokens) {
       const cached = await loadVerifiedV3PairIdentityV329(env, token);
       const pair = cached?.valid ? normalize(cached?.record?.pairAddress || "") : "";
       result.candidates.push({token, pair: /^0x[a-f0-9]{40}$/.test(pair) ? pair : null,
-        verifiedPair: !!cached?.valid, pairStatus: cached?.status || null, recentSwaps: null,
+        verifiedPair: !!cached?.valid, pairStatus: cached?.status || null, recentSwaps: null, blocksChecked: 0,
         activityStatus: cached?.valid ? "PENDING" : "NO_VALID_VERIFIED_PAIR_CACHE"});
     }
     const valid = result.candidates.filter(x => x.verifiedPair);
-    if (!valid.length) { result.status = "NO_VERIFIED_V3_POOLS_IN_CANDIDATES_V1258"; return result; }
+    if (!valid.length) { result.status = "NO_VERIFIED_V3_POOLS_IN_CANDIDATES_V1259"; return result; }
     const head = await v356RawAlchemyRpc(rpcUrl, "eth_blockNumber", [], 4500);
     if (!head?.ok || !/^0x[0-9a-f]+$/i.test(String(head.result || ""))) {
-      result.status = "HEAD_BLOCK_UNAVAILABLE_V1258"; return result;
+      result.status = "HEAD_BLOCK_UNAVAILABLE_V1259"; return result;
     }
     const headNumber = parseInt(head.result, 16);
-    if (!Number.isSafeInteger(headNumber)) { result.status = "INVALID_HEAD_BLOCK_V1258"; return result; }
+    if (!Number.isSafeInteger(headNumber)) { result.status = "INVALID_HEAD_BLOCK_V1259"; return result; }
     result.headBlock = headNumber;
-    const fromBlock = "0x" + Math.max(0, headNumber - 9).toString(16);
-    const toBlock = "0x" + headNumber.toString(16);
-    // Alchemy Robinhood Free eth_getLogs limit: <=10 blocks inclusive per call.
-    // Sequential bounded activity checks avoid bursts and minimise provider load.
-    for (const candidate of valid) {
-      const scan = await v356RawAlchemyRpc(rpcUrl, "eth_getLogs", [{
-        fromBlock, toBlock, address: candidate.pair, topics: [UNISWAP_V3_SWAP_TOPIC_V326]
-      }], 4500);
-      result.candidatesChecked++;
-      if (!scan?.ok || !Array.isArray(scan.result)) {
-        candidate.activityStatus = "UNVERIFIED_RPC";
-        candidate.rpcStatus = scan?.httpStatus ?? null;
-        candidate.rpcErrorCode = scan?.rpcErrorCode ?? null;
-      } else {
-        candidate.recentSwaps = scan.result.filter(log =>
-          normalize(log?.address || "") === candidate.pair &&
-          normalize(log?.topics?.[0] || "") === normalize(UNISWAP_V3_SWAP_TOPIC_V326) &&
-          log?.removed !== true
-        ).length;
-        candidate.activityStatus = "VERIFIED_RECENT_LOGS";
+    // Search progressively older 10-block windows (maximum 60 inclusive).
+    // Each window tests every verified candidate, then stops when at least one
+    // shows actual Swap logs. Never request a span wider than 10 blocks.
+    let eligible = [];
+    for (let offset = 0; offset < 60 && !eligible.length; offset += 10) {
+      const toNumber = headNumber - offset;
+      if (toNumber < 0) break;
+      const fromNumber = Math.max(0, toNumber - 9);
+      const fromBlock = "0x" + fromNumber.toString(16);
+      const toBlock = "0x" + toNumber.toString(16);
+      result.windowsChecked++;
+      for (const candidate of valid) {
+        if (result.activityLogRequests >= result.maximumActivityLogRequests) break;
+        const scan = await v356RawAlchemyRpc(rpcUrl, "eth_getLogs", [{
+          fromBlock, toBlock, address: candidate.pair, topics: [UNISWAP_V3_SWAP_TOPIC_V326]
+        }], 4500);
+        result.activityLogRequests++;
+        result.candidatesChecked++;
+        if (!scan?.ok || !Array.isArray(scan.result)) {
+          candidate.activityStatus = "UNVERIFIED_RPC";
+          candidate.rpcStatus = scan?.httpStatus ?? null;
+          candidate.rpcErrorCode = scan?.rpcErrorCode ?? null;
+        } else {
+          const found = scan.result.filter(log =>
+            normalize(log?.address || "") === candidate.pair &&
+            normalize(log?.topics?.[0] || "") === normalize(UNISWAP_V3_SWAP_TOPIC_V326) &&
+            log?.removed !== true
+          ).length;
+          candidate.recentSwaps = (candidate.recentSwaps ?? 0) + found;
+          candidate.blocksChecked += toNumber - fromNumber + 1;
+          candidate.activityStatus = "VERIFIED_RECENT_LOGS";
+        }
       }
+      eligible = valid.filter(x => x.activityStatus === "VERIFIED_RECENT_LOGS" && x.recentSwaps > 0);
     }
-    const eligible = valid.filter(x => x.activityStatus === "VERIFIED_RECENT_LOGS" && x.recentSwaps > 0);
     eligible.sort((a,b) => b.recentSwaps - a.recentSwaps);
     if (!eligible.length) {
       result.status = valid.some(x => x.activityStatus === "UNVERIFIED_RPC")
-        ? "POOL_ACTIVITY_UNVERIFIED_RPC_V1258" : "NO_RECENT_SWAP_IN_10_BLOCK_WINDOW_V1258";
+        ? "POOL_ACTIVITY_PARTIALLY_UNVERIFIED_RPC_V1259" : "NO_RECENT_SWAP_IN_60_BLOCK_WINDOW_V1259";
       return result;
     }
     const selected = eligible[0];
     result.chosenToken = selected.token;
     result.chosenPair = selected.pair;
-    result.status = "ACTIVITY_RANKED_OBSERVATION_COMPLETE_V1258";
+    result.status = "ACTIVITY_RANKED_OBSERVATION_COMPLETE_V1259";
     result.observation = await v3AlchemyWebSocketObserveV1256(env, selected.token);
     if (result.observation?.pair !== selected.pair) {
-      result.status = "PAIR_IDENTITY_CHANGED_ABORT_V1258";
+      result.status = "PAIR_IDENTITY_CHANGED_ABORT_V1259";
     }
   } catch (e) {
-    result.status = "DIAGNOSTIC_ERROR_V1258";
+    result.status = "DIAGNOSTIC_ERROR_V1259";
     result.error = String(e?.message || e).replace(/(?:https?|wss):\/\/[^\s]+/g,"[REDACTED_URL]").slice(0,150);
   } finally {
     result.elapsedMs = Date.now() - started;
@@ -203982,7 +203995,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
 
 
   if (path === "/v3websocket-active-observe") {
-    return jsonResponse(await v3ActiveWebSocketObserveV1258(env, url.searchParams.get("tokens") || ""));
+    return jsonResponse(await v3ActiveWebSocketObserveV1259(env, url.searchParams.get("tokens") || ""));
   }
 
   if (path === "/v3websocket-observe") {
