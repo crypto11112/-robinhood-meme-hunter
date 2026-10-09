@@ -1,4 +1,4 @@
-// ChainVanta V1264 — V1263 production baseline + same-range exact-pool coverage proof.
+// ChainVanta V1265 — V1264 production baseline + targeted V179 retention/eviction trace.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51708,6 +51708,56 @@ async function v4FlowWatchHandoffV1261(env, tokenInput="", poolInput="") {
 }
 
 
+
+// V1265: read-only view of the production V179 retention trace.
+// The production trace itself reuses already-fetched logs and the normal state save.
+async function v4V179RetentionTraceV1265(env) {
+  const out = {
+    version: "V1265",
+    diagnostic: "V4_V179_RETENTION_EVICTION_TRACE",
+    safe: true,
+    kvReads: 0,
+    kvWrites: 0,
+    externalRequestsUsed: 0,
+    scannerMutatedByEndpoint: false,
+    telegramMutated: false,
+    traceAvailable: false,
+    trace: null,
+    status: "NOT_TESTED"
+  };
+
+  let loaded;
+  try {
+    loaded = await readState(env);
+    out.kvReads = 1;
+  } catch (error) {
+    return {
+      ...out,
+      kvReads: 1,
+      status: "STATE_READ_FAILED",
+      error: errorString(error)
+    };
+  }
+
+  const trace = loaded?.state?.v4V179RetentionTraceV1265 || null;
+  out.traceAvailable = !!trace;
+  out.trace = trace;
+
+  if (!trace) {
+    out.status = "AWAITING_NEXT_PRODUCTION_SCAN";
+  } else if (safeNumber(trace?.targetSwapLogsSeen) <= 0) {
+    out.status = "AWAITING_TARGET_POOL_ACTIVITY_IN_PRODUCTION_BATCH";
+  } else if (trace?.firstObservedStage === "TARGET_EVICTED_BY_V179_TOKEN_RETENTION_CAP") {
+    out.status = "V179_TOKEN_RETENTION_EVICTION_PROVEN";
+  } else if (trace?.firstObservedStage === "TARGET_SURVIVED_V179_RETENTION") {
+    out.status = "TARGET_SURVIVED_RETENTION";
+  } else {
+    out.status = String(trace?.firstObservedStage || "TRACE_AVAILABLE");
+  }
+
+  return out;
+}
+
 // V1264: one-request, read-only same-range proof.
 // It independently asks the configured V4 RPC for the exact PoolId over the
 // identical block coverage captured from the most recent production live scan.
@@ -54531,6 +54581,21 @@ function collectOnChainDirectionalSwapsV179(
   const candidateQuoteIdentitySamplesV202 = [];
   const candidateQuoteIdentitySampleLimitV202 = 20;
 
+  // V1265 diagnostic-only trace for the currently active SYNTHS exact V4 pool.
+  // Reuses the production logs already being processed: zero extra provider calls.
+  const traceTokenV1265 =
+    "0x61e0deba0a6bd1d0df92af816739449c861e3cce";
+  const tracePoolV1265 =
+    "0xeac7a9ef9babd0ca9a579d30fe194c31dfbdca970e0531977308cc2429768b0e";
+  let traceTargetSwapLogsV1265 = 0;
+  let traceRegistryEligibleV1265 = 0;
+  let traceDecodedV1265 = 0;
+  let traceExactUsdV1265 = 0;
+  let traceStorageEligibleV1265 = 0;
+  let traceInsertedV1265 = 0;
+  let traceDeduplicatedV1265 = 0;
+  let traceFirstRejectV1265 = null;
+
   for (
     const log
     of logs ||
@@ -54552,6 +54617,13 @@ function collectOnChainDirectionalSwapsV179(
         log?.topics?.[1]
       );
 
+    const traceTargetPoolLogV1265 =
+      poolIdV180 === tracePoolV1265;
+
+    if (traceTargetPoolLogV1265) {
+      traceTargetSwapLogsV1265++;
+    }
+
     const poolV180 =
       state
         ?.poolRegistry
@@ -54571,6 +54643,9 @@ function collectOnChainDirectionalSwapsV179(
       )
     ) {
       rejectionReasons.UNKNOWN_POOL_IDENTITY++;
+      if (traceTargetPoolLogV1265 && !traceFirstRejectV1265) {
+        traceFirstRejectV1265 = "UNKNOWN_POOL_IDENTITY";
+      }
       continue;
     }
 
@@ -54597,6 +54672,9 @@ function collectOnChainDirectionalSwapsV179(
       amount1V180 === 0n
     ) {
       rejectionReasons.AMOUNT_DECODE_OR_ZERO++;
+      if (traceTargetPoolLogV1265 && !traceFirstRejectV1265) {
+        traceFirstRejectV1265 = "AMOUNT_DECODE_OR_ZERO";
+      }
       continue;
     }
 
@@ -54611,6 +54689,9 @@ function collectOnChainDirectionalSwapsV179(
       )
     ) {
       rejectionReasons.SAME_SIGN_DELTAS++;
+      if (traceTargetPoolLogV1265 && !traceFirstRejectV1265) {
+        traceFirstRejectV1265 = "SAME_SIGN_DELTAS";
+      }
       continue;
     }
 
@@ -54643,9 +54724,21 @@ function collectOnChainDirectionalSwapsV179(
       );
 
     if (
+      traceTargetPoolLogV1265 &&
+      identityResolvableV180
+    ) {
+      traceRegistryEligibleV1265++;
+    }
+
+    if (
       !identityResolvableV180
     ) {
       rejectionReasons.CANDIDATE_QUOTE_IDENTITY_UNRESOLVED++;
+
+      if (traceTargetPoolLogV1265 && !traceFirstRejectV1265) {
+        traceFirstRejectV1265 =
+          "CANDIDATE_QUOTE_IDENTITY_UNRESOLVED";
+      }
 
       if (
         candidateQuoteIdentitySamplesV202.length <
@@ -54731,10 +54824,23 @@ function collectOnChainDirectionalSwapsV179(
       !trade?.verified
     ) {
       rejectionReasons.DIRECTION_INCONSISTENT++;
+      if (traceTargetPoolLogV1265 && !traceFirstRejectV1265) {
+        traceFirstRejectV1265 = "DIRECTION_INCONSISTENT";
+      }
       continue;
     }
 
     decoded++;
+
+    if (
+      traceTargetPoolLogV1265 &&
+      normalize(trade?.candidateAddress) === traceTokenV1265
+    ) {
+      traceDecodedV1265++;
+      if (trade?.exactUsdVerified === true) {
+        traceExactUsdV1265++;
+      }
+    }
 
     if (
       trade.side ===
@@ -54799,6 +54905,14 @@ function collectOnChainDirectionalSwapsV179(
       continue;
     }
 
+    const traceTargetTradeV1265 =
+      traceTargetPoolLogV1265 &&
+      token === traceTokenV1265;
+
+    if (traceTargetTradeV1265) {
+      traceStorageEligibleV1265++;
+    }
+
     touchedTokens.add(
       token
     );
@@ -54834,6 +54948,9 @@ function collectOnChainDirectionalSwapsV179(
       )
     ) {
       deduplicated++;
+      if (traceTargetTradeV1265) {
+        traceDeduplicatedV1265++;
+      }
       continue;
     }
 
@@ -54897,11 +55014,75 @@ function collectOnChainDirectionalSwapsV179(
 
       records
     };
+
+    if (traceTargetTradeV1265) {
+      traceInsertedV1265++;
+    }
   }
+
+  const tracePrePruneTokenCountV1265 =
+    Object.keys(store).length;
+  const tracePrePruneTargetPresentV1265 =
+    Boolean(store[traceTokenV1265]);
+  const tracePrePruneTargetRowsV1265 =
+    Array.isArray(store?.[traceTokenV1265]?.records)
+      ? store[traceTokenV1265].records.length
+      : 0;
 
   pruneOnChainDirectionalStoreV179(
     state
   );
+
+  const tracePostPruneStoreV1265 =
+    onChainDirectionalStoreV179(state);
+  const tracePostPruneTokenCountV1265 =
+    Object.keys(tracePostPruneStoreV1265).length;
+  const tracePostPruneTargetPresentV1265 =
+    Boolean(tracePostPruneStoreV1265[traceTokenV1265]);
+  const tracePostPruneTargetRowsV1265 =
+    Array.isArray(tracePostPruneStoreV1265?.[traceTokenV1265]?.records)
+      ? tracePostPruneStoreV1265[traceTokenV1265].records.length
+      : 0;
+
+  state.v4V179RetentionTraceV1265 = {
+    version: "V1265",
+    capturedAt: Date.now(),
+    tokenAddress: traceTokenV1265,
+    poolId: tracePoolV1265,
+    targetSwapLogsSeen: traceTargetSwapLogsV1265,
+    targetRegistryEligibleLogs: traceRegistryEligibleV1265,
+    targetDecodedTrades: traceDecodedV1265,
+    targetExactUsdVerifiedTrades: traceExactUsdV1265,
+    targetStorageEligibleTrades: traceStorageEligibleV1265,
+    targetInsertedTrades: traceInsertedV1265,
+    targetDeduplicatedTrades: traceDeduplicatedV1265,
+    targetFirstReject: traceFirstRejectV1265,
+    maxLedgerTokens: ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179,
+    prePruneTokenCount: tracePrePruneTokenCountV1265,
+    prePruneTargetPresent: tracePrePruneTargetPresentV1265,
+    prePruneTargetRows: tracePrePruneTargetRowsV1265,
+    postPruneTokenCount: tracePostPruneTokenCountV1265,
+    postPruneTargetPresent: tracePostPruneTargetPresentV1265,
+    postPruneTargetRows: tracePostPruneTargetRowsV1265,
+    firstObservedStage:
+      traceTargetSwapLogsV1265 === 0
+        ? "TARGET_POOL_NOT_IN_THIS_PRODUCTION_BATCH"
+        : traceRegistryEligibleV1265 === 0
+          ? (traceFirstRejectV1265 || "TARGET_REGISTRY_IDENTITY_REJECTED")
+          : traceDecodedV1265 === 0
+            ? (traceFirstRejectV1265 || "TARGET_DECODE_FAILED")
+            : traceExactUsdV1265 === 0
+              ? "TARGET_DECODED_BUT_NO_EXACT_USD"
+              : !tracePrePruneTargetPresentV1265
+                ? "TARGET_NOT_PRESENT_BEFORE_RETENTION_PRUNE"
+                : !tracePostPruneTargetPresentV1265
+                  ? "TARGET_EVICTED_BY_V179_TOKEN_RETENTION_CAP"
+                  : "TARGET_SURVIVED_V179_RETENTION",
+    noExtraProviderRequests: true,
+    extraKvWrites: 0,
+    scoringChanged: false,
+    telegramMutated: false
+  };
 
   return {
     enabled:
@@ -202748,7 +202929,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -204152,6 +204333,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4v179-retention-trace") {
+    return jsonResponse(await v4V179RetentionTraceV1265(env));
   }
 
   if (path === "/v4liveoutput-coverage-trace") {
