@@ -1,4 +1,4 @@
-// ChainVanta V1268 — secure admin /analyse web snapshot, copy/download/home and Telegram handoff.
+// ChainVanta V1269 — bounded SYNTHS production ingestion and persisted-ledger continuity trace.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51781,6 +51781,45 @@ async function v4V179AllTouchedRetentionTraceV1266(env) {
   return out;
 }
 
+// V1269: persisted view of 16 consecutive real production V179 runs.
+// No extra provider requests; the endpoint only reads existing KV state.
+async function v4SYNTHSIngestionHistoryV1269(env) {
+  const loaded = await readState(env);
+  const state = loaded?.state || {};
+  const history = Array.isArray(state.v4SYNTHSIngestionHistoryV1269)
+    ? state.v4SYNTHSIngestionHistoryV1269 : [];
+  const token = "0x61e0deba0a6bd1d0df92af816739449c861e3cce";
+  const pool = "0xeac7a9ef9babd0ca9a579d30fe194c31dfbdca970e0531977308cc2429768b0e";
+  const records = state?.onChainDirectionalV179?.[token]?.records;
+  const latest = history.length ? history[history.length - 1] : null;
+  const observed = history.filter(x => Number(x?.targetPoolSwapLogs || 0) > 0);
+  return {
+    version: "V1269",
+    diagnostic: "SYNTHS_V179_PRODUCTION_INGESTION_CONTINUITY",
+    safe: true,
+    kvReads: 1,
+    kvWrites: 0,
+    externalRequestsUsed: 0,
+    scannerMutatedByEndpoint: false,
+    telegramMutated: false,
+    tokenAddress: token,
+    poolId: pool,
+    runsRecorded: history.length,
+    runsWithTargetPoolLogs: observed.length,
+    targetLogsObservedAcrossRuns: history.reduce((n,x)=>n+Number(x?.targetPoolSwapLogs||0),0),
+    latestRun: latest,
+    history,
+    persistedStorePathChecked: "onChainDirectionalV179",
+    persistedStorePathNote: "Check against existing V1262 ledger diagnostic if this key differs from the V179 canonical store.",
+    persistedLedgerRowsAtThisPath: Array.isArray(records) ? records.length : 0,
+    status: !latest ? "AWAITING_PRODUCTION_SCAN" :
+      observed.length === 0 ? "NO_TARGET_POOL_SWAPS_OBSERVED_IN_RECORDED_PRODUCTION_BATCHES" :
+      observed.some(x => Number(x.targetExactUsd||0)>0 && Number(x.postPruneRows||0)>0) ?
+        "TARGET_EXACT_USD_REACHED_POST_PRUNE_LEDGER_AT_LEAST_ONCE" :
+      "TARGET_SWAPS_OBSERVED_BUT_NOT_IN_POST_PRUNE_LEDGER"
+  };
+}
+
 // V1265: read-only view of the production V179 retention trace.
 // The production trace itself reuses already-fetched logs and the normal state save.
 async function v4V179RetentionTraceV1265(env) {
@@ -55197,6 +55236,31 @@ function collectOnChainDirectionalSwapsV179(
     scoringChanged: false,
     telegramMutated: false
   };
+
+  // V1269: bounded, passive SYNTHS run history. Saved only by the existing
+  // production state-save path; does not request logs or force a watch.
+  const historyV1269 = Array.isArray(state.v4SYNTHSIngestionHistoryV1269)
+    ? state.v4SYNTHSIngestionHistoryV1269
+    : [];
+  const sampleV1269 = {
+    at: now,
+    inputSwapLogs: swapLogsSeen,
+    targetPoolSwapLogs: traceTargetSwapLogsV1265,
+    targetRegistryEligible: traceRegistryEligibleV1265,
+    targetDecoded: traceDecodedV1265,
+    targetExactUsd: traceExactUsdV1265,
+    targetInserted: traceInsertedV1265,
+    targetDeduplicated: traceDeduplicatedV1265,
+    firstReject: traceFirstRejectV1265,
+    prePruneRows: tracePrePruneTargetRowsV1265,
+    postPruneRows: tracePostPruneTargetRowsV1265,
+    postPrunePresent: tracePostPruneTargetPresentV1265,
+    totalLedgersAfterPrune: tracePostPruneTokenCountV1265,
+    ledgerCapacity: ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179,
+    stage: state.v4V179RetentionTraceV1265.firstObservedStage
+  };
+  historyV1269.push(sampleV1269);
+  state.v4SYNTHSIngestionHistoryV1269 = historyV1269.slice(-16);
 
   const exactUsdSurvivedPostPruneV1266 =
     exactUsdPresentPrePruneV1266.filter(
@@ -203232,7 +203296,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -204636,6 +204700,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4synths-ingestion-history") {
+    return jsonResponse(await v4SYNTHSIngestionHistoryV1269(env));
   }
 
   if (path === "/v4v179-alltouched-retention") {
