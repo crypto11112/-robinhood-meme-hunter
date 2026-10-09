@@ -1,4 +1,5 @@
-// ChainVanta V1271 — production live-range attribution and log provenance diagnostic; no scanner behaviour changes.
+// ChainVanta V1278 — verified V4 directional USD to scoring handoff audit; protected, read-only; no scanner or scoring behaviour changes.
+// V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51942,6 +51943,73 @@ async function v4DirectionalLedgerAuditV1277(env) {
       verifiedDirectionalRows:all.filter(r=>r.token==='0x61e0deba0a6bd1d0df92af816739449c861e3cce').length},
     interpretation:'Counts only persisted exact-USD verified buy/sell ledger rows. It does not prove the scoring engine consumed them or that the last collector batch equals the ledger snapshot.',
     nextCheck:'If verified ledger rows exist, inspect scoring handoff for those token addresses. If absent despite collector exact-USD counts, investigate V179 insertion and persistence.'};
+}
+
+// V1278: read-only V179/V212-to-scoring handoff correlation. This is a
+// snapshot comparison, not proof of execution-order consumption.
+async function v4DirectionalScoreHandoffV1278(env) {
+  const base={version:'V1278',diagnostic:'V4_VERIFIED_DIRECTIONAL_SCORE_HANDOFF',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try { loaded=await readState(env); } catch(e) {return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};}
+  if(loaded?.error) return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{}, now=Date.now(), round=n=>Math.round(n*100)/100;
+  const store=state.onChainDirectionalV179&&typeof state.onChainDirectionalV179==='object'?state.onChainDirectionalV179:{};
+  const audits=Array.isArray(state?.qualificationAuditV663?.records)?state.qualificationAuditV663.records:[];
+  const auditByToken=new Map();
+  for(const row of audits){
+    const token=normalize(row?.address||'');
+    if(!isAddress(token))continue;
+    const at=Number(row?.lastEvaluatedAt||row?.firstEvaluatedAt||0);
+    if(!auditByToken.has(token)||at>Number(auditByToken.get(token)?.lastEvaluatedAt||auditByToken.get(token)?.firstEvaluatedAt||0)) auditByToken.set(token,row);
+  }
+  const rows=[];
+  for(const [token,ledger] of Object.entries(store)){
+    if(!isAddress(normalize(token)))continue;
+    const recent=(Array.isArray(ledger?.records)?ledger.records:[]).filter(r=>
+      r?.exactUsdVerified===true && (r?.side==='buy'||r?.side==='sell') &&
+      Number(r?.exactUsdAmount)>0 && Number(r?.observedAt)>now-3600000 && Number(r?.observedAt)<=now &&
+      normalize(r?.candidateAddress)===normalize(token));
+    if(!recent.length)continue;
+    const candidate={address:normalize(token)};
+    const flow=candidateVerifiedOnChainFlowV212(candidate,state);
+    const audit=auditByToken.get(normalize(token))||null;
+    const ev=audit?.evidenceCompletionAuditV727||{};
+    const score=audit?.scoreAuditV725||{};
+    const lastAt=audit?Number(audit?.lastEvaluatedAt||audit?.firstEvaluatedAt||0):null;
+    const buys=recent.filter(r=>r.side==='buy'),sells=recent.filter(r=>r.side==='sell');
+    const buyUsd=round(buys.reduce((n,r)=>n+Number(r.exactUsdAmount),0));
+    const sellUsd=round(sells.reduce((n,r)=>n+Number(r.exactUsdAmount),0));
+    rows.push({token:normalize(token),ledgerVerified1h:recent.length,buyTrades1h:buys.length,sellTrades1h:sells.length,
+      buyUsd1h:buyUsd,sellUsd1h:sellUsd,netUsd1h:round(buyUsd-sellUsd),
+      v212Verified:flow?.verified===true,v212RecordCount:Number(flow?.recordCount||0),
+      v212OneHourTrades:Number(flow?.windows?.h1?.observedTrades??flow?.windows?.oneHour?.observedTrades??0),
+      qualificationAuditPresent:!!audit,qualificationLastEvaluatedAt:lastAt,
+      auditAfterLatestLedgerRow:lastAt!==null&&lastAt>=Math.max(...recent.map(r=>Number(r.observedAt))),
+      opportunityScore:audit?Number(audit.opportunityScore??0):null,
+      confidenceScore:audit?Number(audit.confidenceScore??0):null,
+      missingScoreMask:audit?Number(score?.missingMask??0):null,
+      momentumVerifiedInAudit:ev?.finalEvidence?.momentumVerified===true,
+      v212VerifiedInAudit:ev?.finalEvidence?.verifiedFlowV212===true || audit?.verifiedFlowV212===true,
+      telegramReasons:audit&&Array.isArray(audit.telegramReasons)?audit.telegramReasons.slice(0,8):[],
+      handoffStatus:!flow?.verified?'V212_NOT_VERIFIED_FROM_LEDGER':!audit?'NO_RETAINED_QUALIFICATION_AUDIT':
+        lastAt<Math.max(...recent.map(r=>Number(r.observedAt)))?'AUDIT_PREDATES_LATEST_LEDGER_EVIDENCE':
+        'V212_VERIFIED_AND_LATER_AUDIT_PRESENT_CONSUMPTION_NOT_PROVEN'});
+  }
+  rows.sort((a,b)=>b.ledgerVerified1h-a.ledgerVerified1h||a.token.localeCompare(b.token));
+  const post=state.lastV254PostRecoveryScoreV809||null;
+  return {...base,status:rows.length?'VERIFIED_LEDGER_TOKENS_CORRELATED':'NO_RECENT_VERIFIED_LEDGER_TOKENS',
+    tokensWithVerifiedLedger1h:rows.length,
+    tokensWithV212Verified:rows.filter(r=>r.v212Verified).length,
+    tokensWithQualificationAudit:rows.filter(r=>r.qualificationAuditPresent).length,
+    tokensWithLaterQualificationAudit:rows.filter(r=>r.auditAfterLatestLedgerRow).length,
+    latestPostRecoveryScore:post?{address:normalize(post.address||''),recomputeApplied:post.recomputeApplied===true,
+      verifiedFlow:post.verifiedFlow===true,verifiedRecordCount:Number(post.verifiedRecordCount||0),
+      recomputeSource:post.recomputeSource||null}:null,
+    topTokens:rows.slice(0,20),truncated:rows.length>20,
+    limitations:['V212 is recalculated from saved V179 records; this alone does not prove scoring consumed it.',
+      'Qualification audit may predate newer ledger evidence or omit candidate scoring internals.',
+      'No provider calls, rescoring or production mutations occur.']};
 }
 
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
@@ -203670,7 +203738,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205074,6 +205142,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4directional-score-handoff") {
+    return jsonResponse(await v4DirectionalScoreHandoffV1278(env));
   }
 
   if (path === "/v4directional-ledger-audit") {
