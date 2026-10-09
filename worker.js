@@ -1,4 +1,4 @@
-// ChainVanta V1269 — bounded SYNTHS production ingestion and persisted-ledger continuity trace.
+// ChainVanta V1270 — SYNTHS same-production-range coverage evidence, with on-demand exact-pool RPC parity.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51779,6 +51779,66 @@ async function v4V179AllTouchedRetentionTraceV1266(env) {
   }
 
   return out;
+}
+
+// V1270: on-demand exact PoolId RPC check against the SAME saved production
+// requested range. Does not run in the scanner. At most one external RPC
+// request, and never substitutes an inferred range when coverage is unknown.
+async function v4SYNTHSProductionRangeParityV1270(env) {
+  const base = {
+    version: 'V1270', diagnostic: 'SYNTHS_SAME_PRODUCTION_RANGE_EXACT_POOL_PARITY',
+    safe: true, kvReads: 0, kvWrites: 0, stateWrites: 0,
+    scannerMutated: false, telegramMutated: false,
+    externalRequestsUsed: 0, exactPoolSwaps: null,
+    productionPoolSwaps: null, status: 'NOT_TESTED'
+  };
+  let loaded;
+  try { loaded = await readState(env); base.kvReads = 1; }
+  catch (error) { return {...base, status: 'STATE_READ_FAILED', error: errorString(error)}; }
+  const history = loaded?.state?.v4SYNTHSIngestionHistoryV1269;
+  const latest = Array.isArray(history) && history.length ? history[history.length-1] : null;
+  const coverage = latest?.productionCoverageV1270 || null;
+  base.productionCapturedAt = latest?.at || null;
+  base.productionPoolSwaps = latest?.targetPoolSwapLogs ?? null;
+  base.productionInputSwaps = latest?.inputSwapLogs ?? null;
+  base.coverage = coverage;
+  if (!coverage) return {...base, status: 'AWAITING_V1270_PRODUCTION_SCAN'};
+  const from = coverage.coveredFrom;
+  const to = coverage.coveredTo;
+  base.fromBlock = from;
+  base.toBlock = to;
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from <= 0 || to < from)
+    return {...base, status: 'PRODUCTION_COVERAGE_UNPROVEN_NO_RPC_SENT'};
+  if (to - from + 1 > 600)
+    return {...base, status: 'PRODUCTION_RANGE_OVER_600_BLOCKS_NO_RPC_SENT'};
+  if (coverage.scanSuccess !== true)
+    return {...base, status: 'PRODUCTION_SCAN_NOT_SUCCESSFUL_NO_RPC_SENT'};
+  const rpc = v4PoolLiveRpcEndpointV767(env);
+  base.rpcProvider = rpc.name;
+  const pool = '0xeac7a9ef9babd0ca9a579d30fe194c31dfbdca970e0531977308cc2429768b0e';
+  const result = await v4PoolLiveRpcCallV767(rpc.url, 'eth_getLogs', [{
+    address: POOL_MANAGER,
+    fromBlock: '0x' + from.toString(16),
+    toBlock: '0x' + to.toString(16),
+    topics: [SWAP_TOPIC, pool]
+  }]);
+  base.externalRequestsUsed = 1;
+  base.httpStatus = result?.httpStatus ?? null;
+  if (!result?.ok) return {...base, status: 'EXACT_POOL_RPC_FAILED', error: String(result?.error || 'UNKNOWN').slice(0,180)};
+  const rows = Array.isArray(result.result) ? result.result : [];
+  base.exactPoolSwaps = rows.length;
+  base.exactResultsPossiblyCapped = rows.length >= 1000;
+  base.status = rows.length > 0 && base.productionPoolSwaps === 0
+    ? 'EXACT_POOL_SWAPS_MISSING_FROM_SAVED_PRODUCTION_INPUT'
+    : rows.length === base.productionPoolSwaps
+      ? 'SAME_RANGE_COUNTS_MATCH'
+      : 'SAME_RANGE_COUNT_DIFFERENCE_INVESTIGATE';
+  base.limits = [
+    'Comparison uses the last saved V1270 production range, not the current chain head.',
+    'If production used multiple noncontiguous ranges, the bounding interval can include unscanned blocks.',
+    'The exact-pool query is on-demand only; it is not added to scheduled scanning.'
+  ];
+  return base;
 }
 
 // V1269: persisted view of 16 consecutive real production V179 runs.
@@ -116036,6 +116096,48 @@ for (
     };
   } catch (_v1264TraceError) {
     // Diagnostics must never interrupt production scans.
+  }
+
+  // V1270: snapshot actual production scan bounds alongside the existing
+  // V1269 V179 trace. Passive: no additional RPC calls or state writes.
+  try {
+    const historyV1270 = state.v4SYNTHSIngestionHistoryV1269;
+    if (Array.isArray(historyV1270) && historyV1270.length) {
+      const latestV1270 = historyV1270[historyV1270.length - 1];
+      const allLogsV1270 = Array.isArray(liveOutput?.logs) ? liveOutput.logs : [];
+      const swapBlocksV1270 = allLogsV1270
+        .filter(row => normalize(row?.topics?.[0]) === SWAP_TOPIC)
+        .map(row => {
+          const value = row?.blockNumber;
+          return typeof value === 'string' && value.startsWith('0x')
+            ? Number.parseInt(value, 16) : Number(value);
+        }).filter(Number.isSafeInteger);
+      const rangesV1270 = Array.isArray(liveOutput?.ranges) ? liveOutput.ranges : [];
+      const validBoundsV1270 = rangesV1270.map(r => ({
+        from: safeNumber(r?.fromBlock), to: safeNumber(r?.toBlock),
+        provider: String(r?.provider || '')
+      })).filter(r => Number.isSafeInteger(r.from) && Number.isSafeInteger(r.to) && r.from > 0 && r.to >= r.from);
+      latestV1270.productionCoverageV1270 = {
+        requestedFrom: Number(live?.from ?? 0n),
+        requestedTo: Number(live?.to ?? 0n),
+        processedThrough: liveScan?.processedThrough == null ? null : Number(liveScan.processedThrough),
+        effectiveTo: liveScan?.effectiveTo == null ? null : Number(liveScan.effectiveTo),
+        scanSuccess: liveScan?.success === true,
+        scanError: liveScan?.error || null,
+        rangesRecorded: rangesV1270.length,
+        validRanges: validBoundsV1270.length,
+        coveredFrom: validBoundsV1270.length ? Math.min(...validBoundsV1270.map(r => r.from)) : null,
+        coveredTo: validBoundsV1270.length ? Math.max(...validBoundsV1270.map(r => r.to)) : null,
+        providerNames: [...new Set(validBoundsV1270.map(r => r.provider).filter(Boolean))],
+        minReturnedSwapBlock: swapBlocksV1270.length ? Math.min(...swapBlocksV1270) : null,
+        maxReturnedSwapBlock: swapBlocksV1270.length ? Math.max(...swapBlocksV1270) : null,
+        returnedSwapCount: swapBlocksV1270.length,
+        globalResultsPossiblyCapped: swapBlocksV1270.length >= 1000,
+        note: 'Returned log block bounds are not proof of complete requested-range coverage.'
+      };
+    }
+  } catch (_v1270PassiveTraceError) {
+    // A diagnostic must never interrupt production scanning.
   }
 
   onChainDirectionalV179
@@ -203296,7 +203398,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -204700,6 +204802,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4synths-range-parity") {
+    return jsonResponse(await v4SYNTHSProductionRangeParityV1270(env));
   }
 
   if (path === "/v4synths-ingestion-history") {
