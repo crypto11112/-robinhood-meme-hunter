@@ -51603,6 +51603,52 @@ async function v4Erc20MetaV771(rpcUrl, token) {
 // No KV access/writes, scoring changes, watch registration, or Telegram sends.
 // V1261: zero-provider, read-only trace from persisted V179 ledger through V212 and V570 watch.
 // This does not assert that live V771 swaps were persisted as verified USD trades.
+// V1262: persisted-state-only trace of the existing V179 live ingestion gates.
+// This does not replay logs, request providers, or mutate autonomous state.
+async function v4V179IngestionTraceV1262(env, tokenInput="", poolInput="") {
+  const token=normalize(tokenInput),poolId=normalize(poolInput);
+  const out={version:"V1262",diagnostic:"V4_V179_INGESTION_PERSISTENCE_TRACE",safe:true,
+    kvReads:0,kvWrites:0,externalRequestsUsed:0,stateWrites:0,scannerMutated:false,telegramMutated:false,
+    tokenAddress:isAddress(token)?token:null,poolId:isBytes32HexV765(poolId)?poolId:null,
+    registryPoolPresent:false,registryCurrency0:null,registryCurrency1:null,
+    registryCurrenciesValid:false,tokenInRegistryPair:false,quoteInRegistryPair:false,
+    candidateQuoteIdentityResolvable:false,tokenIsKnownQuote:null,
+    globalLedgerTokens:0,tokenLedgerPresent:false,tokenLedgerRows:0,exactPoolRows:0,
+    stateLastLiveScanKeys:[],firstObservedGate:"NOT_TESTED",limits:[]};
+  if(!isAddress(token)||!isBytes32HexV765(poolId))return {...out,firstObservedGate:"INVALID_TOKEN_OR_POOL"};
+  let loaded;try{loaded=await readState(env);out.kvReads=1;}catch(e){return {...out,kvReads:1,firstObservedGate:"STATE_READ_FAILED",limits:["State read failed; no credentials disclosed"]};}
+  if(loaded?.error)return {...out,firstObservedGate:"STATE_READ_ERROR"};
+  const state=loaded?.state||{};
+  const registry=state?.poolRegistry||{};
+  const pool=registry[poolId]||Object.entries(registry).find(([key])=>normalize(key)===poolId)?.[1];
+  out.registryPoolPresent=!!pool;
+  const c0=normalize(pool?.currency0),c1=normalize(pool?.currency1);
+  out.registryCurrency0=isAddress(c0)?c0:null;
+  out.registryCurrency1=isAddress(c1)?c1:null;
+  out.registryCurrenciesValid=isAddress(c0)&&isAddress(c1);
+  out.tokenIsKnownQuote=!!knownQuote(token);
+  out.tokenInRegistryPair=c0===token||c1===token;
+  out.quoteInRegistryPair=(c0===token&&(c1===ZERO||knownQuote(c1)))||(c1===token&&(c0===ZERO||knownQuote(c0)));
+  out.candidateQuoteIdentityResolvable=out.registryCurrenciesValid&&out.tokenInRegistryPair&&!out.tokenIsKnownQuote&&out.quoteInRegistryPair;
+  const ledgers=state?.onChainDirectionalV179&&typeof state.onChainDirectionalV179==="object"?state.onChainDirectionalV179:{};
+  out.globalLedgerTokens=Object.keys(ledgers).length;
+  const ledger=ledgers[token];out.tokenLedgerPresent=!!ledger;
+  const rows=Array.isArray(ledger?.records)?ledger.records:[];
+  out.tokenLedgerRows=rows.length;
+  out.exactPoolRows=rows.filter(row=>normalize(row?.poolId)===poolId).length;
+  if(!out.registryPoolPresent)out.firstObservedGate="POOL_MISSING_FROM_PERSISTED_REGISTRY";
+  else if(!out.registryCurrenciesValid)out.firstObservedGate="POOL_REGISTRY_CURRENCIES_UNVERIFIED";
+  else if(!out.tokenInRegistryPair)out.firstObservedGate="POOL_REGISTRY_TOKEN_MISMATCH";
+  else if(!out.candidateQuoteIdentityResolvable)out.firstObservedGate="V180_CANDIDATE_QUOTE_IDENTITY_GATE";
+  else if(!out.tokenLedgerRows)out.firstObservedGate="REGISTRY_ELIGIBLE_BUT_NO_V179_ROWS_CAUSE_NOT_PROVEN";
+  else if(!out.exactPoolRows)out.firstObservedGate="V179_ROWS_EXIST_BUT_NOT_FOR_EXACT_POOL";
+  else out.firstObservedGate="V179_EXACT_POOL_ROWS_PRESENT";
+  out.limits=["Persisted state cannot establish whether the production liveOutput.logs contained this pool during a scanner run.",
+    "This trace cannot distinguish missing ingestion from failed decode, pruning, or unpersisted scanner state without run-level evidence.",
+    "No provider calls, no synthetic trades, no state writes."];
+  return out;
+}
+
 async function v4FlowWatchHandoffV1261(env, tokenInput="", poolInput="") {
   const token=normalize(tokenInput),poolId=normalize(poolInput);
   const base={version:"V1261",diagnostic:"V4_FLOW_TO_AUTONOMOUS_WATCH_HANDOFF",safe:true,
@@ -202481,7 +202527,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -203885,6 +203931,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4v179-ingestion-trace") {
+    return jsonResponse(await v4V179IngestionTraceV1262(env,url.searchParams.get("token")||"",url.searchParams.get("pool")||""));
   }
 
   if (path === "/v4flowwatch-handoff") {
