@@ -51781,7 +51781,7 @@ async function v4V179AllTouchedRetentionTraceV1266(env) {
   return out;
 }
 
-// V1272: protected read-only report with explicit qualification-follow-up skip classification.
+// V1273: protected read-only report with V640 deferred-recovery state attribution.
 async function v4SYNTHSProductionAttributionV1271(env) {
   let loaded;
   try { loaded = await readState(env); }
@@ -51789,9 +51789,41 @@ async function v4SYNTHSProductionAttributionV1271(env) {
   const history = loaded?.state?.v4SYNTHSIngestionHistoryV1269;
   const latest = Array.isArray(history) && history.length ? history[history.length - 1] : null;
   const trace = latest?.productionAttributionV1271 || null;
-  return {version:'V1272',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+  // V1273: read only the stored recovery state. Never call discoveryService(),
+  // whose normalization reassigns state.services.discoveryRpc.
+  const discovery = loaded?.state?.services?.discoveryRpc || {};
+  const deferred = discovery?.deferredLiveRangeV640;
+  const validDeferred = deferred && Number.isSafeInteger(Number(deferred.fromBlock)) &&
+    Number.isSafeInteger(Number(deferred.toBlock)) && Number(deferred.fromBlock) > 0 &&
+    Number(deferred.toBlock) >= Number(deferred.fromBlock);
+  const deferredFrom = validDeferred ? Number(deferred.fromBlock) : null;
+  const requestedFrom = Number(trace?.requestedLiveFrom);
+  const recoveryAuditV1273 = {
+    version: 'V1273',
+    storedDeferredRange: validDeferred ? {
+      fromBlock: deferredFrom, toBlock: Number(deferred.toBlock),
+      createdAt: deferred.createdAt || null, updatedAt: deferred.updatedAt || null,
+      reason: deferred.reason || null, lastError: deferred.lastError || null
+    } : null,
+    deferredStartBehindRequestedBlocks: validDeferred && Number.isSafeInteger(requestedFrom) ?
+      Math.max(0, requestedFrom - deferredFrom) : null,
+    deferredCoversRequestedWindow: validDeferred && Number.isSafeInteger(Number(trace?.requestedLiveTo)) ?
+      Number(deferred.toBlock) >= Number(trace.requestedLiveTo) : null,
+    storedBacklogCursor: loaded?.state?.lastScannedBlock ?? null,
+    savedTotal: Number(discovery.deferredLiveRangeSavedTotalV640 || 0),
+    clearedTotal: Number(discovery.deferredLiveRangeClearedTotalV640 || 0),
+    lastSavedAt: discovery.deferredLiveRangeLastSavedAtV640 || null,
+    lastClearedAt: discovery.deferredLiveRangeLastClearedAtV640 || null,
+    lastAdvanceAction: discovery.deferredLiveRangeLastAdvanceActionV647 || null,
+    lastVerifiedWrite: discovery.deferredLiveRangeLastWriteVerifiedV647 || null,
+    interpretation: validDeferred && Number.isSafeInteger(requestedFrom) && deferredFrom < requestedFrom ?
+      'DEFERRED_V640_START_PRECEDES_REQUESTED_LIVE_WINDOW' :
+      validDeferred ? 'DEFERRED_V640_PRESENT_NOT_BEHIND_REQUESTED_WINDOW' : 'NO_VALID_DEFERRED_V640_RANGE_STORED',
+    note: 'Read-only stored-state snapshot; it does not prove historical backlog is complete or safe to skip.'
+  };
+  return {version:'V1273',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
     status:trace ? trace.firstObservedStage : 'AWAITING_NEXT_PRODUCTION_SCAN',
-    productionCapturedAt:latest?.at || null,trace};
+    productionCapturedAt:latest?.at || null,recoveryAuditV1273,trace};
 }
 
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
