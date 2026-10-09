@@ -1,4 +1,4 @@
-// ChainVanta V1278 — verified V4 directional USD to scoring handoff audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1279 — production scoring candidate/handoff coverage audit; protected, read-only; no scanner or scoring behaviour changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52010,6 +52010,68 @@ async function v4DirectionalScoreHandoffV1278(env) {
     limitations:['V212 is recalculated from saved V179 records; this alone does not prove scoring consumed it.',
       'Qualification audit may predate newer ledger evidence or omit candidate scoring internals.',
       'No provider calls, rescoring or production mutations occur.']};
+}
+
+// V1279: distinguish "V212 can reconstruct USD flow" from "the same token was
+// scored with that flow". Read-only snapshot; no new RPC, KV writes or rescoring.
+async function v4ScoringCoverageV1279(env) {
+  const base={version:'V1279',diagnostic:'V4_DIRECTIONAL_SCORING_COVERAGE',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try {loaded=await readState(env);} catch(e){return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};}
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{}, now=Date.now();
+  const ledgers=state.onChainDirectionalV179&&typeof state.onChainDirectionalV179==='object'?state.onChainDirectionalV179:{};
+  const auditRecords=Array.isArray(state?.qualificationAuditV663?.records)?state.qualificationAuditV663.records:[];
+  const audits=new Map();
+  for(const row of auditRecords){const t=normalize(row?.address||'');if(!isAddress(t))continue;
+    const at=Number(row?.lastEvaluatedAt||row?.firstEvaluatedAt||0);
+    if(!audits.has(t)||at>Number(audits.get(t)?.lastEvaluatedAt||audits.get(t)?.firstEvaluatedAt||0))audits.set(t,row);
+  }
+  const final=state.finalTelegramQualificationAuditV932||state?.qualificationAuditV663?.lastFinalTelegramQualificationAuditV932||null;
+  const finalRows=[...(Array.isArray(final?.topAll)?final.topAll:[]),...(Array.isArray(final?.topRejected)?final.topRejected:[])];
+  const finalByToken=new Map();
+  for(const row of finalRows){const t=normalize(row?.address||'');if(isAddress(t))finalByToken.set(t,row);}
+  const recent=[];
+  for(const [address,ledger] of Object.entries(ledgers)){
+    const token=normalize(address);if(!isAddress(token))continue;
+    const records=(Array.isArray(ledger?.records)?ledger.records:[]).filter(r=>
+      r?.exactUsdVerified===true&&(r?.side==='buy'||r?.side==='sell')&&Number(r?.exactUsdAmount)>0&&
+      Number(r?.observedAt)>now-3600000&&Number(r?.observedAt)<=now&&normalize(r?.candidateAddress)===token);
+    if(!records.length)continue;
+    const latest=Math.max(...records.map(r=>Number(r.observedAt)));
+    const flow=candidateVerifiedOnChainFlowV212({address:token},state);
+    const audit=audits.get(token)||null, lastAt=audit?Number(audit?.lastEvaluatedAt||audit?.firstEvaluatedAt||0):null;
+    const finalRow=finalByToken.get(token)||null;
+    recent.push({token,ledgerTrades1h:records.length,latestLedgerAt:latest,v212Verified:flow?.verified===true,
+      retainedQualificationAudit:!!audit,qualificationEvaluatedAt:lastAt,
+      auditAfterLatestLedgerRow:lastAt!==null&&lastAt>=latest,
+      finalSnapshotSampled:!!finalRow,finalSnapshotVerifiedFlow:finalRow?.evidence?.verifiedFlowV212===true,
+      finalSnapshotDirectionalUsd:finalRow?.evidence?.directionalUsdVerified===true,
+      finalSnapshotMomentumVerified:finalRow?.evidence?.momentumVerified===true,
+      finalSnapshotOpportunity:finalRow?Number(finalRow.opportunity??0):null,
+      finalSnapshotBlockers:finalRow&&Array.isArray(finalRow.telegramReasons)?finalRow.telegramReasons.slice(0,6):[],
+      handoffClassification:!flow?.verified?'V212_NOT_VERIFIED':!audit&&!finalRow?'NOT_IN_RETAINED_SCORING_SAMPLE':
+        lastAt!==null&&lastAt>=latest?'QUALIFICATION_AFTER_LEDGER_CONSUMPTION_UNPROVEN':
+        'SCORING_EVIDENCE_OLDER_OR_INCOMPLETE'});
+  }
+  recent.sort((a,b)=>b.ledgerTrades1h-a.ledgerTrades1h||a.token.localeCompare(b.token));
+  const counts={};for(const row of recent)counts[row.handoffClassification]=(counts[row.handoffClassification]||0)+1;
+  return {...base,status:recent.length?'VERIFIED_FLOW_SCORING_COVERAGE_AUDITED':'NO_RECENT_LEDGER_FLOW',
+    ledgerTokens1h:recent.length,v212VerifiedTokens:recent.filter(r=>r.v212Verified).length,
+    withRetainedQualificationAudit:recent.filter(r=>r.retainedQualificationAudit).length,
+    withQualificationAfterLatestTrade:recent.filter(r=>r.auditAfterLatestLedgerRow).length,
+    presentInFinalScoringSnapshotSample:recent.filter(r=>r.finalSnapshotSampled).length,
+    sampledWithVerifiedFlowFlag:recent.filter(r=>r.finalSnapshotVerifiedFlow).length,
+    classifications:counts,
+    finalSnapshot:final?{recordedAt:final.recordedAt||null,candidateCount:Number(final.candidateCount||0),
+      qualifiedCount:Number(final.qualifiedCount||0),topAllSampleCount:Array.isArray(final.topAll)?final.topAll.length:0,
+      topRejectedSampleCount:Array.isArray(final.topRejected)?final.topRejected.length:0,
+      verifiedButMissingRows:Number(final.verifiedButMissingRows||0),scoreParityMismatchRows:Number(final.scoreParityMismatchRows||0)}:null,
+    qualificationAuditScope:'Only verified-launch returned current/live candidates are retained by V663; 96 V212 ledger tokens are not necessarily 96 eligible scoring candidates.',
+    topTokens:recent.slice(0,20),truncated:recent.length>20,
+    interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
+    nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
 }
 
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
@@ -203738,7 +203800,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205142,6 +205204,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4directional-scoring-coverage") {
+    return jsonResponse(await v4ScoringCoverageV1279(env));
   }
 
   if (path === "/v4directional-score-handoff") {
