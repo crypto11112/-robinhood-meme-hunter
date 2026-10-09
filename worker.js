@@ -45929,7 +45929,8 @@ async function scanLiveRange(
   from,
   to,
   budget,
-  output
+  output,
+  optionsV1274 = {}
 ) {
   const service =
     discoveryService(
@@ -46003,53 +46004,17 @@ async function scanLiveRange(
       LIVE_SAFE_CHUNK_MAX
     );
 
-  const requestedTo =
-    to;
-
-  const deferredAtStartV640 =
-    deferredLiveRangeV640(
-      state
-    );
-
-  /*
-   * V640: if an older live range is pending, extend its end to the latest
-   * current live target and resume from its oldest unprocessed block.
-   */
-  if (
-    deferredAtStartV640 &&
-    safeNumber(to) >
-      deferredAtStartV640.toBlock
-  ) {
-    persistDeferredLiveRangeV640(
-      state,
-      deferredAtStartV640.fromBlock,
-      safeNumber(to),
-      "DEFERRED_RANGE_EXTENDED_TO_CURRENT_TIP_V640",
-      deferredAtStartV640.lastError
-    );
-  }
-
-  const activeDeferredAtStartV640 =
-    deferredLiveRangeV640(
-      state
-    );
-
-  let effectiveTo =
-    activeDeferredAtStartV640
-      ? BigInt(
-          Math.max(
-            activeDeferredAtStartV640.toBlock,
-            safeNumber(to)
-          )
-        )
-      : to;
-
-  let cursor =
-    activeDeferredAtStartV640
-      ? BigInt(
-          activeDeferredAtStartV640.fromBlock
-        )
-      : from;
+  /* V1274: current discovery must never inherit a historic V640 cursor. */
+  const recoveryModeV1274 = optionsV1274.recovery === true;
+  const requestedTo = to;
+  const deferredAtStartV640 = deferredLiveRangeV640(state);
+  const activeDeferredAtStartV640 = recoveryModeV1274
+    ? deferredAtStartV640
+    : null;
+  let effectiveTo = to;
+  let cursor = from;
+  let attemptsV1274 = 0;
+  const maxAttemptsV1274 = recoveryModeV1274 ? 2 : 10;
 
   let processedThrough =
     null;
@@ -46093,7 +46058,8 @@ async function scanLiveRange(
     budgetAvailable(
       budget,
       "discovery-live"
-    )
+    ) &&
+    attemptsV1274 < maxAttemptsV1274
   ) {
     let chunkTo =
       cursor +
@@ -46131,6 +46097,7 @@ async function scanLiveRange(
       break;
     }
 
+    attemptsV1274++;
     let response =
       await getLogsSingleProvider(
         env,
@@ -46522,7 +46489,7 @@ async function scanLiveRange(
           response.provider,
 
         phase:
-          "discovery-live",
+          recoveryModeV1274 ? "discovery-recovery-v1274" : "discovery-live",
 
         chunkSize
       });
@@ -46530,12 +46497,9 @@ async function scanLiveRange(
       processedThrough =
         chunkTo;
 
-      advanceDeferredLiveRangeV640(
-        state,
-        Number(
-          processedThrough
-        )
-      );
+      if (recoveryModeV1274) {
+        advanceDeferredLiveRangeV640(state, Number(processedThrough));
+      }
 
       service.lastLiveSuccessAt =
         Date.now();
@@ -46660,9 +46624,7 @@ async function scanLiveRange(
       mutationOrderV647:
         "READ_EXISTING_THEN_REACQUIRE_DISCOVERY_SERVICE",
       retriedDeferredFirst:
-        Boolean(
-          activeDeferredAtStartV640
-        ),
+        recoveryModeV1274 && Boolean(activeDeferredAtStartV640),
       deferredAtStart:
         activeDeferredAtStartV640,
       deferredRemaining:
@@ -46684,6 +46646,8 @@ async function scanLiveRange(
         )
     },
 
+    laneV1274: recoveryModeV1274 ? "HISTORICAL_RECOVERY" : "CURRENT_LIVE",
+    attemptsV1274,
     abortRecoveryV156: {
       enabled:
         true,
@@ -51821,7 +51785,7 @@ async function v4SYNTHSProductionAttributionV1271(env) {
       validDeferred ? 'DEFERRED_V640_PRESENT_NOT_BEHIND_REQUESTED_WINDOW' : 'NO_VALID_DEFERRED_V640_RANGE_STORED',
     note: 'Read-only stored-state snapshot; it does not prove historical backlog is complete or safe to skip.'
   };
-  return {version:'V1273',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+  return {version:'V1274',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
     status:trace ? trace.firstObservedStage : 'AWAITING_NEXT_PRODUCTION_SCAN',
     productionCapturedAt:latest?.at || null,recoveryAuditV1273,trace};
 }
@@ -115232,6 +115196,35 @@ async function scan(
         );
 
   
+  /* V1274: independently resume V640 history, using only spare existing live
+   * budget. Never replace the current live cursor, and never treat a live
+   * success as proof that historical blocks were processed. */
+  let deferredRecoveryV1274 = null;
+  const deferredRecoveryOutputV1274 = {logs: [], ranges: []};
+  const pendingRecoveryV1274 = deferredLiveRangeV640(state);
+  if (
+    !qualificationFollowUpV723 &&
+    pendingRecoveryV1274 &&
+    budgetAvailable(budget, "discovery-live") &&
+    liveScan.success === true &&
+    liveDiscovery.newTokens?.size === 0
+  ) {
+    deferredRecoveryV1274 = await scanLiveRange(
+      env, state,
+      BigInt(pendingRecoveryV1274.fromBlock),
+      BigInt(pendingRecoveryV1274.toBlock),
+      budget, deferredRecoveryOutputV1274,
+      {recovery: true}
+    );
+    /* Historical observations go to the historical discovery path, not
+     * the current-live output or current-live window attribution. */
+    if (deferredRecoveryOutputV1274.logs.length) {
+      processDiscoveryLogs(state, deferredRecoveryOutputV1274.logs, "BACKLOG");
+      backlogOutput.logs.push(...deferredRecoveryOutputV1274.logs);
+      backlogOutput.ranges.push(...deferredRecoveryOutputV1274.ranges);
+    }
+  }
+
   /*
    * V211: newly verified pools.trade launches must not wait behind ordinary
    * watch/backlog ordering. The existing V208 recognizer has already
@@ -116399,7 +116392,7 @@ for (
     backlogDiscovery =
       processDiscoveryLogs(
         state,
-        backlogOutput.logs,
+        backlogOutput.logs.slice(deferredRecoveryOutputV1274.logs.length),
         "BACKLOG"
       );
 
