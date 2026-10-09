@@ -51781,7 +51781,7 @@ async function v4V179AllTouchedRetentionTraceV1266(env) {
   return out;
 }
 
-// V1271: protected read-only report of real production phase/range provenance.
+// V1272: protected read-only report with explicit qualification-follow-up skip classification.
 async function v4SYNTHSProductionAttributionV1271(env) {
   let loaded;
   try { loaded = await readState(env); }
@@ -51789,7 +51789,7 @@ async function v4SYNTHSProductionAttributionV1271(env) {
   const history = loaded?.state?.v4SYNTHSIngestionHistoryV1269;
   const latest = Array.isArray(history) && history.length ? history[history.length - 1] : null;
   const trace = latest?.productionAttributionV1271 || null;
-  return {version:'V1271',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+  return {version:'V1272',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
     status:trace ? trace.firstObservedStage : 'AWAITING_NEXT_PRODUCTION_SCAN',
     productionCapturedAt:latest?.at || null,trace};
 }
@@ -116196,10 +116196,12 @@ for (
       const requestedFromV1271 = Number(live.from);
       const requestedToV1271 = Number(live.to);
       lastV1271.productionAttributionV1271 = {
-        version: 'V1271', capturedAt: Date.now(),
+        version: 'V1272', capturedAt: Date.now(),
         requestedLiveFrom: requestedFromV1271, requestedLiveTo: requestedToV1271,
         liveScanSuccess: liveScan?.success === true,
         liveScanError: liveScan?.error || null,
+        qualificationFollowUpSkippedLiveCollection: liveScan?.v723SkippedForQualificationFollowUp === true,
+        liveCollectionAttempted: liveScan?.v723SkippedForQualificationFollowUp !== true,
         processedThrough: liveScan?.processedThrough == null ? null : Number(liveScan.processedThrough),
         totalRanges: rangesV1271.length,
         rangesTruncated: rangesV1271.length > 40,
@@ -116211,7 +116213,8 @@ for (
         targetPoolSwapLogs: targetLogsV1271.length,
         targetPoolInsideRequestedLiveWindow: targetBlocksV1271.filter(block => block >= requestedFromV1271 && block <= requestedToV1271).length,
         targetPoolOutsideRequestedLiveWindow: targetBlocksV1271.filter(block => block < requestedFromV1271 || block > requestedToV1271).length,
-        firstObservedStage: rangesV1271.length === 0 ? 'NO_LIVE_OUTPUT_RANGES' :
+        firstObservedStage: liveScan?.v723SkippedForQualificationFollowUp === true ? 'EXPECTED_QUALIFICATION_FOLLOWUP_LIVE_COLLECTION_SKIPPED' :
+          rangesV1271.length === 0 ? 'LIVE_COLLECTION_ATTEMPTED_NO_RECORDED_RANGES' :
           boundedRangesV1271.some(r => r.isDisjointFromRequestedLiveWindow) ? 'LIVE_OUTPUT_CONTAINS_RANGES_DISJOINT_FROM_REQUESTED_LIVE_WINDOW' :
           'ALL_RECORDED_RANGES_OVERLAP_REQUESTED_LIVE_WINDOW',
         extraProviderRequests: 0, extraKvWrites: 0, scoringChanged: false, telegramMutated: false
