@@ -1,4 +1,4 @@
-// ChainVanta V1270 — SYNTHS same-production-range coverage evidence, with on-demand exact-pool RPC parity.
+// ChainVanta V1271 — production live-range attribution and log provenance diagnostic; no scanner behaviour changes.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51779,6 +51779,19 @@ async function v4V179AllTouchedRetentionTraceV1266(env) {
   }
 
   return out;
+}
+
+// V1271: protected read-only report of real production phase/range provenance.
+async function v4SYNTHSProductionAttributionV1271(env) {
+  let loaded;
+  try { loaded = await readState(env); }
+  catch (error) { return {version:'V1271', diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',status:'STATE_READ_FAILED',kvReads:1,kvWrites:0,externalRequestsUsed:0,error:String(error).slice(0,180)}; }
+  const history = loaded?.state?.v4SYNTHSIngestionHistoryV1269;
+  const latest = Array.isArray(history) && history.length ? history[history.length - 1] : null;
+  const trace = latest?.productionAttributionV1271 || null;
+  return {version:'V1271',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+    status:trace ? trace.firstObservedStage : 'AWAITING_NEXT_PRODUCTION_SCAN',
+    productionCapturedAt:latest?.at || null,trace};
 }
 
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
@@ -116138,6 +116151,74 @@ for (
     }
   } catch (_v1270PassiveTraceError) {
     // A diagnostic must never interrupt production scanning.
+  }
+
+  // V1271: preserve each collection phase and its exact range. Do not
+  // aggregate across phases when asserting production coverage.
+  try {
+    const historyV1271 = state.v4SYNTHSIngestionHistoryV1269;
+    if (Array.isArray(historyV1271) && historyV1271.length) {
+      const lastV1271 = historyV1271[historyV1271.length - 1];
+      const rangesV1271 = Array.isArray(liveOutput?.ranges) ? liveOutput.ranges : [];
+      const logsV1271 = Array.isArray(liveOutput?.logs) ? liveOutput.logs : [];
+      const swapLogsV1271 = logsV1271.filter(row => normalize(row?.topics?.[0]) === SWAP_TOPIC);
+      const parseBlockV1271 = value => {
+        if (typeof value === 'string' && /^0x[0-9a-f]+$/i.test(value)) return Number.parseInt(value, 16);
+        return typeof value === 'number' ? value : null;
+      };
+      const targetPoolV1271 = '0xeac7a9ef9babd0ca9a579d30fe194c31dfbdca970e0531977308cc2429768b0e';
+      const targetLogsV1271 = swapLogsV1271.filter(row => normalize(row?.topics?.[1]) === targetPoolV1271);
+      const boundedRangesV1271 = rangesV1271.slice(0, 40).map((range, index) => {
+        const from = Number(range?.fromBlock);
+        const to = Number(range?.toBlock);
+        const valid = Number.isSafeInteger(from) && Number.isSafeInteger(to) && from > 0 && to >= from;
+        const inRange = valid ? swapLogsV1271.filter(row => {
+          const block = parseBlockV1271(row?.blockNumber);
+          return Number.isSafeInteger(block) && block >= from && block <= to;
+        }) : [];
+        const targetInRange = valid ? targetLogsV1271.filter(row => {
+          const block = parseBlockV1271(row?.blockNumber);
+          return Number.isSafeInteger(block) && block >= from && block <= to;
+        }) : [];
+        return {
+          index, fromBlock: valid ? from : null, toBlock: valid ? to : null,
+          phase: String(range?.phase || 'UNSPECIFIED'),
+          provider: String(range?.provider || 'UNSPECIFIED'),
+          reportedLogs: Number.isFinite(Number(range?.logs)) ? Number(range.logs) : null,
+          swapLogsWithinBounds: inRange.length,
+          targetPoolSwapsWithinBounds: targetInRange.length,
+          isInsideRequestedLiveWindow: valid && from >= Number(live.from) && to <= Number(live.to),
+          isDisjointFromRequestedLiveWindow: valid && (to < Number(live.from) || from > Number(live.to))
+        };
+      });
+      const blocksV1271 = swapLogsV1271.map(row => parseBlockV1271(row?.blockNumber)).filter(Number.isSafeInteger);
+      const targetBlocksV1271 = targetLogsV1271.map(row => parseBlockV1271(row?.blockNumber)).filter(Number.isSafeInteger);
+      const requestedFromV1271 = Number(live.from);
+      const requestedToV1271 = Number(live.to);
+      lastV1271.productionAttributionV1271 = {
+        version: 'V1271', capturedAt: Date.now(),
+        requestedLiveFrom: requestedFromV1271, requestedLiveTo: requestedToV1271,
+        liveScanSuccess: liveScan?.success === true,
+        liveScanError: liveScan?.error || null,
+        processedThrough: liveScan?.processedThrough == null ? null : Number(liveScan.processedThrough),
+        totalRanges: rangesV1271.length,
+        rangesTruncated: rangesV1271.length > 40,
+        ranges: boundedRangesV1271,
+        phaseCounts: boundedRangesV1271.reduce((out, r) => {out[r.phase] = (out[r.phase] || 0) + 1; return out;}, {}),
+        swapLogsInLiveOutput: swapLogsV1271.length,
+        swapLogsInsideRequestedLiveWindow: blocksV1271.filter(block => block >= requestedFromV1271 && block <= requestedToV1271).length,
+        swapLogsOutsideRequestedLiveWindow: blocksV1271.filter(block => block < requestedFromV1271 || block > requestedToV1271).length,
+        targetPoolSwapLogs: targetLogsV1271.length,
+        targetPoolInsideRequestedLiveWindow: targetBlocksV1271.filter(block => block >= requestedFromV1271 && block <= requestedToV1271).length,
+        targetPoolOutsideRequestedLiveWindow: targetBlocksV1271.filter(block => block < requestedFromV1271 || block > requestedToV1271).length,
+        firstObservedStage: rangesV1271.length === 0 ? 'NO_LIVE_OUTPUT_RANGES' :
+          boundedRangesV1271.some(r => r.isDisjointFromRequestedLiveWindow) ? 'LIVE_OUTPUT_CONTAINS_RANGES_DISJOINT_FROM_REQUESTED_LIVE_WINDOW' :
+          'ALL_RECORDED_RANGES_OVERLAP_REQUESTED_LIVE_WINDOW',
+        extraProviderRequests: 0, extraKvWrites: 0, scoringChanged: false, telegramMutated: false
+      };
+    }
+  } catch (_v1271PassiveTraceError) {
+    // Diagnostics cannot interrupt the scanner.
   }
 
   onChainDirectionalV179
@@ -203398,7 +203479,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -204802,6 +204883,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4synths-range-attribution") {
+    return jsonResponse(await v4SYNTHSProductionAttributionV1271(env));
   }
 
   if (path === "/v4synths-range-parity") {
