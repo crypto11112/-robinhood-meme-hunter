@@ -51785,9 +51785,21 @@ async function v4SYNTHSProductionAttributionV1271(env) {
       validDeferred ? 'DEFERRED_V640_PRESENT_NOT_BEHIND_REQUESTED_WINDOW' : 'NO_VALID_DEFERRED_V640_RANGE_STORED',
     note: 'Read-only stored-state snapshot; it does not prove historical backlog is complete or safe to skip.'
   };
-  return {version:'V1274',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+  // V1275: the newest run can be a qualification-only follow-up. Show the
+  // last actual live collection independently, without any new RPC or KV work.
+  const retainedActual = loaded?.state?.v4LastActualLiveCollectionV1275 || null;
+  const historicalActual = Array.isArray(history) ? [...history].reverse().find(row =>
+    row?.productionAttributionV1271?.liveCollectionAttempted === true) : null;
+  const lastActualLiveCollectionV1275 = retainedActual || (historicalActual ? {
+    capturedAt: historicalActual.at || null,
+    trace: historicalActual.productionAttributionV1271,
+    source: 'BOUNDED_HISTORY_FALLBACK_V1275'
+  } : null);
+  return {version:'V1275',diagnostic:'SYNTHS_PRODUCTION_RANGE_ATTRIBUTION',safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
     status:trace ? trace.firstObservedStage : 'AWAITING_NEXT_PRODUCTION_SCAN',
-    productionCapturedAt:latest?.at || null,recoveryAuditV1273,trace};
+    productionCapturedAt:latest?.at || null,recoveryAuditV1273,trace,
+    lastActualLiveCollectionV1275,
+    lastActualStatusV1275:lastActualLiveCollectionV1275 ? 'ACTUAL_COLLECTION_RETAINED' : 'AWAITING_FIRST_ACTUAL_COLLECTION_AFTER_V1275'};
 }
 
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
@@ -116244,6 +116256,15 @@ for (
           'ALL_RECORDED_RANGES_OVERLAP_REQUESTED_LIVE_WINDOW',
         extraProviderRequests: 0, extraKvWrites: 0, scoringChanged: false, telegramMutated: false
       };
+      // V1275: only actual collection attempts replace the durable snapshot.
+      // Follow-up skips never erase it. Same existing state-save path.
+      if (lastV1271.productionAttributionV1271.liveCollectionAttempted === true) {
+        state.v4LastActualLiveCollectionV1275 = {
+          capturedAt: lastV1271.at || Date.now(),
+          trace: lastV1271.productionAttributionV1271,
+          source: 'PRODUCTION_LIVE_COLLECTION_V1275'
+        };
+      }
     }
   } catch (_v1271PassiveTraceError) {
     // Diagnostics cannot interrupt the scanner.
