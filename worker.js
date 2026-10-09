@@ -1,4 +1,4 @@
-// ChainVanta V1280 — nine-timeframe verified directional ledger coverage audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1281 — V4 collection-continuity and retention audit; protected, read-only; no scanner or scoring behaviour changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,68 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1281: observational continuity/retention audit from already persisted state.
+// This cannot certify uninterrupted chain coverage: retained run samples are bounded.
+async function v4CollectionContinuityV1281(env) {
+  const base={version:'V1281',diagnostic:'V4_COLLECTION_CONTINUITY_AND_RETENTION',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try{loaded=await readState(env);}catch(e){return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};}
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{},now=Date.now();
+  const history=Array.isArray(state.v4SYNTHSIngestionHistoryV1269)?state.v4SYNTHSIngestionHistoryV1269:[];
+  const actual=history.filter(h=>h?.productionAttributionV1271?.liveCollectionAttempted===true);
+  const snapshots=actual.slice(-16).map(h=>{
+    const t=h.productionAttributionV1271||{};
+    const from=Number(t.requestedLiveFrom),to=Number(t.requestedLiveTo),through=Number(t.processedThrough);
+    const valid=Number.isSafeInteger(from)&&from>0&&Number.isSafeInteger(to)&&to>=from;
+    const processed=Number.isSafeInteger(through)&&through>=from;
+    return {capturedAt:h.at||null,requestedFrom:valid?from:null,requestedTo:valid?to:null,
+      processedThrough:processed?through:null,liveScanSuccess:t.liveScanSuccess===true,
+      swapLogsInsideWindow:t.swapLogsInsideRequestedLiveWindow??null,
+      recordedRangeCount:Number(t.totalRanges||0),validRequestedRange:valid};
+  });
+  const transitions=[];
+  for(let i=1;i<snapshots.length;i++){
+    const a=snapshots[i-1],b=snapshots[i];
+    const delta=a.processedThrough!==null&&b.requestedFrom!==null?b.requestedFrom-a.processedThrough-1:null;
+    transitions.push({previousAt:a.capturedAt,currentAt:b.capturedAt,blockDelta:delta,
+      classification:delta===null?'UNDETERMINED':delta>0?'UNOBSERVED_BLOCK_GAP':delta<0?'OVERLAP_OR_RESCAN':'ADJACENT',
+      note:'Comparing bounded snapshots only; gaps do not prove blocks were never scanned by another path.'});
+  }
+  const live=state.v4LastActualLiveCollectionV1275||null,trace=live?.trace||null;
+  const ledgers=state.onChainDirectionalV179&&typeof state.onChainDirectionalV179==='object'&&!Array.isArray(state.onChainDirectionalV179)?state.onChainDirectionalV179:{};
+  const caps=[],ages=[];let totalRows=0,atCap=0;
+  for(const [address,ledger] of Object.entries(ledgers)){
+    const rows=Array.isArray(ledger?.records)?ledger.records:[];totalRows+=rows.length;
+    const valid=rows.map(r=>Number(r?.observedAt)).filter(n=>Number.isFinite(n)&&n>0&&n<=now);
+    if(valid.length)ages.push(Math.max(...valid));
+    if(rows.length>=ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179){atCap++;
+      if(valid.length)caps.push({token:normalize(address),retainedRows:rows.length,
+        observedSpanMinutes:Math.round((Math.max(...valid)-Math.min(...valid))/6000)/10,
+        oldestAt:Math.min(...valid),newestAt:Math.max(...valid),
+        full12hFromRowsProven:false,full24hFromRowsProven:false});}
+  }
+  caps.sort((a,b)=>a.observedSpanMinutes-b.observedSpanMinutes);
+  const d=state.services?.discoveryRpc?.deferredLiveRangeV640||null;
+  const recent=ages.length?Math.max(...ages):null;
+  return {...base,status:'OBSERVED_CONTINUITY_AND_RETENTION_AUDITED',
+    latestActualLiveCollection:trace?{capturedAt:live.capturedAt||null,ageMinutes:live.capturedAt?Math.round((now-Number(live.capturedAt))/6000)/10:null,
+      attempted:trace.liveCollectionAttempted===true,success:trace.liveScanSuccess===true,
+      requestedFrom:trace.requestedLiveFrom??null,requestedTo:trace.requestedLiveTo??null,
+      processedThrough:trace.processedThrough??null,swapsInsideRequestedWindow:trace.swapLogsInsideRequestedLiveWindow??null}:null,
+    retainedActualRunSamples:snapshots.length,runSamples:snapshots,transitions,
+    observedGapTransitions:transitions.filter(t=>t.classification==='UNOBSERVED_BLOCK_GAP').length,
+    ledger:{tokenCount:Object.keys(ledgers).length,retainedRows:totalRows,capPerToken:ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179,
+      tokensAtCap:atCap,newestVerifiedRowAt:recent,newestVerifiedRowAgeMinutes:recent?Math.round((now-recent)/6000)/10:null,
+      cappedShortestSpanSample:caps.slice(0,12),cappedSampleTruncated:caps.length>12},
+    historicalRecovery:{deferredRangePresent:!!d,fromBlock:d?.fromBlock??null,toBlock:d?.toBlock??null},
+    existingWindowImplementations:'NOT_CERTIFIED_BY_THIS_STATE_ONLY_AUDIT',
+    completeness:'NOT_PROVEN',safeForFullWindowScoring:false,
+    interpretation:'Bounded production run samples can reveal suspicious discontinuities, but cannot prove uninterrupted historical collection. The 96-row cap can truncate long-window activity. No added RPC, provider calls, state writes or scoring changes.',
+    nextStep:'Review observed gaps and stale live collection; compare existing production window source paths before designing rolling aggregates or changing scoring.'};
 }
 
 // V1280: observational nine-window audit. Rows are observed samples, never asserted
@@ -203861,7 +203923,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205265,6 +205327,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4collection-continuity") {
+    return jsonResponse(await v4CollectionContinuityV1281(env));
   }
 
   if (path === "/v4nine-timeframe-coverage") {
