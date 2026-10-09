@@ -1,4 +1,4 @@
-// ChainVanta V1265 — V1264 production baseline + targeted V179 retention/eviction trace.
+// ChainVanta V1266 — V1265 production baseline + all-touched V179 retention proof.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51709,6 +51709,70 @@ async function v4FlowWatchHandoffV1261(env, tokenInput="", poolInput="") {
 
 
 
+
+// V1266: read-only proof across every exact-USD token touched by V179 in the
+// most recent production batch. Endpoint adds one KV read and zero provider calls.
+async function v4V179AllTouchedRetentionTraceV1266(env) {
+  const out = {
+    version: "V1266",
+    diagnostic: "V4_V179_ALL_TOUCHED_RETENTION_PROOF",
+    safe: true,
+    kvReads: 0,
+    kvWrites: 0,
+    externalRequestsUsed: 0,
+    scannerMutatedByEndpoint: false,
+    telegramMutated: false,
+    traceAvailable: false,
+    trace: null,
+    status: "NOT_TESTED"
+  };
+
+  let loaded;
+  try {
+    loaded = await readState(env);
+    out.kvReads = 1;
+  } catch (error) {
+    return {
+      ...out,
+      kvReads: 1,
+      status: "STATE_READ_FAILED",
+      error: errorString(error)
+    };
+  }
+
+  const trace =
+    loaded?.state
+      ?.v4V179AllTouchedRetentionTraceV1266 ||
+    null;
+
+  out.traceAvailable =
+    Boolean(trace);
+  out.trace =
+    trace;
+
+  if (!trace) {
+    out.status =
+      "AWAITING_NEXT_PRODUCTION_SCAN";
+  } else if (
+    safeNumber(
+      trace?.exactUsdTouchedTokenCount
+    ) <= 0
+  ) {
+    out.status =
+      "AWAITING_EXACT_USD_ACTIVITY_IN_PRODUCTION_BATCH";
+  } else if (
+    trace?.retentionEvictionProven === true
+  ) {
+    out.status =
+      "EXACT_USD_ACTIVE_TOKEN_EVICTION_PROVEN";
+  } else {
+    out.status =
+      "NO_EXACT_USD_ACTIVE_TOKEN_EVICTION_OBSERVED";
+  }
+
+  return out;
+}
+
 // V1265: read-only view of the production V179 retention trace.
 // The production trace itself reuses already-fetched logs and the normal state save.
 async function v4V179RetentionTraceV1265(env) {
@@ -54576,6 +54640,12 @@ function collectOnChainDirectionalSwapsV179(
   const touchedTokens =
     new Set();
 
+  // V1266 diagnostic-only: retain the insertion order of every candidate token
+  // that reaches exact-USD verification in this real production batch.
+  // No provider requests and no change to V179 acceptance/pruning logic.
+  const exactUsdTouchedTokensV1266 =
+    new Set();
+
   // V202 diagnostic only: bounded local samples, zero external requests.
   // Captures the exact identities that fail the existing V180 candidate/quote gate.
   const candidateQuoteIdentitySamplesV202 = [];
@@ -54905,6 +54975,14 @@ function collectOnChainDirectionalSwapsV179(
       continue;
     }
 
+    if (
+      trade?.exactUsdVerified === true
+    ) {
+      exactUsdTouchedTokensV1266.add(
+        token
+      );
+    }
+
     const traceTargetTradeV1265 =
       traceTargetPoolLogV1265 &&
       token === traceTokenV1265;
@@ -55020,6 +55098,34 @@ function collectOnChainDirectionalSwapsV179(
     }
   }
 
+  // V1266 all-touched retention proof. Snapshot the exact tokens that were
+  // exact-USD verified in this batch before the existing 8-token prune runs.
+  const exactUsdTouchedListV1266 =
+    Array.from(
+      exactUsdTouchedTokensV1266
+    );
+
+  const touchedListV1266 =
+    Array.from(
+      touchedTokens
+    );
+
+  const exactUsdPresentPrePruneV1266 =
+    exactUsdTouchedListV1266.filter(
+      tokenV1266 =>
+        Boolean(
+          store[tokenV1266]
+        )
+    );
+
+  const allTouchedPresentPrePruneV1266 =
+    touchedListV1266.filter(
+      tokenV1266 =>
+        Boolean(
+          store[tokenV1266]
+        )
+    );
+
   const tracePrePruneTokenCountV1265 =
     Object.keys(store).length;
   const tracePrePruneTargetPresentV1265 =
@@ -55082,6 +55188,145 @@ function collectOnChainDirectionalSwapsV179(
     extraKvWrites: 0,
     scoringChanged: false,
     telegramMutated: false
+  };
+
+  const exactUsdSurvivedPostPruneV1266 =
+    exactUsdPresentPrePruneV1266.filter(
+      tokenV1266 =>
+        Boolean(
+          tracePostPruneStoreV1265[
+            tokenV1266
+          ]
+        )
+    );
+
+  const exactUsdEvictedV1266 =
+    exactUsdPresentPrePruneV1266.filter(
+      tokenV1266 =>
+        !tracePostPruneStoreV1265[
+          tokenV1266
+        ]
+    );
+
+  const allTouchedSurvivedPostPruneV1266 =
+    allTouchedPresentPrePruneV1266.filter(
+      tokenV1266 =>
+        Boolean(
+          tracePostPruneStoreV1265[
+            tokenV1266
+          ]
+        )
+    );
+
+  const allTouchedEvictedV1266 =
+    allTouchedPresentPrePruneV1266.filter(
+      tokenV1266 =>
+        !tracePostPruneStoreV1265[
+          tokenV1266
+        ]
+    );
+
+  const exactUsdLastSeenValuesV1266 =
+    exactUsdPresentPrePruneV1266
+      .map(
+        tokenV1266 =>
+          safeNumber(
+            store?.[tokenV1266]
+              ?.lastSeenAt
+          )
+      )
+      .filter(
+        valueV1266 =>
+          valueV1266 > 0
+      );
+
+  state.v4V179AllTouchedRetentionTraceV1266 = {
+    version: "V1266",
+    capturedAt: Date.now(),
+    maxLedgerTokens:
+      ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179,
+
+    productionSwapLogsSeen:
+      swapLogsSeen,
+    productionDecoded:
+      decoded,
+    productionExactUsdVerified:
+      exactUsdVerified,
+
+    touchedTokenCount:
+      touchedListV1266.length,
+    touchedPresentBeforePrune:
+      allTouchedPresentPrePruneV1266.length,
+    touchedSurvivedAfterPrune:
+      allTouchedSurvivedPostPruneV1266.length,
+    touchedEvictedByPrune:
+      allTouchedEvictedV1266.length,
+
+    exactUsdTouchedTokenCount:
+      exactUsdTouchedListV1266.length,
+    exactUsdPresentBeforePrune:
+      exactUsdPresentPrePruneV1266.length,
+    exactUsdSurvivedAfterPrune:
+      exactUsdSurvivedPostPruneV1266.length,
+    exactUsdEvictedByPrune:
+      exactUsdEvictedV1266.length,
+
+    prePruneTokenCount:
+      tracePrePruneTokenCountV1265,
+    postPruneTokenCount:
+      tracePostPruneTokenCountV1265,
+
+    exactUsdTouchedSample:
+      exactUsdTouchedListV1266.slice(
+        0,
+        20
+      ),
+    exactUsdSurvivorSample:
+      exactUsdSurvivedPostPruneV1266.slice(
+        0,
+        20
+      ),
+    exactUsdEvictedSample:
+      exactUsdEvictedV1266.slice(
+        0,
+        20
+      ),
+
+    exactUsdUniqueLastSeenAtCount:
+      new Set(
+        exactUsdLastSeenValuesV1266
+      ).size,
+
+    retentionEvictionProven:
+      exactUsdEvictedV1266.length >
+      0,
+
+    firstObservedStage:
+      exactUsdTouchedListV1266.length ===
+        0
+        ? "NO_EXACT_USD_TOKENS_TOUCHED_THIS_BATCH"
+        : exactUsdPresentPrePruneV1266.length ===
+            0
+          ? "EXACT_USD_TOKENS_NOT_PRESENT_BEFORE_PRUNE"
+          : exactUsdEvictedV1266.length >
+              0
+            ? "EXACT_USD_ACTIVE_TOKENS_EVICTED_BY_V179_RETENTION_CAP"
+            : "ALL_EXACT_USD_ACTIVE_TOKENS_SURVIVED_V179_RETENTION",
+
+    notes: [
+      "Trace covers every token touched by the existing production V179 collector, not one hard-coded token.",
+      "No provider request is added; acceptance, ranking, pruning, scoring and Telegram behavior are unchanged.",
+      "Samples are bounded to 20 addresses while counts cover the full batch."
+    ],
+
+    noExtraProviderRequests:
+      true,
+    extraKvWrites:
+      0,
+    scoringChanged:
+      false,
+    telegramMutated:
+      false
   };
 
   return {
@@ -202929,7 +203174,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -204333,6 +204578,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4v179-alltouched-retention") {
+    return jsonResponse(await v4V179AllTouchedRetentionTraceV1266(env));
   }
 
   if (path === "/v4v179-retention-trace") {
