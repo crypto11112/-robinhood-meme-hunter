@@ -1,3 +1,4 @@
+// V1253: read-only first-hour crash evidence triage; zero external calls, no live gating changes.
 // V1252: Bitquery trial-expiry circuit breaker (opt-in reactivation only); scanner qualification and V1251 unchanged.
 // V1251: Forward-only shadow challenger recorded on newly successful calls; no production gating changes.
 // V1250 historical shadow replay: read-only and in-sample; live selection unchanged.
@@ -147111,6 +147112,38 @@ function performanceSummaryV271(state, options = {}) {
     lines.push(`• ${group}: <b>${subset.length}</b> · ${horizons.join(' | ')}`);
   }
   lines.push('<i>Only calls created after V1251 carry immutable challenger decisions; unknown evidence never passes. PASS/REJECT groups are both observed, but the performance registry contains delivered calls only and is not Premium-only; excluded scanner candidates are not measured. Missing horizons are not losses or wins. No new provider requests, no scoring or Telegram selection changes.</i>');
+
+  // V1253: bounded, read-only crash triage from existing immutable entry snapshots
+  // and frozen forward horizons. No swap/liquidity-removal claims without direct proof.
+  const crashRowsV1253 = confirmedV1247.filter(r => {
+    const h1 = performanceHorizonMultipleV1181(r, "h1");
+    return h1 !== null && h1 <= 0.5;
+  }).sort((a,b)=>safeNumber(b?.entryTimestamp)-safeNumber(a?.entryTimestamp));
+  const severe24KnownV1253 = crashRowsV1253.filter(r=>performanceHorizonMultipleV1181(r,"h24")!==null);
+  lines.push("", "🔎 <b>V1253 first-hour crash evidence triage — READ ONLY</b>",
+    `Delivery-proven with frozen 1h ≤0.5x: <b>${crashRowsV1253.length}</b> · 24h frozen ${severe24KnownV1253.length}/${crashRowsV1253.length}`);
+  const focusV1253 = entries.filter(r=>{
+    const a=String(r?.address||"").toLowerCase();
+    return a.startsWith("0x11b70d") || a.startsWith("0x7dbf38");
+  });
+  for(const r of focusV1253.slice(0,2)) {
+    const snap = r?.entrySignalSnapshotV309;
+    const m = snap?.market || {};
+    const h1=performanceHorizonMultipleV1181(r,"h1");
+    const h6=performanceHorizonMultipleV1181(r,"h6");
+    const h24=performanceHorizonMultipleV1181(r,"h24");
+    const l=entryMetricV1248(r,"liquidity");
+    const mc=entryMetricV1248(r,"marketCap");
+    const flow5=entryMetricV1248(r,"netFlow5m");
+    const flow1=entryMetricV1248(r,"netFlow1h");
+    const proof=r?.entryTelegramDeliveryProofV412?.verified===true && r?.entryTelegramDeliveryProofV412?.source==="TELEGRAM_SEND_API_RESULT_V412";
+    lines.push(`• <b>${escapeHtml(String(r?.symbol||"UNKNOWN"))}</b> (${escapeHtml(String(r?.address||"").slice(0,10))}…): delivery ${proof?"API-PROVEN":"UNVERIFIED"} · 1h ${telegramMultipleV271(h1)} · 6h ${telegramMultipleV271(h6)} · 24h ${telegramMultipleV271(h24)}`,
+      `  Frozen entry: MC ${mc===null?"UNVERIFIED":telegramMoneyV271(mc)} · liquidity ${l===null?"UNVERIFIED":telegramMoneyV271(l)} · 5m net ${flow5===null?"UNVERIFIED":flow5.toFixed(2)+" USD"} · 1h net ${flow1===null?"UNVERIFIED":flow1.toFixed(2)+" USD"}`,
+      `  Crash mechanism: <b>UNVERIFIED</b> · exact-pool liquidity withdrawal / holder sells / price-feed discrepancy need independent transaction-level evidence.`);
+  }
+  const coverageV1253 = (metric)=>crashRowsV1253.filter(r=>entryMetricV1248(r,metric)!==null).length;
+  lines.push(`Early-crash entry evidence coverage: verified liquidity ${coverageV1253("liquidity")}/${crashRowsV1253.length} · market cap ${coverageV1253("marketCap")}/${crashRowsV1253.length} · 5m directional net ${coverageV1253("netFlow5m")}/${crashRowsV1253.length} · 1h directional net ${coverageV1253("netFlow1h")}/${crashRowsV1253.length}.`,
+    "<i>Market-cap multiples indicate price collapse, not proof of a rug. No post-call exact-pool LP event or whale-sale history is collected by this report. Historical evidence is not reconstructed. No added RPC/provider requests, writes, qualifications, Telegram actions or budget changes.</i>");
 
   const shown = detail ? entries.slice(0,250) : entries.slice(0,6);
   lines.push("", detail ? "📚 <b>Per-call performance</b>" : "🕒 <b>Latest calls</b>");
