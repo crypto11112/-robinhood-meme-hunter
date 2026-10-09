@@ -1,3 +1,4 @@
+// ChainVanta V1260 — V1259 production baseline + isolated exact V4 PoolId parity diagnostic.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51595,6 +51596,50 @@ async function v4Erc20MetaV771(rpcUrl, token) {
   if(decimals?.ok){const d=decodeErc20ProbeValueV419("decimals",decimals.result);if(d?.verified && Number.isInteger(d.value) && d.value>=0 && d.value<=255){out.decimals=d.value;out.decimalsVerified=true;}}
   if(!out.symbolVerified||!out.decimalsVerified) out.error=`${!out.symbolVerified?"SYMBOL_UNVERIFIED":""}${!out.symbolVerified&&!out.decimalsVerified?"+":""}${!out.decimalsVerified?"DECIMALS_UNVERIFIED":""}`;
   return out;
+}
+
+// V1260: read-only comparison of an independently verified exact V4 PoolId
+// against the V771 global PoolManager swap scan over the SAME block range.
+// No KV access/writes, scoring changes, watch registration, or Telegram sends.
+async function v4ExactPoolParityV1260(env, poolInput="") {
+  const poolId=normalize(poolInput);
+  const base={version:"V1260",diagnostic:"V4_EXACT_POOL_VS_GLOBAL_SWAP_PARITY",safe:true,
+    stateWrites:0,kvReads:0,kvWrites:0,scannerMutated:false,telegramMutated:false,
+    poolId:isBytes32HexV765(poolId)?poolId:null,rpcProvider:null,headBlock:null,
+    fromBlock:null,toBlock:null,windowBlocks:600,externalRequestsUsed:0,
+    exactSwapCount:null,globalSwapCount:null,globalMatchingPoolSwaps:null,
+    globalResultsPossiblyCapped:false,exactResultsPossiblyCapped:false,
+    exactHttpStatus:null,globalHttpStatus:null,exactError:null,globalError:null,
+    parity:"NOT_TESTED",status:"NOT_TESTED"};
+  if(!isBytes32HexV765(poolId)) return {...base,status:"INVALID_POOLID_REQUIRE_BYTES32"};
+  const rpc=v4PoolLiveRpcEndpointV767(env);base.rpcProvider=rpc.name;
+  const head=await v4PoolLiveRpcCallV767(rpc.url,"eth_blockNumber",[]);base.externalRequestsUsed++;
+  if(!head?.ok) return {...base,status:"HEAD_RPC_FAILED",headError:head?.error||"UNKNOWN"};
+  const h=Number.parseInt(String(head.result||""),16);
+  if(!Number.isSafeInteger(h)||h<0) return {...base,status:"INVALID_HEAD"};
+  const from=Math.max(0,h-599);base.headBlock=h;base.fromBlock=from;base.toBlock=h;
+  const range={address:POOL_MANAGER,fromBlock:`0x${from.toString(16)}`,toBlock:`0x${h.toString(16)}`};
+  const exact=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{...range,topics:[SWAP_TOPIC,poolId]}]);base.externalRequestsUsed++;
+  base.exactHttpStatus=exact?.httpStatus??null;
+  if(!exact?.ok){base.exactError=String(exact?.error||"UNKNOWN").slice(0,160);return {...base,status:"EXACT_POOL_LOG_QUERY_FAILED"};}
+  const exactRows=Array.isArray(exact.result)?exact.result:[];
+  base.exactSwapCount=exactRows.length;
+  base.exactResultsPossiblyCapped=exactRows.length>=1000;
+  const global=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{...range,topics:[SWAP_TOPIC]}]);base.externalRequestsUsed++;
+  base.globalHttpStatus=global?.httpStatus??null;
+  if(!global?.ok){base.globalError=String(global?.error||"UNKNOWN").slice(0,160);return {...base,status:"GLOBAL_LOG_QUERY_FAILED"};}
+  const globalRows=Array.isArray(global.result)?global.result:[];
+  base.globalSwapCount=globalRows.length;
+  base.globalMatchingPoolSwaps=globalRows.filter(row=>normalize(row?.topics?.[1])===poolId).length;
+  base.globalResultsPossiblyCapped=globalRows.length>=1000;
+  // An apparent mismatch can be a provider saturation/truncation artefact.
+  if(base.globalResultsPossiblyCapped||base.exactResultsPossiblyCapped){base.parity="INCONCLUSIVE_POSSIBLE_LOG_CAP";}
+  else if(base.exactSwapCount===base.globalMatchingPoolSwaps){base.parity="COUNTS_MATCH";}
+  else{base.parity="COUNT_MISMATCH_INVESTIGATE_PROVIDER_OR_FILTER";}
+  base.status=base.exactSwapCount===0?"NO_EXACT_POOL_SWAP_IN_WINDOW":
+    base.parity==="COUNTS_MATCH"?"EXACT_POOL_ACTIVITY_CONFIRMED_PARITY_MATCH":
+    "EXACT_POOL_ACTIVITY_PRESENT_PARITY_UNRESOLVED";
+  return base;
 }
 
 async function v4AllPoolsAmountsDiagnosticV771(env, requestedToken="") {
@@ -202376,7 +202421,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -203780,6 +203825,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4exactpool-parity") {
+    return jsonResponse(await v4ExactPoolParityV1260(env,url.searchParams.get("pool")||""));
   }
 
   if (path === "/v4manualflowaudit") {
