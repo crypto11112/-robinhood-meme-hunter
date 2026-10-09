@@ -1,4 +1,4 @@
-// ChainVanta V1279 — production scoring candidate/handoff coverage audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1280 — nine-timeframe verified directional ledger coverage audit; protected, read-only; no scanner or scoring behaviour changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,67 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1280: observational nine-window audit. Rows are observed samples, never asserted
+// to be complete market history. No RPC, new state writes, scoring or Telegram calls.
+async function v4NineTimeframeCoverageV1280(env) {
+  const base={version:'V1280',diagnostic:'V4_NINE_TIMEFRAME_COVERAGE',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
+    telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try {loaded=await readState(env);} catch(e){return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};}
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{},now=Date.now();
+  const windows=[['1m',60000],['5m',300000],['15m',900000],['30m',1800000],
+    ['1h',3600000],['4h',14400000],['6h',21600000],['12h',43200000],['24h',86400000]];
+  const ledgers=state.onChainDirectionalV179&&typeof state.onChainDirectionalV179==='object'&&!Array.isArray(state.onChainDirectionalV179)?state.onChainDirectionalV179:{};
+  const round=n=>Math.round(n*100)/100;
+  const all=[],perToken=[],excluded={invalidToken:0,invalidPool:0,unverified:0,invalidUsd:0,invalidSide:0,invalidTime:0};
+  let rawRows=0,cappedTokenLedgers=0;
+  for(const [address,ledger] of Object.entries(ledgers)){
+    const token=normalize(address);
+    if(!isAddress(token)){excluded.invalidToken++;continue;}
+    const raw=Array.isArray(ledger?.records)?ledger.records:[];
+    rawRows+=raw.length;
+    if(raw.length>=ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179)cappedTokenLedgers++;
+    const rows=[];
+    for(const r of raw){
+      const pool=normalize(r?.poolId||''),usd=Number(r?.exactUsdAmount),at=Number(r?.observedAt);
+      if(!/^0x[0-9a-f]{64}$/i.test(pool)){excluded.invalidPool++;continue;}
+      if(r?.exactUsdVerified!==true){excluded.unverified++;continue;}
+      if(!Number.isFinite(usd)||usd<=0){excluded.invalidUsd++;continue;}
+      if(r?.side!=='buy'&&r?.side!=='sell'){excluded.invalidSide++;continue;}
+      if(!Number.isFinite(at)||at<=0||at>now){excluded.invalidTime++;continue;}
+      const row={token,pool,usd,at,side:r.side};rows.push(row);all.push(row);
+    }
+    if(rows.length){
+      const oldest=Math.min(...rows.map(r=>r.at)),newest=Math.max(...rows.map(r=>r.at));
+      perToken.push({token,verifiedRows:rows.length,rawRows:raw.length,
+        atRetentionCap:raw.length>=ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179,
+        oldestVerifiedAt:oldest,newestVerifiedAt:newest,
+        observedSpanMinutes:round((newest-oldest)/60000),
+        observedWindows:windows.map(([name,ms])=>({window:name,rows:rows.filter(r=>r.at>=now-ms).length,
+          oldestRowReachesWindowStart:oldest<=now-ms,
+          completeness:'UNPROVEN_OBSERVED_ROWS_ONLY'}))});
+    }
+  }
+  const summaries=windows.map(([name,ms])=>{
+    const rows=all.filter(r=>r.at>=now-ms),buys=rows.filter(r=>r.side==='buy'),sells=rows.filter(r=>r.side==='sell');
+    const buyUsd=round(buys.reduce((n,r)=>n+r.usd,0)),sellUsd=round(sells.reduce((n,r)=>n+r.usd,0));
+    return {window:name,verifiedObservedTrades:rows.length,tokenCount:new Set(rows.map(r=>r.token)).size,
+      poolCount:new Set(rows.map(r=>r.pool)).size,buyTrades:buys.length,sellTrades:sells.length,
+      observedBuyUsd:buyUsd,observedSellUsd:sellUsd,observedNetUsd:round(buyUsd-sellUsd),
+      marketCompleteness:'NOT_PROVEN',safeForFullWindowScoring:false};
+  });
+  perToken.sort((a,b)=>b.verifiedRows-a.verifiedRows||a.token.localeCompare(b.token));
+  return {...base,status:'NINE_TIMEFRAME_OBSERVED_COVERAGE_AUDITED',
+    retentionCapPerToken:ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179,
+    tokenLedgers:Object.keys(ledgers).length,rawRows,verifiedDirectionalRows:all.length,
+    tokensWithVerifiedRows:perToken.length,tokenLedgersAtRetentionCap:cappedTokenLedgers,
+    excluded,windows:summaries,topTokens:perToken.slice(0,10),truncated:perToken.length>10,
+    interpretation:'Nine windows are calculated from existing verified observed V179 rows only. The oldest retained trade reaching a window boundary does NOT establish uninterrupted collection or complete market coverage. No window is approved for full-window scoring by this diagnostic.',
+    nextStep:'Compare existing production window implementations and collection continuity before adding missing calculations or activating new scoring.'};
 }
 
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
@@ -203800,7 +203861,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205204,6 +205265,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4nine-timeframe-coverage") {
+    return jsonResponse(await v4NineTimeframeCoverageV1280(env));
   }
 
   if (path === "/v4directional-scoring-coverage") {
