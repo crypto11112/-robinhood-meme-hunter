@@ -51802,6 +51802,80 @@ async function v4SYNTHSProductionAttributionV1271(env) {
     lastActualStatusV1275:lastActualLiveCollectionV1275 ? 'ACTUAL_COLLECTION_RETAINED' : 'AWAITING_FIRST_ACTUAL_COLLECTION_AFTER_V1275'};
 }
 
+// V1276: read-only post-collection evidence bridge. Reports only stored production
+// observations and explicitly marks timestamps so independent runs are not
+// incorrectly treated as a single swap-to-USD causal trace.
+async function v4DirectionalEvidenceBridgeV1276(env) {
+  const base = {version:'V1276',diagnostic:'V4_LIVE_TO_DIRECTIONAL_EVIDENCE_BRIDGE',
+    safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
+    telegramMutated:false,scoringChanged:false,status:'NOT_TESTED'};
+  let loaded;
+  try { loaded = await readState(env); }
+  catch (error) { return {...base,status:'STATE_READ_FAILED',error:errorString(error).slice(0,160)}; }
+  if (loaded?.error) return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const live=state.v4LastActualLiveCollectionV1275||null;
+  const trace=live?.trace||null;
+  const collector=state.v4V179AllTouchedRetentionTraceV1266||null;
+  const retention=state.v4V179RetentionTraceV1265||null;
+  const run=state.v4V179RunTraceV1263||null;
+  const history=Array.isArray(state.v4SYNTHSIngestionHistoryV1269)?state.v4SYNTHSIngestionHistoryV1269:[];
+  const lastSYNTHS=history.length?history[history.length-1]:null;
+  const token='0x61e0deba0a6bd1d0df92af816739449c861e3cce';
+  const pool='0xeac7a9ef9babd0ca9a579d30fe194c31dfbdca970e0531977308cc2429768b0e';
+  const ledger=onChainDirectionalStoreV179(state)?.[token];
+  const rows=Array.isArray(ledger?.records)?ledger.records:[];
+  const exact=rows.filter(row=>normalize(row?.poolId)===pool);
+  const verified=exact.filter(row=>row?.exactUsdVerified===true &&
+    Number.isFinite(Number(row?.exactUsdAmount)) && Number(row.exactUsdAmount)>0 &&
+    (row?.side==='buy'||row?.side==='sell'));
+  const currentTime=Date.now();
+  const recent=verified.filter(row=>safeNumber(row?.observedAt)>currentTime-86400000 && safeNumber(row?.observedAt)<=currentTime);
+  const buy=recent.filter(row=>row.side==='buy');
+  const sell=recent.filter(row=>row.side==='sell');
+  const sum=items=>Math.round(items.reduce((total,row)=>total+Number(row.exactUsdAmount),0)*100)/100;
+  const collectionAt=Number(live?.capturedAt)||null;
+  const collectorAt=Number(collector?.capturedAt)||null;
+  const retentionAt=Number(retention?.capturedAt)||null;
+  const lastSYNTHSAt=Number(lastSYNTHS?.at)||null;
+  const timesComparable=Boolean(collectionAt&&collectorAt&&Math.abs(collectionAt-collectorAt)<=120000);
+  return {...base,status:!trace?'AWAITING_ACTUAL_LIVE_COLLECTION':
+      !trace.liveScanSuccess?'LAST_LIVE_COLLECTION_INCOMPLETE':
+      !collector?'AWAITING_V179_COLLECTOR_EVIDENCE':
+      'PRODUCTION_EVIDENCE_AVAILABLE_CHECK_RUN_ALIGNMENT',
+    live:{capturedAt:collectionAt,attempted:trace?.liveCollectionAttempted===true,
+      success:trace?.liveScanSuccess===true,requestedFrom:trace?.requestedLiveFrom??null,
+      requestedTo:trace?.requestedLiveTo??null,processedThrough:trace?.processedThrough??null,
+      swapLogsInsideWindow:trace?.swapLogsInsideRequestedLiveWindow??null,
+      targetPoolSwapsInsideWindow:trace?.targetPoolInsideRequestedLiveWindow??null},
+    v179Collector:collector?{capturedAt:collectorAt,swapLogsSeen:collector.productionSwapLogsSeen??null,
+      decoded:collector.productionDecoded??null,exactUsdVerified:collector.productionExactUsdVerified??null,
+      touchedTokenCount:collector.touchedTokenCount??null,
+      exactUsdTouchedTokenCount:collector.exactUsdTouchedTokenCount??null,
+      exactUsdSurvivedAfterPrune:collector.exactUsdSurvivedAfterPrune??null,
+      exactUsdEvictedByPrune:collector.exactUsdEvictedByPrune??null,
+      firstObservedStage:collector.firstObservedStage??null}:null,
+    v179RunTrace:{available:!!run},
+    runAlignment:{collectionAt,collectorAt,retentionAt,lastSYNTHSAt,
+      withinTwoMinutes:timesComparable,
+      note:'Timestamp proximity does not prove individual logs were decoded or converted; compare source run IDs where available.'},
+    synths:{token,pool,latestIngestion:lastSYNTHS?{
+      at:lastSYNTHSAt,inputSwapLogs:lastSYNTHS.inputSwapLogs??null,
+      targetPoolSwapLogs:lastSYNTHS.targetPoolSwapLogs??null,
+      targetDecoded:lastSYNTHS.targetDecoded??null,
+      targetExactUsd:lastSYNTHS.targetExactUsd??null,
+      targetInserted:lastSYNTHS.targetInserted??null,
+      firstReject:lastSYNTHS.firstReject??null,
+      stage:lastSYNTHS.stage??null}:null,
+      ledgerRows:rows.length,exactPoolRows:exact.length,exactUsdVerifiedRows:verified.length,
+      recent24hVerifiedRows:recent.length,recent24hBuyUsd:sum(buy),recent24hSellUsd:sum(sell),
+      recent24hNetUsd:Math.round((sum(buy)-sum(sell))*100)/100,
+      note:'USD totals describe persisted exact-pool ledger rows, not the last 20-block live collection.'},
+    limitations:['Read-only stored state; no independent RPC verification.',
+      'A V4 Swap log may not correspond to a tracked token or a USD-priceable quote.',
+      'The latest V179 collector snapshot and live collection may come from different production runs.']};
+}
+
 // V1270: on-demand exact PoolId RPC check against the SAME saved production
 // requested range. Does not run in the scanner. At most one external RPC
 // request, and never substitutes an inferred range when coverage is unknown.
@@ -203528,7 +203602,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -204932,6 +205006,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4directional-evidence") {
+    return jsonResponse(await v4DirectionalEvidenceBridgeV1276(env));
   }
 
   if (path === "/v4synths-range-attribution") {
