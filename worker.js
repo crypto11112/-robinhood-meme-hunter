@@ -1,4 +1,4 @@
-// ChainVanta V1263 — V1262 production baseline + passive production-run V4 V179 ingestion trace.
+// ChainVanta V1264 — V1263 production baseline + same-range exact-pool coverage proof.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51705,6 +51705,132 @@ async function v4FlowWatchHandoffV1261(env, tokenInput="", poolInput="") {
   base.notes.push("Live V771 swap counts prove decoding, not USD-verified V179 persistence.");
   base.notes.push("This endpoint performs one KV read and no RPC, Uniswap, provider or state writes.");
   return base;
+}
+
+
+// V1264: one-request, read-only same-range proof.
+// It independently asks the configured V4 RPC for the exact PoolId over the
+// identical block coverage captured from the most recent production live scan.
+// This distinguishes genuine inactivity from a production global-scan miss.
+async function v4LiveOutputCoverageTraceV1264(env) {
+  const out = {
+    version: "V1264",
+    diagnostic: "V4_LIVE_OUTPUT_SAME_RANGE_COVERAGE_TRACE",
+    safe: true,
+    kvReads: 0,
+    kvWrites: 0,
+    stateWrites: 0,
+    scannerMutated: false,
+    telegramMutated: false,
+    externalRequestsUsed: 0,
+    traceAvailable: false,
+    productionTrace: null,
+    rpcProvider: null,
+    exactQueryHttpStatus: null,
+    exactQueryError: null,
+    exactPoolSwapCountSameRange: null,
+    exactResultsPossiblyCapped: false,
+    comparison: "NOT_TESTED",
+    status: "NOT_TESTED"
+  };
+
+  let loaded;
+  try {
+    loaded = await readState(env);
+    out.kvReads = 1;
+  } catch (error) {
+    return {
+      ...out,
+      kvReads: 1,
+      status: "STATE_READ_FAILED",
+      exactQueryError: errorString(error)
+    };
+  }
+
+  const trace = loaded?.state?.v4LiveOutputCoverageTraceV1264 || null;
+  out.traceAvailable = !!trace;
+  out.productionTrace = trace;
+
+  if (!trace) {
+    return {
+      ...out,
+      status: "AWAITING_NEXT_PRODUCTION_SCAN"
+    };
+  }
+
+  const poolId = normalize(trace?.poolId);
+  const fromBlock = safeNumber(trace?.coveredFrom);
+  const toBlock = safeNumber(trace?.coveredTo);
+
+  if (
+    !isBytes32HexV765(poolId) ||
+    !Number.isSafeInteger(fromBlock) ||
+    !Number.isSafeInteger(toBlock) ||
+    fromBlock < 0 ||
+    toBlock < fromBlock
+  ) {
+    return {
+      ...out,
+      status: "PRODUCTION_COVERAGE_RANGE_UNAVAILABLE"
+    };
+  }
+
+  // Keep this diagnostic bounded. Normal live coverage is <=600 blocks.
+  const span = toBlock - fromBlock + 1;
+  if (span > 600) {
+    return {
+      ...out,
+      status: "PRODUCTION_COVERAGE_RANGE_EXCEEDS_600_BLOCK_DIAGNOSTIC_BOUND",
+      coveredSpan: span
+    };
+  }
+
+  const rpc = v4PoolLiveRpcEndpointV767(env);
+  out.rpcProvider = rpc.name;
+
+  const exact = await v4PoolLiveRpcCallV767(
+    rpc.url,
+    "eth_getLogs",
+    [{
+      address: POOL_MANAGER,
+      fromBlock: `0x${fromBlock.toString(16)}`,
+      toBlock: `0x${toBlock.toString(16)}`,
+      topics: [SWAP_TOPIC, poolId]
+    }]
+  );
+  out.externalRequestsUsed = 1;
+  out.exactQueryHttpStatus = exact?.httpStatus ?? null;
+
+  if (!exact?.ok) {
+    out.exactQueryError = String(exact?.error || "UNKNOWN").slice(0, 200);
+    out.status = "EXACT_POOL_SAME_RANGE_QUERY_FAILED";
+    return out;
+  }
+
+  const exactRows = Array.isArray(exact?.result) ? exact.result : [];
+  const productionCount = safeNumber(trace?.liveTargetPoolSwapLogs);
+
+  out.exactPoolSwapCountSameRange = exactRows.length;
+  out.exactResultsPossiblyCapped = exactRows.length >= 1000;
+
+  if (out.exactResultsPossiblyCapped) {
+    out.comparison = "INCONCLUSIVE_EXACT_QUERY_POSSIBLY_CAPPED";
+    out.status = "EXACT_QUERY_POSSIBLY_CAPPED";
+  } else if (exactRows.length === 0 && productionCount === 0) {
+    out.comparison = "BOTH_ZERO";
+    out.status = "NO_TARGET_ACTIVITY_IN_PRODUCTION_COVERED_RANGE";
+  } else if (exactRows.length > 0 && productionCount === 0) {
+    out.comparison = "EXACT_HAS_SWAPS_PRODUCTION_HAS_ZERO";
+    out.status = "PRODUCTION_GLOBAL_SCAN_MISSED_EXACT_POOL_SWAPS";
+  } else if (exactRows.length === productionCount) {
+    out.comparison = "COUNTS_MATCH";
+    out.status = "PRODUCTION_GLOBAL_SCAN_MATCHES_EXACT_POOL";
+  } else {
+    out.comparison = "COUNT_MISMATCH";
+    out.status = "PRODUCTION_GLOBAL_SCAN_COUNT_MISMATCH";
+  }
+
+  return out;
 }
 
 async function v4ExactPoolParityV1260(env, poolInput="") {
@@ -115319,41 +115445,98 @@ for (
       uniswapEthUsdGReferenceV196
     );
 
-  // V1263: bounded, passive production-run evidence. Reuses the existing live
-  // logs and the existing V179 ledger. No RPC, extra KV write, or scoring change.
+  // V1264: passive production-run coverage trace. Reuses the existing live
+  // output and V179 ledger and records the exact block coverage actually
+  // processed. No extra provider request is made during production scanning.
   try {
-    const traceTokenV1263 = "0x212671f9a1b52e251a2a05481ed098bfa89c1849";
-    const tracePoolV1263 = "0x122e438ec5a2831520c601012bfeefffb6e700f9545369ef0e482a32d1bc4906";
-    const allLiveV1263 = Array.isArray(liveOutput?.logs) ? liveOutput.logs : [];
-    let poolSwapsV1263 = 0;
-    let globalSwapsV1263 = 0;
-    for (const logV1263 of allLiveV1263) {
-      if (normalize(logV1263?.topics?.[0]) !== SWAP_TOPIC) continue;
-      globalSwapsV1263++;
-      if (normalize(logV1263?.topics?.[1]) === tracePoolV1263) poolSwapsV1263++;
+    const traceTokenV1264 = "0x212671f9a1b52e251a2a05481ed098bfa89c1849";
+    const tracePoolV1264 = "0x122e438ec5a2831520c601012bfeefffb6e700f9545369ef0e482a32d1bc4906";
+    const allLiveV1264 = Array.isArray(liveOutput?.logs) ? liveOutput.logs : [];
+    const rangesV1264 = Array.isArray(liveOutput?.ranges) ? liveOutput.ranges : [];
+    let poolSwapsV1264 = 0;
+    let globalSwapsV1264 = 0;
+
+    for (const logV1264 of allLiveV1264) {
+      if (normalize(logV1264?.topics?.[0]) !== SWAP_TOPIC) continue;
+      globalSwapsV1264++;
+      if (normalize(logV1264?.topics?.[1]) === tracePoolV1264) poolSwapsV1264++;
     }
-    const rowsV1263 = onChainDirectionalStoreV179(state)?.[traceTokenV1263]?.records;
-    const exactRowsV1263 = Array.isArray(rowsV1263)
-      ? rowsV1263.filter(r => normalize(r?.poolId) === tracePoolV1263) : [];
-    const exactUsdV1263 = exactRowsV1263.filter(r => r?.exactUsdVerified === true);
-    state.v4V179RunTraceV1263 = {
-      version:"V1263", capturedAt:Date.now(), headBlock:Number.isFinite(latestNumber)?latestNumber:null,
-      tokenAddress:traceTokenV1263,poolId:tracePoolV1263,
-      liveSwapLogs:globalSwapsV1263,liveTargetPoolSwapLogs:poolSwapsV1263,
-      v179SwapLogsSeen:safeNumber(onChainDirectionalV179?.swapLogsSeen),
-      v179Decoded:safeNumber(onChainDirectionalV179?.decoded),
-      v179ExactUsdVerified:safeNumber(onChainDirectionalV179?.exactUsdVerified),
-      v179Rejections:onChainDirectionalV179?.rejectionReasons||{},
-      ledgerTargetRows:exactRowsV1263.length,ledgerTargetExactUsdRows:exactUsdV1263.length,
-      targetTouched:(onChainDirectionalV179?.touchedTokens||[]).includes(traceTokenV1263),
-      firstObservedStage:poolSwapsV1263===0?"TARGET_POOL_ABSENT_FROM_LIVE_OUTPUT":
-        exactRowsV1263.length===0?"TARGET_POOL_IN_LIVE_OUTPUT_BUT_NO_PERSISTED_ROWS":
-        exactUsdV1263.length===0?"TARGET_LEDGER_ROWS_NOT_USD_VERIFIED":"TARGET_LEDGER_EXACT_USD_ROWS_PRESENT",
-      limits:["Run-wide V179 rejection totals are not per-pool counts.",
-        "This trace observes existing scanner inputs only; it does not expand scan coverage."],
-      externalRequestsAdded:0,extraKvWrites:0,scoringChanged:false,telegramMutated:false
+
+    const coveredFromV1264 = rangesV1264.length
+      ? Math.min(...rangesV1264.map(r => safeNumber(r?.fromBlock)).filter(Number.isFinite))
+      : null;
+    const coveredToV1264 = rangesV1264.length
+      ? Math.max(...rangesV1264.map(r => safeNumber(r?.toBlock)).filter(Number.isFinite))
+      : null;
+    const coveredBlocksV1264 = rangesV1264.reduce(
+      (sum, r) => sum + Math.max(0, safeNumber(r?.blocks)),
+      0
+    );
+
+    const rowsV1264 = onChainDirectionalStoreV179(state)?.[traceTokenV1264]?.records;
+    const exactRowsV1264 = Array.isArray(rowsV1264)
+      ? rowsV1264.filter(r => normalize(r?.poolId) === tracePoolV1264)
+      : [];
+    const exactUsdV1264 = exactRowsV1264.filter(r => r?.exactUsdVerified === true);
+
+    state.v4LiveOutputCoverageTraceV1264 = {
+      version: "V1264",
+      capturedAt: Date.now(),
+      headBlock: Number.isFinite(latestNumber) ? latestNumber : null,
+      tokenAddress: traceTokenV1264,
+      poolId: tracePoolV1264,
+
+      requestedLiveFrom: Number(live?.from ?? 0n),
+      requestedLiveTo: Number(live?.to ?? 0n),
+      processedThrough:
+        liveScan?.processedThrough !== null &&
+        liveScan?.processedThrough !== undefined
+          ? Number(liveScan.processedThrough)
+          : null,
+      effectiveTo:
+        liveScan?.effectiveTo !== null &&
+        liveScan?.effectiveTo !== undefined
+          ? Number(liveScan.effectiveTo)
+          : null,
+      liveScanSuccess: liveScan?.success === true,
+      liveScanError: liveScan?.error || null,
+
+      coveredFrom: Number.isFinite(coveredFromV1264) ? coveredFromV1264 : null,
+      coveredTo: Number.isFinite(coveredToV1264) ? coveredToV1264 : null,
+      coveredBlocks: coveredBlocksV1264,
+      rangeCount: rangesV1264.length,
+      providers: Array.from(
+        new Set(rangesV1264.map(r => String(r?.provider || "")).filter(Boolean))
+      ),
+
+      liveSwapLogs: globalSwapsV1264,
+      liveTargetPoolSwapLogs: poolSwapsV1264,
+      v179SwapLogsSeen: safeNumber(onChainDirectionalV179?.swapLogsSeen),
+      v179Decoded: safeNumber(onChainDirectionalV179?.decoded),
+      v179ExactUsdVerified: safeNumber(onChainDirectionalV179?.exactUsdVerified),
+      ledgerTargetRows: exactRowsV1264.length,
+      ledgerTargetExactUsdRows: exactUsdV1264.length,
+      targetTouched: (onChainDirectionalV179?.touchedTokens || []).includes(traceTokenV1264),
+
+      firstObservedStage:
+        poolSwapsV1264 === 0
+          ? "TARGET_POOL_ABSENT_FROM_LIVE_OUTPUT"
+          : exactRowsV1264.length === 0
+            ? "TARGET_POOL_IN_LIVE_OUTPUT_BUT_NO_PERSISTED_ROWS"
+            : exactUsdV1264.length === 0
+              ? "TARGET_LEDGER_ROWS_NOT_USD_VERIFIED"
+              : "TARGET_LEDGER_EXACT_USD_ROWS_PRESENT",
+
+      limits: [
+        "Production trace itself adds zero provider requests.",
+        "Absence from liveOutput alone does not prove a coverage bug; the V1264 endpoint independently queries the exact PoolId over the same covered range."
+      ],
+      externalRequestsAdded: 0,
+      extraKvWrites: 0,
+      scoringChanged: false,
+      telegramMutated: false
     };
-  } catch (_v1263TraceError) {
+  } catch (_v1264TraceError) {
     // Diagnostics must never interrupt production scans.
   }
 
@@ -202565,7 +202748,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -203969,6 +204152,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4liveoutput-coverage-trace") {
+    return jsonResponse(await v4LiveOutputCoverageTraceV1264(env));
   }
 
   if (path === "/v4v179-run-trace") {
