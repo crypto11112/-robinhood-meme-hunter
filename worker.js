@@ -1,4 +1,4 @@
-// ChainVanta V1260 — V1259 production baseline + isolated exact V4 PoolId parity diagnostic.
+// ChainVanta V1261 — V1260 production baseline + isolated read-only V4 flow/watch handoff audit.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -51601,6 +51601,66 @@ async function v4Erc20MetaV771(rpcUrl, token) {
 // V1260: read-only comparison of an independently verified exact V4 PoolId
 // against the V771 global PoolManager swap scan over the SAME block range.
 // No KV access/writes, scoring changes, watch registration, or Telegram sends.
+// V1261: zero-provider, read-only trace from persisted V179 ledger through V212 and V570 watch.
+// This does not assert that live V771 swaps were persisted as verified USD trades.
+async function v4FlowWatchHandoffV1261(env, tokenInput="", poolInput="") {
+  const token=normalize(tokenInput),poolId=normalize(poolInput);
+  const base={version:"V1261",diagnostic:"V4_FLOW_TO_AUTONOMOUS_WATCH_HANDOFF",safe:true,
+    stateWrites:0,kvReads:0,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+    tokenAddress:isAddress(token)?token:null,poolId:isBytes32HexV765(poolId)?poolId:null,
+    persistedLedgerRows:0,exactPoolLedgerRows:0,exactUsdRows:0,validV212Rows:0,
+    rejected:{wrongToken:0,wrongPool:0,side:0,usd:0,observedAt:0,stale24h:0},
+    v212Verified:false,v212PoolContainsExact:false,v212Status:null,
+    watchFound:false,watchExactPoolMatch:false,quoteTokens:[],quoteConsistent:false,quotePriceable:false,
+    firstFailingStage:"NOT_TESTED",notes:[]};
+  if(!isAddress(token))return {...base,firstFailingStage:"INVALID_TOKEN"};
+  if(!isBytes32HexV765(poolId))return {...base,firstFailingStage:"INVALID_POOLID"};
+  let loaded;try{loaded=await readState(env);base.kvReads=1;}catch(e){return {...base,kvReads:1,firstFailingStage:"STATE_READ_FAILED",notes:[errorString(e).slice(0,100)]};}
+  if(loaded?.error)return {...base,firstFailingStage:"STATE_READ_ERROR",notes:[String(loaded.error).slice(0,100)]};
+  const state=loaded?.state||{};
+  const ledger=onChainDirectionalStoreV179(state)?.[token];
+  const rows=Array.isArray(ledger?.records)?ledger.records:[];
+  base.persistedLedgerRows=rows.length;
+  const now=Date.now();
+  const exact=[];
+  for(const row of rows){
+    if(normalize(row?.candidateAddress)!==token){base.rejected.wrongToken++;continue;}
+    if(normalize(row?.poolId)!==poolId){base.rejected.wrongPool++;continue;}
+    exact.push(row);
+    if(row?.side!=="buy"&&row?.side!=="sell")base.rejected.side++;
+    if(row?.exactUsdVerified!==true||!Number.isFinite(Number(row?.exactUsdAmount))||Number(row.exactUsdAmount)<=0)base.rejected.usd++;
+    if(safeNumber(row?.observedAt)<=0||safeNumber(row?.observedAt)>now)base.rejected.observedAt++;
+    else if(safeNumber(row.observedAt)<now-86400000)base.rejected.stale24h++;
+  }
+  base.exactPoolLedgerRows=exact.length;
+  const usd=exact.filter(row=>row?.exactUsdVerified===true&&Number.isFinite(Number(row?.exactUsdAmount))&&Number(row.exactUsdAmount)>0&&(row.side==="buy"||row.side==="sell"));
+  base.exactUsdRows=usd.length;
+  base.validV212Rows=usd.filter(row=>safeNumber(row?.observedAt)>now-86400000&&safeNumber(row?.observedAt)<=now).length;
+  const flow=candidateVerifiedOnChainFlowV212({address:token},state);
+  base.v212Verified=flow?.verified===true;
+  base.v212PoolContainsExact=Array.isArray(flow?.poolIds)&&flow.poolIds.map(normalize).includes(poolId);
+  base.v212Status=flow?.status||null;
+  const watches=Object.values(directionalWatchRootV551(state)?.entries||{}).filter(w=>normalize(w?.tokenAddress)===token);
+  base.watchFound=watches.length>0;
+  base.watchExactPoolMatch=watches.some(w=>normalize(w?.poolId)===poolId);
+  base.quoteTokens=[...new Set(usd.map(row=>normalize(row?.quoteTokenAddress)).filter(isAddress))];
+  base.quoteConsistent=base.quoteTokens.length===1;
+  if(base.quoteConsistent){const q=v254PriceableQuote(base.quoteTokens[0],bestVerifiedWethUsdGReferenceV195(state));base.quotePriceable=q?.eligible===true;}
+  if(base.watchExactPoolMatch)base.firstFailingStage="WATCH_ALREADY_REGISTERED";
+  else if(!rows.length)base.firstFailingStage="NO_PERSISTED_V179_TOKEN_LEDGER";
+  else if(!exact.length)base.firstFailingStage="NO_PERSISTED_ROWS_FOR_EXACT_POOL";
+  else if(!usd.length)base.firstFailingStage="NO_EXACT_USD_VERIFIED_ROWS";
+  else if(!base.validV212Rows)base.firstFailingStage="NO_RECENT_V212_ELIGIBLE_ROWS";
+  else if(!base.v212Verified)base.firstFailingStage="V212_FLOW_NOT_VERIFIED_FROM_PERSISTED_LEDGER";
+  else if(!base.v212PoolContainsExact)base.firstFailingStage="V212_MISSING_EXACT_POOL";
+  else if(!base.quoteConsistent)base.firstFailingStage="EXACT_USD_QUOTE_INCONSISTENT";
+  else if(!base.quotePriceable)base.firstFailingStage="QUOTE_NOT_V254_PRICEABLE";
+  else base.firstFailingStage="ELIGIBLE_LEDGER_PRESENT_WATCH_NOT_REGISTERED";
+  base.notes.push("Live V771 swap counts prove decoding, not USD-verified V179 persistence.");
+  base.notes.push("This endpoint performs one KV read and no RPC, Uniswap, provider or state writes.");
+  return base;
+}
+
 async function v4ExactPoolParityV1260(env, poolInput="") {
   const poolId=normalize(poolInput);
   const base={version:"V1260",diagnostic:"V4_EXACT_POOL_VS_GLOBAL_SWAP_PARITY",safe:true,
@@ -202421,7 +202481,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -203825,6 +203885,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4flowwatch-handoff") {
+    return jsonResponse(await v4FlowWatchHandoffV1261(env,url.searchParams.get("token")||"",url.searchParams.get("pool")||""));
   }
 
   if (path === "/v4exactpool-parity") {
