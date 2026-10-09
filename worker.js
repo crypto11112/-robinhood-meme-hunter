@@ -1,4 +1,4 @@
-// ChainVanta V1261 — V1260 production baseline + isolated read-only V4 flow/watch handoff audit.
+// ChainVanta V1263 — V1262 production baseline + passive production-run V4 V179 ingestion trace.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
 // V1256: bounded live WebSocket V3 swap capture with up to 3 independent Alchemy HTTP transaction-receipt parity checks; quiet window adds zero HTTP requests. Protected, read-only; no production changes.
@@ -115319,6 +115319,44 @@ for (
       uniswapEthUsdGReferenceV196
     );
 
+  // V1263: bounded, passive production-run evidence. Reuses the existing live
+  // logs and the existing V179 ledger. No RPC, extra KV write, or scoring change.
+  try {
+    const traceTokenV1263 = "0x212671f9a1b52e251a2a05481ed098bfa89c1849";
+    const tracePoolV1263 = "0x122e438ec5a2831520c601012bfeefffb6e700f9545369ef0e482a32d1bc4906";
+    const allLiveV1263 = Array.isArray(liveOutput?.logs) ? liveOutput.logs : [];
+    let poolSwapsV1263 = 0;
+    let globalSwapsV1263 = 0;
+    for (const logV1263 of allLiveV1263) {
+      if (normalize(logV1263?.topics?.[0]) !== SWAP_TOPIC) continue;
+      globalSwapsV1263++;
+      if (normalize(logV1263?.topics?.[1]) === tracePoolV1263) poolSwapsV1263++;
+    }
+    const rowsV1263 = onChainDirectionalStoreV179(state)?.[traceTokenV1263]?.records;
+    const exactRowsV1263 = Array.isArray(rowsV1263)
+      ? rowsV1263.filter(r => normalize(r?.poolId) === tracePoolV1263) : [];
+    const exactUsdV1263 = exactRowsV1263.filter(r => r?.exactUsdVerified === true);
+    state.v4V179RunTraceV1263 = {
+      version:"V1263", capturedAt:Date.now(), headBlock:Number.isFinite(latestNumber)?latestNumber:null,
+      tokenAddress:traceTokenV1263,poolId:tracePoolV1263,
+      liveSwapLogs:globalSwapsV1263,liveTargetPoolSwapLogs:poolSwapsV1263,
+      v179SwapLogsSeen:safeNumber(onChainDirectionalV179?.swapLogsSeen),
+      v179Decoded:safeNumber(onChainDirectionalV179?.decoded),
+      v179ExactUsdVerified:safeNumber(onChainDirectionalV179?.exactUsdVerified),
+      v179Rejections:onChainDirectionalV179?.rejectionReasons||{},
+      ledgerTargetRows:exactRowsV1263.length,ledgerTargetExactUsdRows:exactUsdV1263.length,
+      targetTouched:(onChainDirectionalV179?.touchedTokens||[]).includes(traceTokenV1263),
+      firstObservedStage:poolSwapsV1263===0?"TARGET_POOL_ABSENT_FROM_LIVE_OUTPUT":
+        exactRowsV1263.length===0?"TARGET_POOL_IN_LIVE_OUTPUT_BUT_NO_PERSISTED_ROWS":
+        exactUsdV1263.length===0?"TARGET_LEDGER_ROWS_NOT_USD_VERIFIED":"TARGET_LEDGER_EXACT_USD_ROWS_PRESENT",
+      limits:["Run-wide V179 rejection totals are not per-pool counts.",
+        "This trace observes existing scanner inputs only; it does not expand scan coverage."],
+      externalRequestsAdded:0,extraKvWrites:0,scoringChanged:false,telegramMutated:false
+    };
+  } catch (_v1263TraceError) {
+    // Diagnostics must never interrupt production scans.
+  }
+
   onChainDirectionalV179
     .bitqueryWethUsdGReferenceV194 =
       bitqueryWethUsdGReferenceV194;
@@ -202527,7 +202565,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -203931,6 +203969,15 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4v179-run-trace") {
+    const loadedV1263=await readState(env);
+    const traceV1263=loadedV1263?.state?.v4V179RunTraceV1263||null;
+    return jsonResponse({version:"V1263",diagnostic:"V4_V179_PRODUCTION_RUN_TRACE",
+      safe:true,kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,
+      traceAvailable:!!traceV1263,trace:traceV1263,
+      status:traceV1263?"RUN_TRACE_AVAILABLE":"AWAITING_NEXT_PRODUCTION_SCAN"});
   }
 
   if (path === "/v4v179-ingestion-trace") {
