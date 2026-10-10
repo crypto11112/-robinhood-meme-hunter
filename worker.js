@@ -1,5 +1,5 @@
-/* V1291: adaptive recent-gap recovery probe (500 → 250 → 100 → 20 blocks); V1289 baseline retained. */
-// ChainVanta V1287 — Record exact recovery partial progress, terminal reason and per-phase budget; no collector changes.
+/* V1292: experimental recent-gap range 2000 → 1000 → 500 → 250 → 100 → 20; live/historical unchanged. */
+// ChainVanta V1292 — Adaptive recent-gap range experiment; based on V1291.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -46009,10 +46009,10 @@ async function scanLiveRange(
   /* V1274: current discovery must never inherit a historic V640 cursor. */
   const recoveryModeV1274 = optionsV1274.recovery === true;
   const recentGapModeV1288 = optionsV1274.recentGap === true;
-  /* V1291: adaptive gap-only bounded range probe. The ordinary live and historical
-   * chunk settings remain capped at 20. A failed probe steps down through
-   * 250/100/20 without advancing the cursor on failure. */
-  if (recentGapModeV1288) chunkSize = 500;
+  /* V1292: gap-only bounded range probe. Ordinary live and historical
+   * chunk settings remain capped at 20. Failures step down without
+   * advancing the cursor. */
+  if (recentGapModeV1288) chunkSize = 2000;
   const requestedTo = to;
   const deferredAtStartV640 = deferredLiveRangeV640(state);
   const activeDeferredAtStartV640 = recoveryModeV1274
@@ -46548,7 +46548,7 @@ async function scanLiveRange(
       )
     ) {
       chunkSize = recentGapModeV1288
-        ? (chunkSize > 250 ? 250 : chunkSize > 100 ? 100 : chunkSize > 20 ? 20 : Math.max(LIVE_SAFE_CHUNK_MIN, Math.floor(chunkSize / 2)))
+        ? (chunkSize > 1000 ? 1000 : chunkSize > 500 ? 500 : chunkSize > 250 ? 250 : chunkSize > 100 ? 100 : chunkSize > 20 ? 20 : Math.max(LIVE_SAFE_CHUNK_MIN, Math.floor(chunkSize / 2)))
         : Math.max(LIVE_SAFE_CHUNK_MIN, Math.floor(chunkSize / 2));
 
       if (!recentGapModeV1288) service.liveChunkBlocks =
@@ -52080,7 +52080,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1291',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1292',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -115946,13 +115946,18 @@ async function scan(
     successfulChunks: recentGapOutputV1288.ranges.length,
     terminalError: recentGapResultV1288?.error ? String(recentGapResultV1288.error).slice(0,120) : null,
     historicalCursorUntouchedByGap: true,
-    gapChunkSizeV1290: recentGapResultV1288?.chunkSize ?? null,
-    gapRangeProbeV1290: true,
-    recoveredBlocksThisScanV1290: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
+    gapChunkSizeV1291: recentGapResultV1288?.chunkSize ?? null,
+    gapRangeProbeV1291: true,
+    recoveredBlocksLegacyV1291: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
     gapAdaptiveRangeV1291: true,
-    requestedInitialChunkV1291: recentGapResultV1288 ? 500 : null,
+    requestedInitialChunkV1291: recentGapResultV1288 ? 2000 : null,
     successfulChunkSizesV1291: recentGapOutputV1288.ranges.map(r=>r.chunkSize),
-    recoveredBlocksThisScanV1291: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0)
+    recoveredBlocksThisScanV1291: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
+    adaptiveRangeV1292: true,
+    requestedInitialChunkV1292: recentGapResultV1288 ? 2000 : null,
+    successfulChunkSizesV1292: recentGapOutputV1288.ranges.map(r=>r.chunkSize),
+    recoveredBlocksThisScanV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
+    recoveredLogCountV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.logs||0),0)
   };
 
   /* V1274: independently resume V640 history, using only spare existing live
