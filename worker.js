@@ -1,4 +1,4 @@
-// ChainVanta V1286 — Record actual recovery gate and per-run budget in existing state save; read-only protected audit.
+// ChainVanta V1287 — Record exact recovery partial progress, terminal reason and per-phase budget; no collector changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,30 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1287: read existing run-end recovery details; no additional provider requests.
+async function v4RecoveryOutcomeActualV1287(env) {
+  const base={version:'V1287',diagnostic:'V4_RECOVERY_OUTCOME_ACTUAL',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
+    telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try {loaded=await readState(env);} catch(e) {
+    return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};
+  }
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const last=state.recoveryGateBudgetV1286||null;
+  const detail=last?.recoveryDetailV1287||null;
+  return {...base,status:detail?'RECOVERY_OUTCOME_RECORDED':'AWAITING_V1287_SCAN',
+    scanStartedAt:last?.scanStartedAt??null,capturedAt:last?.capturedAt??null,
+    eligible:last?.eligible??null,blockers:last?.blockers??null,
+    budgetAtGate:last?.budgetAtGate??null,
+    budgetAfterRecovery:last?.budgetAfterRecoveryV1287??null,
+    budgetAtSave:last?.budgetAtSave??null,
+    recovery:detail,
+    interpretation:'The success flag describes completion of the entire requested range, not successful individual chunks. An older HTTP_429 in persisted state is not proof the latest attempt received 429.',
+    nextStep:detail?'Check partial chunk progress and terminal reason before any collector change.':'Wait for one scheduled scan; no manual scan required.'};
 }
 
 // V1286: read actual persisted last-scan recovery gate and request usage.
@@ -115898,6 +115922,52 @@ async function scan(
   recoveryGateV1286.recoveryAttempted = deferredRecoveryV1274 !== null;
   recoveryGateV1286.recoverySuccess = deferredRecoveryV1274?.success === true;
   recoveryGateV1286.recoveryError = deferredRecoveryV1274?.error ? String(deferredRecoveryV1274.error).slice(0,120) : null;
+  // V1287: differentiate partial successful chunks from a completed 28M-block range.
+  // Capture the collector's existing return object and range records; no new requests.
+  const recoveryDetailV1287 = (() => {
+    const r = deferredRecoveryV1274;
+    const start = pendingRecoveryV1274 ? Number(pendingRecoveryV1274.fromBlock) : null;
+    const target = pendingRecoveryV1274 ? Number(pendingRecoveryV1274.toBlock) : null;
+    const through = r?.processedThrough == null ? null : Number(r.processedThrough);
+    const after = deferredLiveRangeV640(state);
+    const ranges = Array.isArray(deferredRecoveryOutputV1274.ranges) ? deferredRecoveryOutputV1274.ranges : [];
+    const blocks = ranges.reduce((n,x) => n + Math.max(0, Number(x?.blocks)||0), 0);
+    const outcome = !r ? 'NOT_ATTEMPTED' : r.success === true ? 'TARGET_RANGE_COMPLETE' :
+      r.error ? 'TERMINAL_ERROR' : through !== null ? 'PARTIAL_PROGRESS_NO_TERMINAL_ERROR' :
+      'NO_PROGRESS_NO_TERMINAL_ERROR';
+    return {
+      attempted: r !== null, outcome,
+      requestedFrom: Number.isFinite(start) ? start : null,
+      requestedTo: Number.isFinite(target) ? target : null,
+      processedThrough: Number.isFinite(through) ? through : null,
+      nextBlock: r?.nextBlock == null ? null : Number(r.nextBlock),
+      successfulChunks: ranges.length, successfulChunkBlocks: blocks,
+      returnedAttempts: r?.attemptsV1274 ?? null,
+      terminalError: r?.error ? String(r.error).slice(0,180) : null,
+      chunkSizeAtReturn: r?.chunkSize ?? null,
+      providerHeadClamped: r?.providerHeadClamped === true,
+      providerHeadRetries: r?.providerHeadRetries ?? null,
+      abortRecovery: r?.abortRecoveryV156 ? {
+        attempts: r.abortRecoveryV156.attempts ?? null,
+        successes: r.abortRecoveryV156.successes ?? null,
+        alternateProviderRetries: r.abortRecoveryV156.alternateProviderRetries ?? null,
+        sameProviderRetries: r.abortRecoveryV156.sameProviderRetries ?? null
+      } : null,
+      allProvidersUnavailableAtReturn: r?.deferredRecoveryV640?.allProvidersUnavailableAtReturn ?? null,
+      pendingAfter: after ? {
+        fromBlock: Number(after.fromBlock), toBlock: Number(after.toBlock),
+        lastError: after.lastError ?? null
+      } : null,
+      note: 'success=false may mean an unfinished multi-million-block range even when chunks were processed; prior persisted lastError may be stale.'
+    };
+  })();
+  recoveryGateV1286.recoveryDetailV1287 = recoveryDetailV1287;
+  recoveryGateV1286.budgetAfterRecoveryV1287 = {
+    totalUsed: budget.totalUsed, totalLimit: budget.totalLimit,
+    discoveryUsed: budget.discovery.used, discoveryLimit: budget.discovery.limit,
+    liveUsed: budget.discovery.liveUsed, liveLimit: budget.discovery.liveLimit,
+    backlogUsed: budget.discovery.backlogUsed, backlogLimit: budget.discovery.backlogLimit
+  };
 
   /*
    * V211: newly verified pools.trade launches must not wait behind ordinary
@@ -204210,7 +204280,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/v4recovery-gate-budget-audit","/v4recovery-gate-actual","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/v4recovery-gate-budget-audit","/v4recovery-gate-actual","/v4recovery-outcome-actual","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205614,6 +205684,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4recovery-outcome-actual") {
+    return jsonResponse(await v4RecoveryOutcomeActualV1287(env));
   }
 
   if (path === "/v4recovery-gate-actual") {
