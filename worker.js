@@ -1,6 +1,6 @@
-/* V1294: recent-gap RPC log range-integrity guard and read-only evidence. */
+/* V1295: recent-gap scheduling uses spare live-discovery budget even when new live tokens were discovered; V1294 integrity guard retained. */
 /* V1293: recent-gap retrieval/processing and skip-reason audit; V1292 recovery ranges unchanged. */
-// ChainVanta V1293 — Recent-gap pipeline evidence and scheduling gate audit; based on V1292.
+// ChainVanta V1295 — recent-gap recovery scheduling improvement; based on V1294.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52098,7 +52098,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1294',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1295',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -115941,16 +115941,21 @@ async function scan(
     totalUsed: budget.totalUsed,
     liveUsed: budget.discovery.liveUsed
   };
+  /* V1295: new live tokens must not starve recent-gap collection forever.
+   * Qualification follow-up remains exclusive, and the live scan must succeed.
+   * Recovery uses only the existing discovery-live request budget; scanLiveRange
+   * retains its two-attempt cap and the 2,000-block adaptive range. */
+  const recentGapLiveNewTokensV1295 = liveDiscovery.newTokens instanceof Set
+    ? liveDiscovery.newTokens.size : null;
+  const recentGapBudgetEligibleV1295 = budgetAvailable(budget, "discovery-live");
   const recentGapSkipReasonsV1293 = [
     qualificationFollowUpV723 && "QUALIFICATION_FOLLOWUP",
     liveScan.success !== true && "LIVE_SCAN_UNSUCCESSFUL",
-    liveDiscovery.newTokens?.size !== 0 && "NEW_LIVE_TOKENS_OR_UNVERIFIED",
     !recentGapV1288 && "NO_PENDING_GAP",
-    !budgetAvailable(budget, "discovery-live") && "DISCOVERY_LIVE_BUDGET_UNAVAILABLE"
+    !recentGapBudgetEligibleV1295 && "DISCOVERY_LIVE_BUDGET_UNAVAILABLE"
   ].filter(Boolean);
   if (!qualificationFollowUpV723 && liveScan.success === true &&
-      liveDiscovery.newTokens?.size === 0 && recentGapV1288 &&
-      budgetAvailable(budget, "discovery-live")) {
+      recentGapV1288 && recentGapBudgetEligibleV1295) {
     recentGapResultV1288 = await scanLiveRange(env, state,
       BigInt(recentGapV1288.nextBlock), BigInt(recentGapV1288.toBlock),
       budget, recentGapOutputV1288, {recentGap: true});
@@ -116000,6 +116005,24 @@ async function scan(
       rpcCompletenessProven: false,
       downstreamRetentionProven: false,
       note: "Range checks guard cursor advancement for malformed/out-of-range logs; they cannot detect provider omission or silent truncation."
+    },
+    schedulingAuditV1295: {
+      policy: "RECENT_GAP_AFTER_SUCCESSFUL_LIVE_WITH_EXISTING_BUDGET",
+      newLiveTokensObserved: recentGapLiveNewTokensV1295,
+      newLiveTokensNoLongerBlockGap: true,
+      qualificationFollowUpProtected: true,
+      liveScanSucceeded: liveScan.success === true,
+      budgetAvailableAtGate: recentGapBudgetEligibleV1295,
+      attempted: recentGapResultV1288 !== null,
+      totalBudgetBefore: recentGapBudgetBeforeV1293.totalUsed,
+      totalBudgetAfter: budget.totalUsed,
+      totalBudgetLimit: budget.totalLimit,
+      liveBudgetBefore: recentGapBudgetBeforeV1293.liveUsed,
+      liveBudgetAfter: budget.discovery.liveUsed,
+      liveBudgetLimit: budget.discovery.liveLimit,
+      requestsConsumed: Math.max(0, budget.totalUsed - recentGapBudgetBeforeV1293.totalUsed),
+      successfulBlocks: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
+      note: "No increase to existing request ceilings or gap attempt cap."
     },
     pipelineAuditV1293: {
       skipReasons: recentGapResultV1288 === null ? recentGapSkipReasonsV1293 : [],
