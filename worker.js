@@ -1,4 +1,4 @@
-// ChainVanta V1283 — Scheduler/recovery coverage audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1284 — Recovery cursor/budget evidence audit; protected, read-only; no scanner or scoring behaviour changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,60 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1284: recovery cursor and retained budget telemetry audit. One state read, no external calls.
+async function v4RecoveryBudgetAuditV1284(env) {
+  const base={version:'V1284',diagnostic:'V4_RECOVERY_BUDGET_AUDIT',safe:true,kvReads:1,kvWrites:0,
+    externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try {loaded=await readState(env);}catch(e){return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};}
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const service=state.services?.discoveryRpc||{};
+  const pending=service.deferredLiveRangeV640||null;
+  const history=Array.isArray(state.v4SYNTHSIngestionHistoryV1269)?state.v4SYNTHSIngestionHistoryV1269:[];
+  const runs=history.filter(h=>h?.productionAttributionV1271?.liveCollectionAttempted===true).slice(-24);
+  const evidence=runs.map(h=>{const t=h.productionAttributionV1271||{};return {at:h.at??null,
+    liveSuccess:t.liveScanSuccess===true,liveFrom:t.requestedLiveFrom??null,liveTo:t.requestedLiveTo??null,
+    phases:[...new Set((Array.isArray(t.ranges)?t.ranges:[]).map(r=>String(r?.phase||'UNKNOWN')))].slice(0,8),
+    rangesTruncated:t.rangesTruncated===true};});
+  const n=v=>Number.isSafeInteger(Number(v))&&Number(v)>=0?Number(v):null;
+  const from=n(pending?.fromBlock),to=n(pending?.toBlock);
+  const age=Number(pending?.updatedAt||pending?.createdAt||0);
+  const now=Date.now();
+  const latest=evidence[evidence.length-1]||null;
+  const oldest=evidence[0]||null;
+  const retainedOtherPhases=evidence.filter(r=>r.phases.some(p=>p!=='discovery-live')).length;
+  const recovery={present:!!pending,fromBlock:from,toBlock:to,
+    remainingBlocks:from!==null&&to!==null&&to>=from?to-from+1:null,
+    createdAt:n(pending?.createdAt),updatedAt:n(pending?.updatedAt),
+    lastCursorChangeAgeMinutes:age>0&&age<=now?Math.round((now-age)/60000):null,
+    reason:pending?.reason?String(pending.reason).slice(0,100):null,
+    lastError:pending?.lastError?String(pending.lastError).slice(0,160):null};
+  const telemetry={savedTotal:n(service.deferredLiveRangeSavedTotalV640),
+    clearedTotal:n(service.deferredLiveRangeClearedTotalV640),
+    lastSavedAt:n(service.deferredLiveRangeLastSavedAtV640),
+    lastClearedAt:n(service.deferredLiveRangeLastClearedAtV640),
+    lastAdvanceAction:service.deferredLiveRangeLastAdvanceActionV647||null,
+    lastWriteVerified:service.deferredLiveRangeLastWriteVerifiedV647||null};
+  return {...base,status:'RECOVERY_BUDGET_EVIDENCE_AUDITED',
+    recovery,telemetry,
+    retainedLive:{runs:evidence.length,firstAt:oldest?.at??null,lastAt:latest?.at??null,
+      latestSuccess:latest?.liveSuccess??null,latestFrom:latest?.liveFrom??null,
+      latestTo:latest?.liveTo??null,otherPhaseRuns:retainedOtherPhases,
+      truncatedRuns:evidence.filter(r=>r.rangesTruncated).length},
+    ordinaryBacklog:{lastScannedBlock:n(state.lastScannedBlock),
+      lastLiveScannedBlock:n(state.lastLiveScannedBlock),
+      separatePath:true,progressOverTime:'NOT_MEASURABLE_FROM_SINGLE_STATE_SNAPSHOT'},
+    budget:{discoveryLiveLimitPerRun:'NOT_PERSISTED_IN_THIS_AUDIT',
+      discoveryLiveUsedPerRun:'NOT_PERSISTED_IN_THIS_AUDIT',
+      discoveryBacklogLimitPerRun:'NOT_PERSISTED_IN_THIS_AUDIT',
+      discoveryBacklogUsedPerRun:'NOT_PERSISTED_IN_THIS_AUDIT',
+      headroomVerified:false,extraRequestsAuthorized:false},
+    recoveryProgressVerified:false,continuousCoverageVerified:false,safeForFullWindowScoring:false,
+    interpretation:'A single retained state snapshot can show cursor and counters, but cannot establish cursor movement over time or spare per-run budget. Compare this endpoint after a subsequent scheduled scan; absence of recorded recovery phases is not proof no recovery ran.',
+    nextStep:'Compare two time-separated V1284 snapshots for cursor movement. Only consider collection changes after verifying real per-run budget telemetry; do not increase provider calls or change scoring.'};
 }
 
 // V1283: scheduler/recovery decision evidence. Read-only, one KV read, no RPC.
@@ -204031,7 +204085,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205435,6 +205489,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4recovery-budget-audit") {
+    return jsonResponse(await v4RecoveryBudgetAuditV1284(env));
   }
 
   if (path === "/v4scheduler-recovery-audit") {
