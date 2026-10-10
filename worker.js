@@ -1,3 +1,4 @@
+/* V1288: bounded independent recent-gap collection; V1287 baseline retained. */
 // ChainVanta V1287 — Record exact recovery partial progress, terminal reason and per-phase budget; no collector changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
@@ -46007,6 +46008,7 @@ async function scanLiveRange(
 
   /* V1274: current discovery must never inherit a historic V640 cursor. */
   const recoveryModeV1274 = optionsV1274.recovery === true;
+  const recentGapModeV1288 = optionsV1274.recentGap === true;
   const requestedTo = to;
   const deferredAtStartV640 = deferredLiveRangeV640(state);
   const activeDeferredAtStartV640 = recoveryModeV1274
@@ -46015,7 +46017,7 @@ async function scanLiveRange(
   let effectiveTo = to;
   let cursor = from;
   let attemptsV1274 = 0;
-  const maxAttemptsV1274 = recoveryModeV1274 ? 2 : 10;
+  const maxAttemptsV1274 = (recoveryModeV1274 || recentGapModeV1288) ? 2 : 10;
 
   let processedThrough =
     null;
@@ -46084,13 +46086,15 @@ async function scanLiveRange(
       );
 
     if (!provider) {
-      persistDeferredLiveRangeV640(
-        state,
-        Number(cursor),
-        Number(effectiveTo),
-        "ALL_LIVE_PROVIDERS_UNAVAILABLE_OR_COOLING_V646",
-        "DISCOVERY_PROVIDERS_COOLING_DOWN"
-      );
+      if (!recentGapModeV1288) {
+        persistDeferredLiveRangeV640(
+          state,
+          Number(cursor),
+          Number(effectiveTo),
+          "ALL_LIVE_PROVIDERS_UNAVAILABLE_OR_COOLING_V646",
+          "DISCOVERY_PROVIDERS_COOLING_DOWN"
+        );
+      }
 
       error =
         "LIVE_RANGE_DEFERRED_ALL_PROVIDERS_UNAVAILABLE_V646";
@@ -46490,7 +46494,7 @@ async function scanLiveRange(
           response.provider,
 
         phase:
-          recoveryModeV1274 ? "discovery-recovery-v1274" : "discovery-live",
+          recentGapModeV1288 ? "discovery-recent-gap-v1288" : recoveryModeV1274 ? "discovery-recovery-v1274" : "discovery-live",
 
         chunkSize
       });
@@ -46559,15 +46563,17 @@ async function scanLiveRange(
       response.error ||
       "LIVE_GET_LOGS_FAILED";
 
-    persistDeferredLiveRangeV640(
-      state,
-      Number(cursor),
-      Number(effectiveTo),
-      is429(error)
-        ? "LIVE_RANGE_TERMINAL_429_DEFERRED_V646"
-        : "LIVE_RANGE_PROVIDER_FAILURE_V640",
-      error
-    );
+    if (!recentGapModeV1288) {
+      persistDeferredLiveRangeV640(
+        state,
+        Number(cursor),
+        Number(effectiveTo),
+        is429(error)
+          ? "LIVE_RANGE_TERMINAL_429_DEFERRED_V646"
+          : "LIVE_RANGE_PROVIDER_FAILURE_V640",
+        error
+      );
+    }
 
     break;
   }
@@ -115864,6 +115870,61 @@ async function scan(
         );
 
   
+  /* V1288: independent, bounded recent-gap cursor. Current-head discovery
+   * always runs first. Recent gap work uses at most two existing live-budget
+   * requests, only after a successful live scan with zero new tokens. The
+   * historical V640 deferred cursor is NEVER read or written by gap mode.
+   * Progress advances only through successfully returned contiguous chunks.
+   */
+  const recentGapServiceV1288 = discoveryService(state);
+  const priorLiveHeadV1288 = Number(state.lastLiveScannedBlock);
+  const gapStartV1288 = Number(live.from);
+  let recentGapV1288 = recentGapServiceV1288.recentGapV1288;
+  if (!recentGapV1288 || !Number.isSafeInteger(recentGapV1288.nextBlock) ||
+      !Number.isSafeInteger(recentGapV1288.toBlock) ||
+      recentGapV1288.nextBlock > recentGapV1288.toBlock) {
+    recentGapV1288 = null;
+  }
+  if (!recentGapV1288 && Number.isSafeInteger(priorLiveHeadV1288) &&
+      priorLiveHeadV1288 > 0 && priorLiveHeadV1288 + 1 < gapStartV1288) {
+    recentGapV1288 = {nextBlock: priorLiveHeadV1288 + 1,
+      toBlock: gapStartV1288 - 1, createdAt: Date.now()};
+  } else if (recentGapV1288 && gapStartV1288 > recentGapV1288.toBlock + 1) {
+    // Extend an existing gap; never jump over unprocessed blocks.
+    recentGapV1288.toBlock = gapStartV1288 - 1;
+  }
+  const recentGapOutputV1288 = {logs: [], ranges: []};
+  let recentGapResultV1288 = null;
+  if (!qualificationFollowUpV723 && liveScan.success === true &&
+      liveDiscovery.newTokens?.size === 0 && recentGapV1288 &&
+      budgetAvailable(budget, "discovery-live")) {
+    recentGapResultV1288 = await scanLiveRange(env, state,
+      BigInt(recentGapV1288.nextBlock), BigInt(recentGapV1288.toBlock),
+      budget, recentGapOutputV1288, {recentGap: true});
+    if (recentGapOutputV1288.logs.length) {
+      processDiscoveryLogs(state, recentGapOutputV1288.logs, "BACKLOG");
+      backlogOutput.logs.push(...recentGapOutputV1288.logs);
+      backlogOutput.ranges.push(...recentGapOutputV1288.ranges);
+    }
+    if (recentGapResultV1288.processedThrough != null) {
+      recentGapV1288.nextBlock = Number(recentGapResultV1288.processedThrough) + 1;
+      recentGapV1288.updatedAt = Date.now();
+    }
+  }
+  const finalRecentGapServiceV1288 = discoveryService(state);
+  finalRecentGapServiceV1288.recentGapV1288 = recentGapV1288 &&
+    recentGapV1288.nextBlock <= recentGapV1288.toBlock ? recentGapV1288 : null;
+  state.recentGapAuditV1288 = {
+    at: Date.now(), pending: !!finalRecentGapServiceV1288.recentGapV1288,
+    cursor: finalRecentGapServiceV1288.recentGapV1288?.nextBlock ?? null,
+    target: finalRecentGapServiceV1288.recentGapV1288?.toBlock ?? null,
+    attempted: recentGapResultV1288 !== null,
+    processedThrough: recentGapResultV1288?.processedThrough == null ? null : Number(recentGapResultV1288.processedThrough),
+    successfulChunks: recentGapOutputV1288.ranges.length,
+    terminalError: recentGapResultV1288?.error ? String(recentGapResultV1288.error).slice(0,120) : null,
+    historicalCursorUntouchedByGap: true
+  };
+
   /* V1274: independently resume V640 history, using only spare existing live
    * budget. Never replace the current live cursor, and never treat a live
    * success as proof that historical blocks were processed. */
@@ -115898,6 +115959,7 @@ async function scan(
   ].filter(Boolean);
   if (
     !qualificationFollowUpV723 &&
+    recentGapResultV1288 === null &&
     pendingRecoveryV1274 &&
     budgetAvailable(budget, "discovery-live") &&
     liveScan.success === true &&
