@@ -52080,6 +52080,31 @@ async function v4ScoringCoverageV1279(env) {
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
 }
 
+// V1289: read-only check of the already-persisted V1288 recent-gap state.
+async function v4RecentGapActualV1289(env) {
+  const base={version:'V1289',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
+    telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try {loaded=await readState(env);} catch(e) {
+    return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};
+  }
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const audit=state.recentGapAuditV1288||null;
+  const recent=discoveryService(state)?.recentGapV1288||null;
+  const historical=deferredLiveRangeV640(state);
+  return {...base,status:audit?'RECENT_GAP_AUDIT_RECORDED':'AWAITING_V1288_SCAN',
+    recentGapAudit:audit,
+    persistedRecentGap:recent?{nextBlock:recent.nextBlock,toBlock:recent.toBlock,
+      remainingBlocks:Math.max(0,Number(recent.toBlock)-Number(recent.nextBlock)+1),
+      updatedAt:recent.updatedAt??null}:null,
+    historicalRecovery:historical?{fromBlock:historical.fromBlock,toBlock:historical.toBlock}:null,
+    lastLiveScannedBlock:state.lastLiveScannedBlock??null,
+    interpretation:'This reports persisted scanner evidence, not proof of full coverage. Compare across scheduled scans. No additional provider requests.',
+    nextStep:'Verify cursor movement and successful chunks across scans before modifying budgets or scoring.'};
+}
+
 // V1287: read existing run-end recovery details; no additional provider requests.
 async function v4RecoveryOutcomeActualV1287(env) {
   const base={version:'V1287',diagnostic:'V4_RECOVERY_OUTCOME_ACTUAL',safe:true,
@@ -204342,7 +204367,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/v4recovery-gate-budget-audit","/v4recovery-gate-actual","/v4recovery-outcome-actual","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/v4recovery-gate-budget-audit","/v4recovery-gate-actual","/v4recovery-outcome-actual","/v4recent-gap-actual","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205746,6 +205771,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4recent-gap-actual") {
+    return jsonResponse(await v4RecentGapActualV1289(env));
   }
 
   if (path === "/v4recovery-outcome-actual") {
