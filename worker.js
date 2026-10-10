@@ -1,3 +1,4 @@
+/* V1294: recent-gap RPC log range-integrity guard and read-only evidence. */
 /* V1293: recent-gap retrieval/processing and skip-reason audit; V1292 recovery ranges unchanged. */
 // ChainVanta V1293 — Recent-gap pipeline evidence and scheduling gate audit; based on V1292.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
@@ -46444,6 +46445,23 @@ async function scanLiveRange(
       }
     }
 
+    /* V1294: only the recent-gap lane validates returned log boundaries
+     * before treating a successful RPC response as recovered coverage.
+     * This does not establish completeness of a provider's event set. */
+    if (recentGapModeV1288 && Array.isArray(response.result)) {
+      const invalidRangeLogV1294 = response.result.find(log => {
+        if (!log || typeof log !== "object") return true;
+        const rawBlock = log.blockNumber;
+        if (!(typeof rawBlock === "string" && /^0x[0-9a-f]+$/i.test(rawBlock))) return true;
+        let logBlock;
+        try { logBlock = BigInt(rawBlock); } catch (_) { return true; }
+        return logBlock < cursor || logBlock > chunkTo;
+      });
+      if (invalidRangeLogV1294) {
+        error = "V1294_RECENT_GAP_RPC_LOG_OUTSIDE_REQUESTED_RANGE";
+        break;
+      }
+    }
     if (
       Array.isArray(
         response.result
@@ -52080,7 +52098,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1293',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1294',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -115970,6 +115988,19 @@ async function scan(
     successfulChunkSizesV1292: recentGapOutputV1288.ranges.map(r=>r.chunkSize),
     recoveredBlocksThisScanV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
     recoveredLogCountV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.logs||0),0),
+    integrityAuditV1294: {
+      enabled: true,
+      returnedRanges: recentGapOutputV1288.ranges.map(r=>({
+        fromBlock:r.fromBlock,toBlock:r.toBlock,blocks:r.blocks,
+        logs:r.logs,provider:r.provider
+      })),
+      acceptedRangeCount: recentGapOutputV1288.ranges.length,
+      acceptedLogCount: recentGapOutputV1288.logs.length,
+      rejectedOutOfRangeLog: recentGapResultV1288?.error === "V1294_RECENT_GAP_RPC_LOG_OUTSIDE_REQUESTED_RANGE",
+      rpcCompletenessProven: false,
+      downstreamRetentionProven: false,
+      note: "Range checks guard cursor advancement for malformed/out-of-range logs; they cannot detect provider omission or silent truncation."
+    },
     pipelineAuditV1293: {
       skipReasons: recentGapResultV1288 === null ? recentGapSkipReasonsV1293 : [],
       totalRequestsConsumed: Math.max(0,budget.totalUsed-recentGapBudgetBeforeV1293.totalUsed),
