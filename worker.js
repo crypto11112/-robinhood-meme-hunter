@@ -1,5 +1,5 @@
-/* V1292: experimental recent-gap range 2000 → 1000 → 500 → 250 → 100 → 20; live/historical unchanged. */
-// ChainVanta V1292 — Adaptive recent-gap range experiment; based on V1291.
+/* V1293: recent-gap retrieval/processing and skip-reason audit; V1292 recovery ranges unchanged. */
+// ChainVanta V1293 — Recent-gap pipeline evidence and scheduling gate audit; based on V1292.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52080,7 +52080,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1292',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1293',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -115918,6 +115918,18 @@ async function scan(
   }
   const recentGapOutputV1288 = {logs: [], ranges: []};
   let recentGapResultV1288 = null;
+  let recentGapDiscoveryResultV1293 = null;
+  const recentGapBudgetBeforeV1293 = {
+    totalUsed: budget.totalUsed,
+    liveUsed: budget.discovery.liveUsed
+  };
+  const recentGapSkipReasonsV1293 = [
+    qualificationFollowUpV723 && "QUALIFICATION_FOLLOWUP",
+    liveScan.success !== true && "LIVE_SCAN_UNSUCCESSFUL",
+    liveDiscovery.newTokens?.size !== 0 && "NEW_LIVE_TOKENS_OR_UNVERIFIED",
+    !recentGapV1288 && "NO_PENDING_GAP",
+    !budgetAvailable(budget, "discovery-live") && "DISCOVERY_LIVE_BUDGET_UNAVAILABLE"
+  ].filter(Boolean);
   if (!qualificationFollowUpV723 && liveScan.success === true &&
       liveDiscovery.newTokens?.size === 0 && recentGapV1288 &&
       budgetAvailable(budget, "discovery-live")) {
@@ -115925,7 +115937,7 @@ async function scan(
       BigInt(recentGapV1288.nextBlock), BigInt(recentGapV1288.toBlock),
       budget, recentGapOutputV1288, {recentGap: true});
     if (recentGapOutputV1288.logs.length) {
-      processDiscoveryLogs(state, recentGapOutputV1288.logs, "BACKLOG");
+      recentGapDiscoveryResultV1293 = processDiscoveryLogs(state, recentGapOutputV1288.logs, "BACKLOG");
       backlogOutput.logs.push(...recentGapOutputV1288.logs);
       backlogOutput.ranges.push(...recentGapOutputV1288.ranges);
     }
@@ -115957,7 +115969,21 @@ async function scan(
     requestedInitialChunkV1292: recentGapResultV1288 ? 2000 : null,
     successfulChunkSizesV1292: recentGapOutputV1288.ranges.map(r=>r.chunkSize),
     recoveredBlocksThisScanV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
-    recoveredLogCountV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.logs||0),0)
+    recoveredLogCountV1292: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.logs||0),0),
+    pipelineAuditV1293: {
+      skipReasons: recentGapResultV1288 === null ? recentGapSkipReasonsV1293 : [],
+      totalRequestsConsumed: Math.max(0,budget.totalUsed-recentGapBudgetBeforeV1293.totalUsed),
+      liveRequestsConsumed: Math.max(0,budget.discovery.liveUsed-recentGapBudgetBeforeV1293.liveUsed),
+      retrievedLogCount: recentGapOutputV1288.logs.length,
+      discoveryProcessorInvoked: recentGapDiscoveryResultV1293 !== null,
+      initializeEventsDecoded: recentGapDiscoveryResultV1293?.initializeEvents ?? null,
+      swapTopicMatches: recentGapDiscoveryResultV1293?.swapTopicMatches ?? null,
+      liquidityTopicMatches: recentGapDiscoveryResultV1293?.liquidityTopicMatches ?? null,
+      newlyWatchedTokens: recentGapDiscoveryResultV1293?.newTokens?.size ?? null,
+      seenTokens: recentGapDiscoveryResultV1293?.seenTokens?.size ?? null,
+      logRetentionVerified: false,
+      note: "Discovery processor invoked does not prove full log retention, directional USD flow coverage or uncapped RPC responses."
+    }
   };
 
   /* V1274: independently resume V640 history, using only spare existing live
