@@ -1,4 +1,4 @@
-/* V1288: bounded independent recent-gap collection; V1287 baseline retained. */
+/* V1290: isolated recent-gap 100-block probe with fallback to 20; V1289 baseline retained. */
 // ChainVanta V1287 — Record exact recovery partial progress, terminal reason and per-phase budget; no collector changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
@@ -46009,6 +46009,10 @@ async function scanLiveRange(
   /* V1274: current discovery must never inherit a historic V640 cursor. */
   const recoveryModeV1274 = optionsV1274.recovery === true;
   const recentGapModeV1288 = optionsV1274.recentGap === true;
+  /* V1290: gap-only bounded range probe. The ordinary live and historical
+   * chunk settings remain capped at 20. A failed probe falls back to the
+   * established range without advancing the cursor on failure. */
+  if (recentGapModeV1288) chunkSize = 100;
   const requestedTo = to;
   const deferredAtStartV640 = deferredLiveRangeV640(state);
   const activeDeferredAtStartV640 = recoveryModeV1274
@@ -46526,7 +46530,7 @@ async function scanLiveRange(
           null;
       }
 
-      service.liveChunkBlocks =
+      if (!recentGapModeV1288) service.liveChunkBlocks =
         chunkSize;
 
       cursor =
@@ -46543,17 +46547,11 @@ async function scanLiveRange(
         response.error
       )
     ) {
-      chunkSize =
-        Math.max(
-          LIVE_SAFE_CHUNK_MIN,
+      chunkSize = recentGapModeV1288 && chunkSize > LIVE_SAFE_CHUNK_MAX
+        ? LIVE_SAFE_CHUNK_MAX
+        : Math.max(LIVE_SAFE_CHUNK_MIN, Math.floor(chunkSize / 2));
 
-          Math.floor(
-            chunkSize /
-            2
-          )
-        );
-
-      service.liveChunkBlocks =
+      if (!recentGapModeV1288) service.liveChunkBlocks =
         chunkSize;
 
       continue;
@@ -115947,7 +115945,10 @@ async function scan(
     processedThrough: recentGapResultV1288?.processedThrough == null ? null : Number(recentGapResultV1288.processedThrough),
     successfulChunks: recentGapOutputV1288.ranges.length,
     terminalError: recentGapResultV1288?.error ? String(recentGapResultV1288.error).slice(0,120) : null,
-    historicalCursorUntouchedByGap: true
+    historicalCursorUntouchedByGap: true,
+    gapChunkSizeV1290: recentGapResultV1288?.chunkSize ?? null,
+    gapRangeProbeV1290: true,
+    recoveredBlocksThisScanV1290: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0)
   };
 
   /* V1274: independently resume V640 history, using only spare existing live
