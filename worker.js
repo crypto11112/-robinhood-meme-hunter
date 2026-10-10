@@ -1,3 +1,4 @@
+/* V1298: bounded per-token exact-pool recovered-log attribution audit; zero extra RPC or scoring changes. */
 /* V1297: read-only diagnostic of recovered-log handoff into combined token activity input; no extra RPC requests. */
 /* V1296: bounded recent-gap throughput: four successful-range attempts max; existing discovery-live and overall budgets still enforced. */
 /* V1295: recent-gap scheduling uses spare live-discovery budget even when new live tokens were discovered; V1294 integrity guard retained. */
@@ -52100,7 +52101,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1297',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1298',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -52120,7 +52121,7 @@ async function v4RecentGapActualV1289(env) {
     historicalRecovery:historical?{fromBlock:historical.fromBlock,toBlock:historical.toBlock}:null,
     lastLiveScannedBlock:state.lastLiveScannedBlock??null,
     interpretation:'This reports persisted scanner evidence, not proof of full coverage. Compare across scheduled scans. No additional provider requests.',
-    nextStep:'Inspect handoffAuditV1297 alongside throughput and pipeline audits; handoff counts do not prove downstream retention.'};
+    nextStep:'Inspect tokenAttributionAuditV1298; sampled exact-pool matches do not prove directional USD persistence or complete RPC coverage.'};
 }
 
 // V1287: read existing run-end recovery details; no additional provider requests.
@@ -118915,6 +118916,29 @@ for (
     };
   }
 
+  // V1298: bounded attribution evidence for the actual activityForToken consumer.
+  // Only sampled tokens that enter analysis are counted; never claim full coverage.
+  if (state.recentGapAuditV1288) {
+    state.recentGapAuditV1288.tokenAttributionAuditV1298 = {
+      source: "RECENT_GAP_LOGS_MATCHED_TO_ANALYSED_TOKEN_POOLIDS",
+      recoveredLogsAvailable: recentGapOutputV1288.logs.length,
+      sampledTokenLimit: 8,
+      sampledTokens: 0,
+      sampledWithPoolIdentity: 0,
+      sampledWithRecoveredSwap: 0,
+      sampledWithRecoveredLiquidity: 0,
+      matchedRecoveredSwapLogs: 0,
+      matchedRecoveredLiquidityLogs: 0,
+      rows: [],
+      individualTokenActivityVerified: false,
+      directionalUsdLedgerPersistenceVerified: false,
+      launchAgeVerificationProven: false,
+      rpcCompletenessProven: false,
+      additionalProviderRequests: 0,
+      note: "Sampled exact-pool topic attribution within one scan; overlapping watched pool identities may count the same log more than once. No proof of direction, USD, historical completeness or durable ledger persistence."
+    };
+  }
+
   const candidates =
     [];
 
@@ -121128,6 +121152,40 @@ for (
         watched,
         combinedLogs
       );
+
+    // V1298: observe exact pool-topic matches for up to eight analysed tokens.
+    // Uses existing in-memory logs only; does not alter activity or candidate scoring.
+    const tokenAuditV1298 = state.recentGapAuditV1288?.tokenAttributionAuditV1298;
+    if (tokenAuditV1298 && tokenAuditV1298.sampledTokens < tokenAuditV1298.sampledTokenLimit) {
+      const matchedPoolIdsV1298 = new Set((watched?.pools || [])
+        .map(p => normalize(p?.poolId)).filter(Boolean));
+      let gapSwapsV1298 = 0;
+      let gapLiquidityV1298 = 0;
+      for (const recoveredLogV1298 of recentGapOutputV1288.logs) {
+        if (!matchedPoolIdsV1298.has(normalize(recoveredLogV1298?.topics?.[1]))) continue;
+        const topicV1298 = normalize(recoveredLogV1298?.topics?.[0]);
+        if (topicV1298 === SWAP_TOPIC) gapSwapsV1298++;
+        if (topicV1298 === MODIFY_LIQUIDITY_TOPIC) gapLiquidityV1298++;
+      }
+      tokenAuditV1298.sampledTokens++;
+      if (matchedPoolIdsV1298.size) tokenAuditV1298.sampledWithPoolIdentity++;
+      if (gapSwapsV1298) tokenAuditV1298.sampledWithRecoveredSwap++;
+      if (gapLiquidityV1298) tokenAuditV1298.sampledWithRecoveredLiquidity++;
+      tokenAuditV1298.matchedRecoveredSwapLogs += gapSwapsV1298;
+      tokenAuditV1298.matchedRecoveredLiquidityLogs += gapLiquidityV1298;
+      tokenAuditV1298.rows.push({
+        token: typeof address === 'string' ? address.slice(0, 10) + '...' : null,
+        exactPoolIdsWatched: matchedPoolIdsV1298.size,
+        recoveredSwapsMatched: gapSwapsV1298,
+        recoveredLiquidityMatched: gapLiquidityV1298,
+        combinedActivitySwaps: activity.swaps,
+        combinedActivityLiquidity: activity.liquidityEvents,
+        matchedCountsWithinCombined: gapSwapsV1298 <= activity.swaps &&
+          gapLiquidityV1298 <= activity.liquidityEvents
+      });
+      tokenAuditV1298.individualTokenActivityVerified = tokenAuditV1298.rows.some(r =>
+        r.recoveredSwapsMatched > 0 && r.matchedCountsWithinCombined);
+    }
 
     const liveMomentumActivityV152Raw =
       activityForToken(
