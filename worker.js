@@ -1,4 +1,4 @@
-// ChainVanta V1285 — Recovery gate/budget ceilings audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1286 — Record actual recovery gate and per-run budget in existing state save; read-only protected audit.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,27 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1286: read actual persisted last-scan recovery gate and request usage.
+async function v4RecoveryGateActualV1286(env) {
+  const base={version:'V1286',diagnostic:'V4_RECOVERY_GATE_ACTUAL',safe:true,
+    kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
+    telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try {loaded=await readState(env);} catch(e) {
+    return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)};
+  }
+  if(loaded?.error)return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const last=state.recoveryGateBudgetV1286||null;
+  const pending=state.services?.discoveryRpc?.deferredLiveRangeV640||null;
+  return {...base,status:last?'LAST_RUN_GATE_RECORDED':'AWAITING_V1286_SCAN',
+    lastRun:last,
+    pendingRecovery:pending?{fromBlock:pending.fromBlock??null,toBlock:pending.toBlock??null,
+      lastError:pending.lastError??null,updatedAt:pending.updatedAt??null}:null,
+    capacityInterpretation:'Actual per-run counters are internal scanner-budget accounting, not provider billing or proof of successful block coverage.',
+    nextStep:last?'Review blockers and actual budget before targeted collection fix.':'Wait for one scheduled scan and refresh.'};
 }
 
 // V1285: source-grounded recovery gate and budget ceilings. Read-only; no provider calls.
@@ -115825,6 +115846,32 @@ async function scan(
   let deferredRecoveryV1274 = null;
   const deferredRecoveryOutputV1274 = {logs: [], ranges: []};
   const pendingRecoveryV1274 = deferredLiveRangeV640(state);
+  // V1286: observe exact pre-recovery gate inputs without modifying the gate.
+  const recoveryGateV1286 = {
+    at: Date.now(),
+    qualificationFollowUp: qualificationFollowUpV723 === true,
+    pendingRecovery: !!pendingRecoveryV1274,
+    liveBudgetAvailable: budgetAvailable(budget, "discovery-live"),
+    liveSuccess: liveScan.success === true,
+    newLiveTokens: liveDiscovery.newTokens instanceof Set ? liveDiscovery.newTokens.size : null,
+    budgetAtGate: {
+      totalUsed: budget.totalUsed, totalLimit: budget.totalLimit,
+      discoveryUsed: budget.discovery.used, discoveryLimit: budget.discovery.limit,
+      liveUsed: budget.discovery.liveUsed, liveLimit: budget.discovery.liveLimit,
+      backlogUsed: budget.discovery.backlogUsed, backlogLimit: budget.discovery.backlogLimit
+    }
+  };
+  recoveryGateV1286.eligible =
+    !recoveryGateV1286.qualificationFollowUp && recoveryGateV1286.pendingRecovery &&
+    recoveryGateV1286.liveBudgetAvailable && recoveryGateV1286.liveSuccess &&
+    recoveryGateV1286.newLiveTokens === 0;
+  recoveryGateV1286.blockers = [
+    recoveryGateV1286.qualificationFollowUp && "QUALIFICATION_FOLLOWUP",
+    !recoveryGateV1286.pendingRecovery && "NO_PENDING_RECOVERY",
+    !recoveryGateV1286.liveBudgetAvailable && "LIVE_BUDGET_UNAVAILABLE",
+    !recoveryGateV1286.liveSuccess && "LIVE_SCAN_FAILED",
+    recoveryGateV1286.newLiveTokens !== 0 && "NEW_LIVE_TOKENS_OR_UNVERIFIED"
+  ].filter(Boolean);
   if (
     !qualificationFollowUpV723 &&
     pendingRecoveryV1274 &&
@@ -115847,6 +115894,10 @@ async function scan(
       backlogOutput.ranges.push(...deferredRecoveryOutputV1274.ranges);
     }
   }
+
+  recoveryGateV1286.recoveryAttempted = deferredRecoveryV1274 !== null;
+  recoveryGateV1286.recoverySuccess = deferredRecoveryV1274?.success === true;
+  recoveryGateV1286.recoveryError = deferredRecoveryV1274?.error ? String(deferredRecoveryV1274.error).slice(0,120) : null;
 
   /*
    * V211: newly verified pools.trade launches must not wait behind ordinary
@@ -131166,6 +131217,26 @@ for (
   if (runIdV1239) {
     await writeHeavyScanPhaseV1239(env,{runId:runIdV1239,phase:"STATE_SAVE_STARTED",scanStartedAt:startedAt,latestBlock:latestNumber,selectedForAnalysis:v135AnalysisQueue.length,analysisLoopEntered:scannerFunnelV415?.analysisLoopEntered,returnedCandidates:candidates.length,requestsUsed:budget?.used});
   }
+
+  // V1286: bounded telemetry added to the already-existing main state write.
+  // No extra RPC/provider calls, KV writes, scanning, qualification or scoring changes.
+  state.recoveryGateBudgetV1286 = {
+    schema: "RECOVERY_GATE_BUDGET_V1286",
+    capturedAt: Date.now(),
+    scanStartedAt: startedAt,
+    ...recoveryGateV1286,
+    budgetAtSave: {
+      totalUsed: budget.totalUsed, totalLimit: budget.totalLimit,
+      systemUsed: budget.system.used, systemLimit: budget.system.limit,
+      discoveryUsed: budget.discovery.used, discoveryLimit: budget.discovery.limit,
+      liveUsed: budget.discovery.liveUsed, liveLimit: budget.discovery.liveLimit,
+      backlogUsed: budget.discovery.backlogUsed, backlogLimit: budget.discovery.backlogLimit,
+      analysisUsed: budget.analysis.used, analysisLimit: budget.analysis.limit,
+      notificationUsed: budget.notification.used, notificationLimit: budget.notification.limit
+    },
+    diagnosticOnly: true, extraProviderRequests: 0, scoringChanged: false,
+    telegramChanged: false, requestCeilingsChanged: false
+  };
 
   const save =
     await writeState(
@@ -204139,7 +204210,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/v4recovery-gate-budget-audit","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/v4recovery-budget-audit","/v4recovery-gate-budget-audit","/v4recovery-gate-actual","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205543,6 +205614,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4recovery-gate-actual") {
+    return jsonResponse(await v4RecoveryGateActualV1286(env));
   }
 
   if (path === "/v4recovery-gate-budget-audit") {
