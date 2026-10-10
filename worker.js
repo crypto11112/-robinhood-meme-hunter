@@ -1,4 +1,4 @@
-// ChainVanta V1282 — Source-range continuity evidence audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1283 — Scheduler/recovery coverage audit; protected, read-only; no scanner or scoring behaviour changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,60 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1283: scheduler/recovery decision evidence. Read-only, one KV read, no RPC.
+async function v4SchedulerRecoveryAuditV1283(env) {
+  const base={version:'V1283',diagnostic:'V4_SCHEDULER_RECOVERY_AUDIT',safe:true,kvReads:1,kvWrites:0,
+    externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try { loaded=await readState(env); } catch(e) { return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)}; }
+  if(loaded?.error) return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const history=Array.isArray(state.v4SYNTHSIngestionHistoryV1269)?state.v4SYNTHSIngestionHistoryV1269:[];
+  const runs=history.filter(h=>h?.productionAttributionV1271?.liveCollectionAttempted===true).slice(-24);
+  const samples=runs.map(h=>{
+    const t=h.productionAttributionV1271||{};
+    const from=Number(t.requestedLiveFrom),to=Number(t.requestedLiveTo),through=Number(t.processedThrough);
+    const valid=Number.isSafeInteger(from)&&from>0&&Number.isSafeInteger(to)&&to>=from;
+    const ranges=Array.isArray(t.ranges)?t.ranges:[];
+    return {at:h.at||null,liveFrom:valid?from:null,liveTo:valid?to:null,
+      requestedBlocks:valid?to-from+1:null,success:t.liveScanSuccess===true,
+      processedThrough:Number.isSafeInteger(through)&&through>=from?through:null,
+      recordedRangeCount:ranges.length,recordedPhases:[...new Set(ranges.map(r=>String(r?.phase||'UNKNOWN')))].slice(0,8),
+      reportedTotalRanges:t.totalRanges??null,rangesTruncated:t.rangesTruncated===true};
+  });
+  const gaps=[];
+  for(let i=1;i<samples.length;i++){
+    const a=samples[i-1],b=samples[i];
+    if(a.processedThrough===null||b.liveFrom===null)continue;
+    gaps.push({previousAt:a.at,currentAt:b.at,unobservedBlocks:Math.max(0,b.liveFrom-a.processedThrough-1),
+      overlapBlocks:Math.max(0,a.processedThrough-b.liveFrom+1)});
+  }
+  const recovery=state.services?.discoveryRpc?.deferredLiveRangeV640||null;
+  const last=state.v4LastActualLiveCollectionV1275||null;
+  const latest=samples.length?samples[samples.length-1]:null;
+  const pendingFrom=Number(recovery?.fromBlock),pendingTo=Number(recovery?.toBlock);
+  return {...base,status:'SCHEDULER_AND_RECOVERY_EVIDENCE_AUDITED',
+    sourceArchitecture:{liveRange:'LATEST_HEAD_MINUS_FIXED_WINDOW',liveScanBlocks:LIVE_SCAN_BLOCKS,
+      deferredRecovery:'SEPARATE_OPTIONAL_PATH_USING_EXISTING_DISCOVERY_LIVE_BUDGET',
+      deferredRecoveryRequires:'NOT_QUALIFICATION_FOLLOWUP_AND_PENDING_RANGE_AND_BUDGET_AVAILABLE_AND_LIVE_SUCCESS_AND_ZERO_NEW_LIVE_TOKENS',
+      deferredRecoveryMaxAttemptsPerInvocation:2,
+      ordinaryBacklog:'SEPARATE_DISCOVERY_BACKLOG_BUDGET_AND_PROTECTION_GATES',
+      caveat:'Source control-flow description, not evidence that any particular recovery/backlog scan ran'},
+    retainedActualRuns:samples.length,latestActualRun:latest,
+    observedTransitions:gaps.length,transitionsWithUnobservedBlocks:gaps.filter(g=>g.unobservedBlocks>0).length,
+    unobservedBlocksInTransitions:gaps.reduce((sum,g)=>sum+g.unobservedBlocks,0),
+    transitionSample:gaps.slice(-12),
+    latestPersistedLiveAt:last?.capturedAt??null,
+    lastScannedBlock:state.lastScannedBlock??null,
+    pendingDeferredRecovery:recovery?{present:true,fromBlock:Number.isSafeInteger(pendingFrom)?pendingFrom:null,
+      toBlock:Number.isSafeInteger(pendingTo)?pendingTo:null,
+      spanBlocks:Number.isSafeInteger(pendingFrom)&&Number.isSafeInteger(pendingTo)&&pendingTo>=pendingFrom?pendingTo-pendingFrom+1:null}:{present:false},
+    recordedRangePhases:[...new Set(samples.flatMap(s=>s.recordedPhases))],
+    collectionCompleteness:'NOT_PROVEN',safeForFullWindowScoring:false,
+    interpretation:'A fixed 20-block head snapshot is not continuous coverage. Retained run history may omit other collector paths. Deferred recovery is conditional, and its presence alone does not prove progress. No extra provider calls.',
+    nextStep:'Compare scheduler cadence, recovery progress and budget headroom. Do not widen scans or assert 12h/24h completeness without verified contiguous range evidence.'};
 }
 
 // V1282: source-aware, read-only coverage trace. Distinguishes sampled live windows
@@ -203977,7 +204031,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/v4scheduler-recovery-audit","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205381,6 +205435,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4scheduler-recovery-audit") {
+    return jsonResponse(await v4SchedulerRecoveryAuditV1283(env));
   }
 
   if (path === "/v4source-range-coverage") {
