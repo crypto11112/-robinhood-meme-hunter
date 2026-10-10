@@ -1,3 +1,4 @@
+/* V1297: read-only diagnostic of recovered-log handoff into combined token activity input; no extra RPC requests. */
 /* V1296: bounded recent-gap throughput: four successful-range attempts max; existing discovery-live and overall budgets still enforced. */
 /* V1295: recent-gap scheduling uses spare live-discovery budget even when new live tokens were discovered; V1294 integrity guard retained. */
 /* V1293: recent-gap retrieval/processing and skip-reason audit; V1292 recovery ranges unchanged. */
@@ -52099,7 +52100,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1296',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1297',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -52119,7 +52120,7 @@ async function v4RecentGapActualV1289(env) {
     historicalRecovery:historical?{fromBlock:historical.fromBlock,toBlock:historical.toBlock}:null,
     lastLiveScannedBlock:state.lastLiveScannedBlock??null,
     interpretation:'This reports persisted scanner evidence, not proof of full coverage. Compare across scheduled scans. No additional provider requests.',
-    nextStep:'Verify cursor movement and successful chunks across scans before modifying budgets or scoring.'};
+    nextStep:'Inspect handoffAuditV1297 alongside throughput and pipeline audits; handoff counts do not prove downstream retention.'};
 }
 
 // V1287: read existing run-end recovery details; no additional provider requests.
@@ -118886,6 +118887,33 @@ for (
     ...liveOutput.logs,
     ...backlogOutput.logs
   ];
+  // V1297: verify the actual handoff array assembled for activityForToken.
+  // This is in-memory scan telemetry, persisted with existing state writes.
+  // It does NOT prove per-token matches, downstream ledger persistence, or RPC completeness.
+  if (state.recentGapAuditV1288) {
+    const gapLogCountV1297 = recentGapOutputV1288.logs.length;
+    const backlogLogCountV1297 = backlogOutput.logs.length;
+    const liveLogCountV1297 = liveOutput.logs.length;
+    const combinedLogCountV1297 = combinedLogs.length;
+    state.recentGapAuditV1288.handoffAuditV1297 = {
+      source: "ACTUAL_COMBINED_LOGS_BEFORE_TOKEN_ACTIVITY",
+      recentGapLogs: gapLogCountV1297,
+      liveLogs: liveLogCountV1297,
+      backlogLogsIncludingGap: backlogLogCountV1297,
+      combinedLogs: combinedLogCountV1297,
+      gapIncludedInBacklogArray: gapLogCountV1297 === 0 ||
+        backlogLogCountV1297 >= gapLogCountV1297,
+      combinedArrayLengthConsistent:
+        combinedLogCountV1297 === liveLogCountV1297 + backlogLogCountV1297,
+      activityConsumer: "activityForToken(watched, combinedLogs)",
+      individualTokenActivityVerified: false,
+      directionalUsdLedgerPersistenceVerified: false,
+      launchAgeVerificationProven: false,
+      rpcCompletenessProven: false,
+      additionalProviderRequests: 0,
+      note: "Proves array handoff counts, not log identity, per-token attribution, verified USD flow, or durable downstream retention."
+    };
+  }
 
   const candidates =
     [];
