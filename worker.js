@@ -1,3 +1,4 @@
+/* V1296: bounded recent-gap throughput: four successful-range attempts max; existing discovery-live and overall budgets still enforced. */
 /* V1295: recent-gap scheduling uses spare live-discovery budget even when new live tokens were discovered; V1294 integrity guard retained. */
 /* V1293: recent-gap retrieval/processing and skip-reason audit; V1292 recovery ranges unchanged. */
 // ChainVanta V1295 — recent-gap recovery scheduling improvement; based on V1294.
@@ -46022,7 +46023,7 @@ async function scanLiveRange(
   let effectiveTo = to;
   let cursor = from;
   let attemptsV1274 = 0;
-  const maxAttemptsV1274 = (recoveryModeV1274 || recentGapModeV1288) ? 2 : 10;
+  const maxAttemptsV1274 = recentGapModeV1288 ? 4 : recoveryModeV1274 ? 2 : 10;
 
   let processedThrough =
     null;
@@ -52098,7 +52099,7 @@ async function v4ScoringCoverageV1279(env) {
 
 // V1289: read-only check of the already-persisted V1288 recent-gap state.
 async function v4RecentGapActualV1289(env) {
-  const base={version:'V1295',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
+  const base={version:'V1296',diagnostic:'V4_RECENT_GAP_ACTUAL',safe:true,
     kvReads:1,kvWrites:0,externalRequestsUsed:0,scannerMutated:false,
     telegramMutated:false,scoringChanged:false};
   let loaded;
@@ -116005,6 +116006,18 @@ async function scan(
       rpcCompletenessProven: false,
       downstreamRetentionProven: false,
       note: "Range checks guard cursor advancement for malformed/out-of-range logs; they cannot detect provider omission or silent truncation."
+    },
+    throughputAuditV1296: {
+      policy: "FOUR_BOUNDED_RECENT_GAP_CHUNKS_EXISTING_BUDGET",
+      maximumChunkAttempts: 4,
+      successfulChunks: recentGapOutputV1288.ranges.length,
+      recoveredBlocks: recentGapOutputV1288.ranges.reduce((n,r)=>n+(r.blocks||0),0),
+      requestsConsumed: Math.max(0, budget.totalUsed - recentGapBudgetBeforeV1293.totalUsed),
+      liveBudgetRemaining: Math.max(0, budget.discovery.liveLimit - budget.discovery.liveUsed),
+      overallBudgetRemaining: Math.max(0, budget.totalLimit - budget.totalUsed),
+      qualificationFollowUpProtected: true,
+      fullCoverageProven: false,
+      note: "Existing provider retries may consume additional requests; all calls remain subject to existing budget guards."
     },
     schedulingAuditV1295: {
       policy: "RECENT_GAP_AFTER_SUCCESSFUL_LIVE_WITH_EXISTING_BUDGET",
