@@ -1,4 +1,4 @@
-// ChainVanta V1281 — V4 collection-continuity and retention audit; protected, read-only; no scanner or scoring behaviour changes.
+// ChainVanta V1282 — Source-range continuity evidence audit; protected, read-only; no scanner or scoring behaviour changes.
 // V1271: production live-range attribution and log provenance diagnostic; retained from earlier build.
 // V1259: incremental ten-block-window V3 activity preflight; read-only, bounded 31 preflight RPC calls, preserves all existing production paths.
 // V1258: bounded activity-ranked existing verified V3 pools; one WebSocket observation with V1256 receipt parity. Protected read-only route.
@@ -52072,6 +52072,60 @@ async function v4ScoringCoverageV1279(env) {
     topTokens:recent.slice(0,20),truncated:recent.length>20,
     interpretation:'A final snapshot contains only a bounded top sample. Absence from that sample is not proof that a token was not scored. Timestamp alignment and flags do not prove causal scoring consumption.',
     nextStep:'If current scoring candidates have V212 verified flow but no verifiedFlow flag, inspect applyCandidateVerifiedOnChainFlowV212 invocation and scoring handoff. Do not rescore or relax gates based solely on historical ledger tokens.'};
+}
+
+// V1282: source-aware, read-only coverage trace. Distinguishes sampled live windows
+// from recorded auxiliary ranges; does not claim full-chain completeness.
+async function v4SourceRangeCoverageV1282(env) {
+  const base={version:'V1282',diagnostic:'V4_SOURCE_RANGE_COVERAGE',safe:true,kvReads:1,kvWrites:0,
+    externalRequestsUsed:0,scannerMutated:false,telegramMutated:false,scoringChanged:false};
+  let loaded;
+  try { loaded=await readState(env); } catch(e) { return {...base,status:'STATE_READ_FAILED',error:errorString(e).slice(0,160)}; }
+  if(loaded?.error) return {...base,status:'STATE_READ_ERROR',error:String(loaded.error).slice(0,160)};
+  const state=loaded?.state||{};
+  const history=Array.isArray(state.v4SYNTHSIngestionHistoryV1269)?state.v4SYNTHSIngestionHistoryV1269:[];
+  const actual=history.filter(h=>h?.productionAttributionV1271?.liveCollectionAttempted===true).slice(-24);
+  const samples=actual.map(h=>{
+    const t=h.productionAttributionV1271;
+    const ranges=Array.isArray(t.ranges)?t.ranges:[];
+    const recorded=ranges.filter(r=>Number.isSafeInteger(Number(r.fromBlock))&&Number(r.fromBlock)>0&&
+      Number.isSafeInteger(Number(r.toBlock))&&Number(r.toBlock)>=Number(r.fromBlock))
+      .map(r=>({from:Number(r.fromBlock),to:Number(r.toBlock),phase:String(r.phase||'UNSPECIFIED').slice(0,64),
+        provider:String(r.provider||'UNSPECIFIED').slice(0,64)}));
+    return {capturedAt:h.at||null,liveFrom:t.requestedLiveFrom??null,liveTo:t.requestedLiveTo??null,
+      liveSuccess:t.liveScanSuccess===true,processedThrough:t.processedThrough??null,
+      recordedRanges:recorded,rangeCountReported:Number(t.totalRanges||0),rangeListTruncated:t.rangesTruncated===true,
+      phaseCounts:t.phaseCounts||{},liveSkipped:t.qualificationFollowUpSkippedLiveCollection===true};
+  });
+  const intervals=samples.flatMap(s=>s.recordedRanges.map(r=>({from:r.from,to:r.to}))).sort((a,b)=>a.from-b.from||a.to-b.to);
+  const merged=[];
+  for(const r of intervals){const last=merged[merged.length-1];if(last&&r.from<=last.to+1)last.to=Math.max(last.to,r.to);
+    else merged.push({...r});}
+  const transitions=[];
+  for(let i=1;i<samples.length;i++){
+    const prev=samples[i-1],cur=samples[i];
+    const from=Number(prev.processedThrough)+1,to=Number(cur.liveFrom)-1;
+    if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||to<from)continue;
+    const overlaps=merged.filter(r=>r.from<=to&&r.to>=from);
+    let cursor=from,uncovered=0;
+    for(const r of overlaps){if(r.from>cursor)uncovered+=r.from-cursor;cursor=Math.max(cursor,r.to+1);if(cursor>to)break;}
+    if(cursor<=to)uncovered+=to-cursor+1;
+    transitions.push({previousAt:prev.capturedAt,currentAt:cur.capturedAt,betweenLiveWindowsBlocks:to-from+1,
+      blocksCoveredByRecordedRanges:to-from+1-uncovered,blocksWithoutRecordedRangeEvidence:uncovered,
+      classification:uncovered===0?'COVERED_BY_RETAINED_RANGE_EVIDENCE':'PARTIALLY_OR_NOT_COVERED_BY_RETAINED_RANGES'});
+  }
+  const phases={};for(const s of samples)for(const r of s.recordedRanges){phases[r.phase]=(phases[r.phase]||0)+1;}
+  const cap=ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179;
+  const ledgers=state.onChainDirectionalV179&&typeof state.onChainDirectionalV179==='object'?state.onChainDirectionalV179:{};
+  let capped=0;for(const ledger of Object.values(ledgers))if(Array.isArray(ledger?.records)&&ledger.records.length>=cap)capped++;
+  return {...base,status:'SOURCE_RANGE_EVIDENCE_AUDITED',actualRuns:samples.length,recordedRangeIntervals:intervals.length,
+    mergedRangeIntervals:merged.length,rangePhaseCounts:phases,rangeListsTruncated:samples.filter(s=>s.rangeListTruncated).length,
+    transitions,uncoveredTransitions:transitions.filter(t=>t.blocksWithoutRecordedRangeEvidence>0).length,
+    latestSample:samples.length?{...samples[samples.length-1],recordedRanges:samples[samples.length-1].recordedRanges.slice(0,8)}:null,
+    ledger:{tokenCount:Object.keys(ledgers).length,capPerToken:cap,tokensAtCap:capped},
+    coverage:'NOT_PROVEN',safeForFullWindowScoring:false,
+    interpretation:'Recorded ranges from bounded retained runs can explain some gaps between live windows. Missing recorded ranges do not prove blocks were never scanned; recorded requests alone do not certify complete, successful historical collection. No extra provider requests or writes.',
+    nextStep:'If gaps remain, inspect the production scheduler and recovery cursor before modifying storage or scoring.'};
 }
 
 // V1281: observational continuity/retention audit from already persisted state.
@@ -203923,7 +203977,7 @@ const WEB_DIAG_PROTECTED_PATHS_V1179 = new Set([
   "/health","/diagnostics","/diagnostics-read","/test-telegram",
   "/telegram-webhook-setup","/telegram-role-status","/telegram-webhook-status","/telegram-webhook-info",
   "/market-history","/market-history-status","/call-performance",
-  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/goldrush-market-test",
+  "/v4completeaudit","/v4manualflowaudit","/v4exactpool-parity","/v4flowwatch-handoff","/v4v179-ingestion-trace","/v4v179-run-trace","/v4liveoutput-coverage-trace","/v4v179-retention-trace","/v4v179-alltouched-retention","/v4synths-ingestion-history","/v4synths-range-parity","/v4synths-range-attribution","/v4directional-evidence","/v4directional-ledger-audit","/v4directional-score-handoff","/v4directional-scoring-coverage","/v4nine-timeframe-coverage","/v4collection-continuity","/v4source-range-coverage","/goldrush-market-test",
   "/v347-diagnostic","/v3usd-diagnostic","/v3ledger-diagnostic","/v3range-diagnostic",
   "/v3public-range-diagnostic","/v3blockscout-range-diagnostic","/v3blockscout-v2-diagnostic",
   "/v3websocket-diagnostic","/v3websocket-observe","/v3websocket-active-observe","/v3multipool-diagnostic","/v3aggregation-diagnostic",
@@ -205327,6 +205381,10 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         url.searchParams.get("token") || ""
       )
     );
+  }
+
+  if (path === "/v4source-range-coverage") {
+    return jsonResponse(await v4SourceRangeCoverageV1282(env));
   }
 
   if (path === "/v4collection-continuity") {
