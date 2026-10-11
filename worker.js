@@ -207242,7 +207242,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
           "referrer-policy":"no-referrer",
           "x-content-type-options":"nosniff"
         });
-        headersV1186.append("set-cookie",`${WEB_DIAG_BOOTSTRAP_COOKIE_V1186}=${encodeURIComponent(keyV1186)}; Path=/webdiag-access; HttpOnly; Secure; SameSite=Strict; Max-Age=${bootstrapMaxAgeV1186}`);
+        headersV1186.append("set-cookie",`${WEB_DIAG_BOOTSTRAP_COOKIE_V1186}=${encodeURIComponent(keyV1186)}; Path=/webdiag-access; HttpOnly; Secure; SameSite=Lax; Max-Age=${bootstrapMaxAgeV1186}`);
         return new Response(null,{status:303,headers:headersV1186});
       }
 
@@ -207295,7 +207295,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
       "x-content-type-options":"nosniff"
     });
     headersV1187.append("set-cookie",`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1179)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeV1179}`);
-    headersV1187.append("set-cookie",`${WEB_DIAG_BOOTSTRAP_COOKIE_V1186}=; Path=/webdiag-access; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
+    headersV1187.append("set-cookie",`${WEB_DIAG_BOOTSTRAP_COOKIE_V1186}=; Path=/webdiag-access; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
     return new Response(null,{status:303,headers:headersV1187});
   }
 
@@ -207321,7 +207321,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
         if (!grantV1188.ok) return webDiagDeniedResponseV1179({reason:"WEB_DIAGNOSTICS_LOGIN_REQUIRED_V1179"});
         const remainingSecV1188 = Math.max(1,Math.min(600,Math.floor((grantV1188.expiresAt-Date.now())/1000)));
         const headersV1188 = new Headers({"location":`/webdiag-open?next=${encodeURIComponent(requestedTargetV1188)}`,"cache-control":"no-store, max-age=0","pragma":"no-cache","referrer-policy":"no-referrer","x-content-type-options":"nosniff"});
-        headersV1188.append("set-cookie",`${WEB_DIAG_ROUTE_COOKIE_V1188}=${encodeURIComponent(grantSecretV1188)}; Path=/webdiag-open; HttpOnly; Secure; SameSite=Strict; Max-Age=${remainingSecV1188}`);
+        headersV1188.append("set-cookie",`${WEB_DIAG_ROUTE_COOKIE_V1188}=${encodeURIComponent(grantSecretV1188)}; Path=/webdiag-open; HttpOnly; Secure; SameSite=Lax; Max-Age=${remainingSecV1188}`);
         return new Response(null,{status:303,headers:headersV1188});
       }
       const cookieGrantV1188 = webDiagRouteCookieValueV1188(request);
@@ -207339,7 +207339,7 @@ p,li{font-size:17px;line-height:1.55;color:#d9e3e2}
     const maxAgeV1188 = Number(controlV1188.expiresAt||0)>0?Math.max(1,Math.floor((Number(controlV1188.expiresAt)-Date.now())/1000)):21600;
     const headersV1188 = new Headers({"location":requestedTargetV1188,"cache-control":"no-store, max-age=0","pragma":"no-cache","referrer-policy":"no-referrer","x-content-type-options":"nosniff"});
     headersV1188.append("set-cookie",`${WEB_DIAG_COOKIE_V1179}=${encodeURIComponent(sessionV1188)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeV1188}`);
-    headersV1188.append("set-cookie",`${WEB_DIAG_ROUTE_COOKIE_V1188}=; Path=/webdiag-open; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
+    headersV1188.append("set-cookie",`${WEB_DIAG_ROUTE_COOKIE_V1188}=; Path=/webdiag-open; HttpOnly; Secure; SameSite=Lax; Max-Age=0`);
     return new Response(null,{status:303,headers:headersV1188});
   }
 
